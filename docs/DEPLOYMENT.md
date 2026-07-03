@@ -130,7 +130,7 @@ See [Admin](ADMIN.md) for scripting examples.
 - The admin plane has **no built-in auth** in 0.1.0 — bind it to `127.0.0.1` and
   reach it via SSH / private network, or front it with your own auth.
 - The entire server hot path is memory-safe Rust; PHP is the single `unsafe`
-  frontier. seccomp/Landlock sandboxing of the PHP boundary is planned (PRD §11).
+  frontier. seccomp/Landlock sandboxing of the PHP boundary is planned.
 - Run as a non-root user (`User=www-data`) and keep `--max-body-size` sane for
   your app to bound request memory.
 
@@ -138,4 +138,4 @@ See [Admin](ADMIN.md) for scripting examples.
 
 `askr doctor` reports whether the kernel supports io_uring (≥ 5.1; 5.10+
 recommended). The current I/O layer is tokio/epoll; the per-core io_uring core
-(PRD §5.4) is the next architectural step and is Linux-only.
+is the next architectural step and is Linux-only.

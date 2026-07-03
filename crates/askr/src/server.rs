@@ -2,7 +2,7 @@
 //! dynamic requests to the embedded PHP interpreter.
 //!
 //! tokio/hyper here is the pragmatic A1 I/O layer. The share-nothing endgame
-//! swaps this for a per-core io_uring loop (PRD §5.4) behind the same seam:
+//! swaps this for a per-core io_uring loop behind the same seam:
 //! `Php::handle`.
 //!
 //! Recycling is graceful: after `recycle_after` requests we stop accepting new

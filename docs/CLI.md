@@ -73,7 +73,7 @@ askr doctor --ini "zend_extension=/path/opcache.so"$'\n'"opcache.enable=1"
 Checks:
 
 - embedded PHP version,
-- **non-ZTS** build (required — PRD §6.1),
+- **non-ZTS** build (required),
 - every Laravel-required extension is present,
 - on Linux, the kernel supports **io_uring** (≥ 5.1).
 

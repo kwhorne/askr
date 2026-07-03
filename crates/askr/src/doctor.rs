@@ -39,7 +39,7 @@ pub fn run(ini: Option<String>) -> bool {
         Ok(info) => {
             check(&mut ok, true, &format!("embedded PHP {}", info.version));
 
-            // non-ZTS is required (PRD §6.1).
+            // non-ZTS is required.
             check(
                 &mut ok,
                 !info.zts,
@@ -67,7 +67,7 @@ pub fn run(ini: Option<String>) -> bool {
         }
     }
 
-    // Platform / io_uring (prod is Linux; PRD §3.3).
+    // Platform / io_uring (prod is Linux).
     println!();
     platform_check();
 

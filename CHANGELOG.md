@@ -1,7 +1,6 @@
 # Changelog
 
-All notable changes to Askr. This is pre-1.0 exploratory work; milestones follow
-the roadmap in [`docs/PRD.md`](docs/PRD.md).
+All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## 0.1.0 — 2026-07-03
 

@@ -61,7 +61,6 @@ Everything lives in [`docs/`](docs/README.md):
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
 - [Admin dashboard](docs/ADMIN.md) — status/reload API and web UI
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
-- [PRD](docs/PRD.md) — product rationale and roadmap
 
 ## What works today (0.1.0)
 
@@ -90,7 +89,7 @@ Everything lives in [`docs/`](docs/README.md):
 | A6 — typed config + admin dashboard/API | ✅ |
 | **Next** — io_uring core (Linux), HTTP/3, `$_FILES`, response cache, OTel, seccomp/Landlock, `askr-laravel` package | ⏳ |
 
-The biggest remaining step is the per-core **io_uring** I/O core (PRD §5.4) and a
+The biggest remaining step is the per-core **io_uring** I/O core and a
 benchmark against FrankenPHP/FPM — both Linux-native work.
 
 ## Project layout

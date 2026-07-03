@@ -4,7 +4,7 @@
 //! that we can run PHP code and capture its output — with no FastCGI hop.
 //!
 //! The interpreter is non-ZTS (single interpreter per process/thread; memory is
-//! shared later via CoW fork, per PRD §6.1). This type is therefore **not**
+//! shared later via CoW fork). This type is therefore **not**
 //! `Send`/`Sync`: an [`Interpreter`] must live and die on the thread that
 //! created it. Later milestones pin one interpreter per core.
 

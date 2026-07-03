@@ -94,5 +94,5 @@ curl -fsS -X POST http://127.0.0.1:9000/api/reload
 
 A future desktop **control center** (Grove-style, Tauri) can manage a *fleet* of
 Askr servers through this same API. Request-level metrics (req/s, p99) and an
-OpenTelemetry/Prometheus export are planned (PRD §5.6); today the status is
+OpenTelemetry/Prometheus export are planned; today the status is
 supervisor-level.

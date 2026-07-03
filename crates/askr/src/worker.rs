@@ -5,7 +5,7 @@
 //! All workers `accept()` on the same socket; the kernel hands each incoming
 //! connection to exactly one of them. This is the classic prefork model — it
 //! distributes load on Linux *and* macOS, unlike SO_REUSEPORT whose balancing
-//! is Linux-only. This is the share-nothing seed (PRD §5.1): N independent
+//! is Linux-only. This is the share-nothing seed: N independent
 //! processes, no shared state, no locks on the hot path.
 
 use std::net::{SocketAddr, TcpListener as StdListener};

@@ -19,7 +19,6 @@ requests against it, eliminating per-request framework bootstrap.
 | [Admin dashboard](ADMIN.md) | The built-in status/reload API and web dashboard. |
 | [Deployment](DEPLOYMENT.md) | Production: systemd, TLS, zero-downtime reload, recycling, scaling, hardening. |
 | [Ubuntu quickstart](UBUNTU.md) | End-to-end build + run on Ubuntu. |
-| [PRD](PRD.md) | Product rationale and roadmap. |
 
 ## 60-second tour
 
@@ -53,7 +52,7 @@ ASKR_APP_BASE=/var/www/app ./target/release/askr serve \
 - Built-in **admin dashboard + API**
 - `askr doctor` pre-flight checks
 
-## Not yet (see [PRD](PRD.md) §12–14)
+## Not yet
 
 HTTP/3 (QUIC), the per-core **io_uring** I/O core (the biggest efficiency step,
 Linux), multipart `$_FILES`, response cache, OpenTelemetry, seccomp/Landlock

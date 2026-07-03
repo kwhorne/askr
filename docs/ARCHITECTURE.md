@@ -28,7 +28,7 @@ share-nothing model — scaled by **processes**, for the reason below.
 ## Why processes, not threads
 
 Askr runs a **non-ZTS** (non-thread-safe) build of PHP. This is a deliberate
-choice (see [PRD](PRD.md) §6.1): the ZTS/TSRM machinery has a persistent runtime
+choice: the ZTS/TSRM machinery has a persistent runtime
 cost and is a source of complexity, and the memory sharing it exists to provide
 we get from the OS for free.
 
@@ -54,7 +54,7 @@ the one thread that created it.
 
 All `unsafe` is confined to this FFI boundary; the rest of the server is safe
 Rust. PHP is the single `unsafe` frontier (and the target for future
-seccomp/Landlock sandboxing, PRD §11).
+seccomp/Landlock sandboxing).
 
 ## Two serving modes
 
@@ -100,7 +100,7 @@ cross-core concurrency comes from having many worker processes.
 
 The seam between the I/O layer and PHP is `Php::handle`. The tokio/hyper I/O
 layer is pragmatic; the share-nothing endgame swaps it for a per-core
-**io_uring** loop behind this same seam (PRD §5.4) — the biggest remaining
+**io_uring** loop behind this same seam — the biggest remaining
 efficiency step, and Linux-only.
 
 ## The master (supervisor)

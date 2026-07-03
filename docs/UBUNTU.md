@@ -112,7 +112,7 @@ sudo systemctl reload askr   # graceful rolling reload (SIGHUP)
 ## Notes
 
 - **io_uring:** the current I/O layer is tokio/epoll. The per-core io_uring core
-  (PRD §5.4) is the next architectural step and is Linux-only — this is where the
+  is the next architectural step and is Linux-only — this is where the
   biggest efficiency gains land. `askr doctor` reports whether the kernel
   supports it (≥ 5.1; 5.10+ recommended).
 - **PHP version:** override with `PHP_VERSION=8.4.x ./scripts/build-libphp.sh`.
