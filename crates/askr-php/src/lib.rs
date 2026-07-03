@@ -16,6 +16,26 @@ extern "C" {
     fn askr_php_shutdown();
     fn askr_php_eval(code: *const c_char, out: *mut *mut c_char, out_len: *mut usize) -> c_int;
     fn askr_php_free(p: *mut c_char);
+
+    #[allow(clippy::too_many_arguments)]
+    fn askr_php_handle(
+        script_filename: *const c_char,
+        method: *const c_char,
+        query_string: *const c_char,
+        content_type: *const c_char,
+        content_length: usize,
+        body: *const c_char,
+        body_len: usize,
+        var_names: *const *const c_char,
+        var_values: *const *const c_char,
+        nvars: c_int,
+        cookie: *const c_char,
+        out_body: *mut *mut c_char,
+        out_body_len: *mut usize,
+        out_headers: *mut *mut c_char,
+        out_headers_len: *mut usize,
+        out_status: *mut c_int,
+    ) -> c_int;
 }
 
 /// An in-process PHP interpreter. Boot once, evaluate many times, drop to shut
@@ -47,6 +67,8 @@ pub enum Error {
     Startup(i32),
     /// The code contained an interior NUL byte.
     NulByte,
+    /// `php_request_startup` failed for a request.
+    RequestStartup,
 }
 
 impl std::fmt::Display for Error {
@@ -54,6 +76,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Startup(c) => write!(f, "php_embed_init failed (code {c})"),
             Error::NulByte => write!(f, "PHP code contained an interior NUL byte"),
+            Error::RequestStartup => write!(f, "php_request_startup failed"),
         }
     }
 }
@@ -107,6 +130,138 @@ impl Interpreter {
     }
 }
 
+impl Interpreter {
+    /// Execute a real PHP script file as a web request: sets `$_SERVER`, feeds
+    /// the body to `php://input`, runs the front controller, and captures the
+    /// HTTP status, headers and body. This is the full contract grove's
+    /// `serve_php()` needs — the in-process replacement for a FastCGI round-trip.
+    pub fn handle(&mut self, req: &Request) -> Result<Response, Error> {
+        // Own every C string for the duration of the call.
+        let script = cstring(&req.script_filename)?;
+        let method = cstring(&req.method)?;
+        let query = cstring(&req.query_string)?;
+        let content_type = opt_cstring(req.content_type.as_deref())?;
+        let cookie = opt_cstring(req.cookie.as_deref())?;
+
+        let mut names: Vec<CString> = Vec::with_capacity(req.server_vars.len());
+        let mut values: Vec<CString> = Vec::with_capacity(req.server_vars.len());
+        for (k, v) in &req.server_vars {
+            names.push(cstring(k)?);
+            values.push(cstring(v)?);
+        }
+        let name_ptrs: Vec<*const c_char> = names.iter().map(|c| c.as_ptr()).collect();
+        let value_ptrs: Vec<*const c_char> = values.iter().map(|c| c.as_ptr()).collect();
+
+        let mut out_body: *mut c_char = std::ptr::null_mut();
+        let mut out_body_len: usize = 0;
+        let mut out_headers: *mut c_char = std::ptr::null_mut();
+        let mut out_headers_len: usize = 0;
+        let mut status: c_int = 0;
+
+        // SAFETY: all pointers outlive the call; output buffers are copied then
+        // freed via askr_php_free.
+        let rc = unsafe {
+            askr_php_handle(
+                script.as_ptr(),
+                method.as_ptr(),
+                query.as_ptr(),
+                content_type.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+                req.body.len(),
+                req.body.as_ptr() as *const c_char,
+                req.body.len(),
+                name_ptrs.as_ptr(),
+                value_ptrs.as_ptr(),
+                names.len() as c_int,
+                cookie.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+                &mut out_body,
+                &mut out_body_len,
+                &mut out_headers,
+                &mut out_headers_len,
+                &mut status,
+            )
+        };
+
+        if rc < 0 {
+            return Err(Error::RequestStartup);
+        }
+
+        let body = take_bytes(out_body, out_body_len);
+        let headers_raw = take_bytes(out_headers, out_headers_len);
+        let headers = parse_headers(&headers_raw);
+
+        Ok(Response {
+            status: status as u16,
+            headers,
+            body,
+            php_status: rc as i32,
+        })
+    }
+}
+
+/// A web request handed to the embedded interpreter.
+#[derive(Debug, Default, Clone)]
+pub struct Request {
+    /// Absolute path to the PHP script to execute (the front controller).
+    pub script_filename: String,
+    /// HTTP method (`GET`, `POST`, …).
+    pub method: String,
+    /// Raw query string (without the leading `?`).
+    pub query_string: String,
+    /// `Content-Type` of the request body, if any.
+    pub content_type: Option<String>,
+    /// Raw `Cookie` header, if any.
+    pub cookie: Option<String>,
+    /// Raw request body (available to PHP via `php://input`).
+    pub body: Vec<u8>,
+    /// The full `$_SERVER` map (CGI-style: REQUEST_METHOD, REQUEST_URI,
+    /// SCRIPT_NAME, HTTP_* headers, DOCUMENT_ROOT, HTTPS, …).
+    pub server_vars: Vec<(String, String)>,
+}
+
+/// The HTTP response produced by the embedded interpreter.
+#[derive(Debug)]
+pub struct Response {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers, in order.
+    pub headers: Vec<(String, String)>,
+    /// Response body.
+    pub body: Vec<u8>,
+    /// Shim status: 0 ok, 1 script fatal, 2 engine bailout.
+    pub php_status: i32,
+}
+
+fn cstring(s: &str) -> Result<CString, Error> {
+    CString::new(s).map_err(|_| Error::NulByte)
+}
+
+fn opt_cstring(s: Option<&str>) -> Result<Option<CString>, Error> {
+    match s {
+        Some(s) => Ok(Some(cstring(s)?)),
+        None => Ok(None),
+    }
+}
+
+fn take_bytes(ptr: *mut c_char, len: usize) -> Vec<u8> {
+    if ptr.is_null() {
+        return Vec::new();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }.to_vec();
+    unsafe { askr_php_free(ptr) };
+    bytes
+}
+
+fn parse_headers(raw: &[u8]) -> Vec<(String, String)> {
+    String::from_utf8_lossy(raw)
+        .split("\r\n")
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
 impl Drop for Interpreter {
     fn drop(&mut self) {
         // SAFETY: matches a successful startup on this thread.
@@ -152,5 +307,73 @@ mod tests {
             .eval(r#"$_SERVER["ASKR"] = "yes"; echo $_SERVER["ASKR"];"#)
             .unwrap();
         assert_eq!(srv.output, "yes");
+
+        // 5. Full request contract: a real script file, $_SERVER injected,
+        //    body via php://input, headers + status captured.
+        let script = std::env::temp_dir().join("askr_front.php");
+        std::fs::write(
+            &script,
+            r#"<?php
+                header('X-Askr: hit');
+                setcookie('sess', 'abc');
+                http_response_code(201);
+                $in = file_get_contents('php://input');
+                echo json_encode([
+                    'method' => $_SERVER['REQUEST_METHOD'],
+                    'uri'    => $_SERVER['REQUEST_URI'],
+                    'q'      => $_SERVER['QUERY_STRING'],
+                    'custom' => $_SERVER['HTTP_X_CUSTOM'] ?? null,
+                    'ct'     => $_SERVER['CONTENT_TYPE'] ?? null,
+                    'body'   => $in,
+                ]);
+            "#,
+        )
+        .unwrap();
+
+        let script_path = script.to_string_lossy().into_owned();
+        let req = Request {
+            script_filename: script_path.clone(),
+            method: "POST".into(),
+            query_string: "a=1&b=2".into(),
+            content_type: Some("application/json".into()),
+            cookie: None,
+            body: br#"{"hi":1}"#.to_vec(),
+            server_vars: vec![
+                ("REQUEST_METHOD".into(), "POST".into()),
+                ("REQUEST_URI".into(), "/api?a=1&b=2".into()),
+                ("QUERY_STRING".into(), "a=1&b=2".into()),
+                ("SCRIPT_NAME".into(), "/index.php".into()),
+                ("SCRIPT_FILENAME".into(), script_path.clone()),
+                ("SERVER_PROTOCOL".into(), "HTTP/1.1".into()),
+                ("CONTENT_TYPE".into(), "application/json".into()),
+                ("CONTENT_LENGTH".into(), "8".into()),
+                ("HTTP_X_CUSTOM".into(), "abc".into()),
+            ],
+        };
+
+        let resp = php.handle(&req).unwrap();
+        assert_eq!(resp.status, 201, "resp: {resp:?}");
+        assert!(
+            resp.headers.iter().any(|(k, v)| k == "X-Askr" && v == "hit"),
+            "headers: {:?}",
+            resp.headers
+        );
+        // setcookie() must reach us as a Set-Cookie header.
+        assert!(
+            resp.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("Set-Cookie")),
+            "headers: {:?}",
+            resp.headers
+        );
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&resp.body).expect("json body");
+        assert_eq!(body["method"], "POST");
+        assert_eq!(body["uri"], "/api?a=1&b=2");
+        assert_eq!(body["q"], "a=1&b=2");
+        assert_eq!(body["custom"], "abc");
+        assert_eq!(body["ct"], "application/json");
+        assert_eq!(body["body"], r#"{"hi":1}"#);
+
+        let _ = std::fs::remove_file(&script);
     }
 }
