@@ -22,6 +22,7 @@ use tokio::net::TcpListener;
 use crate::cgi;
 use crate::php::Php;
 
+#[derive(Clone)]
 pub struct Config {
     pub docroot: PathBuf,
     pub front_controller: PathBuf, // relative, e.g. index.php
@@ -29,15 +30,8 @@ pub struct Config {
     pub https: bool,
 }
 
-pub async fn run(config: Config, php: Php) -> anyhow::Result<()> {
-    let config = Arc::new(config);
-    let listener = TcpListener::bind(config.listen).await?;
-    tracing::info!(
-        listen = %config.listen,
-        docroot = %config.docroot.display(),
-        "askr serving"
-    );
-
+/// Serve on an already-bound listener (built with SO_REUSEPORT by the worker).
+pub async fn run(listener: TcpListener, config: Arc<Config>, php: Php) -> anyhow::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let io = TokioIo::new(stream);

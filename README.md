@@ -133,24 +133,40 @@ own interpreter and a CoW-shared heap.
 | Step | Goal | Status |
 | --- | --- | --- |
 | **A1** | `askr serve` runs a real app over HTTP (one process/interpreter) | ✅ |
-| A2 | Prod-grade static serving + `$_SERVER`/body/header mapping | in progress |
-| A3 | Multi-core: `SO_REUSEPORT` + fork one worker per core | |
+| **A3** | Multi-core: fork one worker process per core, shared listener | ✅ |
+| A2 | Prod-grade static serving + `$_SERVER`/body/header mapping | next |
 | A4 | Warm master + CoW fork → zero per-request bootstrap | |
 | A5 | TLS (rustls), HTTP/2 & /3, graceful reload, `askr doctor` | |
 
 ```
-askr serve --root ./public --listen 0.0.0.0:8000 [--https] [--front index.php]
+askr serve --root ./public --listen 0.0.0.0:8000 --workers 8 [--https]
 ```
 
-tokio/hyper is the pragmatic A1 I/O layer; the share-nothing endgame swaps it
-for a per-core io_uring loop behind the same seam (`Php::handle`).
+**Scaling model.** non-ZTS ⇒ one interpreter per process, so Askr scales by
+*processes*, not threads. The master binds one listening socket and forks N
+workers that all `accept()` on the inherited fd (classic prefork). This
+distributes load on Linux *and* macOS — unlike `SO_REUSEPORT`, whose kernel
+balancing is Linux-only. Measured on a heavy Livewire app (client-bound
+load-gen on the same box):
+
+| workers | req/s | speedup |
+| --- | --- | --- |
+| 1 | 8.8 | 1.0× |
+| 4 | 23.3 | 2.6× |
+| 8 | 37.0 | 4.2× |
+
+tokio/hyper is the pragmatic I/O layer; the share-nothing endgame swaps it for a
+per-core io_uring loop behind the same seam (`Php::handle`). A4 adds the big win:
+a warm master boots Laravel once and CoW-forks workers, eliminating the
+~110 ms per-request framework bootstrap entirely.
 
 ## Layout
 
 ```
 crates/
-  askr/              the standalone server binary (A1)
-    src/main.rs      CLI (`askr serve`)
+  askr/              the standalone server binary (A1 + A3)
+    src/main.rs      CLI + fork-per-core supervisor (signal forwarding, reaping)
+    src/worker.rs    one worker: shared listener + runtime + interpreter
     src/php.rs       interpreter pinned to a dedicated thread (non-ZTS)
     src/cgi.rs       HTTP request -> CGI $_SERVER mapping
     src/server.rs    hyper front: static files + dispatch to PHP
