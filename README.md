@@ -106,6 +106,13 @@ examples/
 docs/              full documentation
 ```
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to
+build (you need an embed `libphp` first) and the checks CI runs. Please follow
+the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues privately
+per the [Security Policy](SECURITY.md) — not in public issues.
+
 ## License
 
 MIT © Wirelabs AS — see [LICENSE](LICENSE).

@@ -1,0 +1,58 @@
+name: Bug report
+description: Report something that isn't working
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for filing a bug! Please run `askr doctor` and include the output.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. askr serve ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Askr version
+      description: Output of `askr --version`
+    validations:
+      required: true
+  - type: input
+    id: php
+    attributes:
+      label: PHP version
+      description: The embedded PHP version (from `askr doctor`)
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: mode
+    attributes:
+      label: How are you running it?
+      description: Flags or the relevant `askr.toml` (per-request vs worker mode, workers, TLS, …).
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / doctor output
+      description: Output of `askr doctor` and any relevant server logs.
+      render: shell
