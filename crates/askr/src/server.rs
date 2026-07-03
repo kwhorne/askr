@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -41,6 +41,7 @@ pub struct Config {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub tls_self_signed: bool,
+    pub max_body_size: usize,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -154,9 +155,26 @@ async fn handle(
     let script_name = format!("/{}", config.front_controller.display());
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
+
+    // Enforce a maximum request body size (protect against memory exhaustion).
+    // Reject early on a declared Content-Length, and cap the actual read so a
+    // chunked body can't exceed it either.
+    let max = config.max_body_size;
+    if let Some(len) = parts
+        .headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if len > max {
+            return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "askr: request body too large"));
+        }
+    }
+    let body_bytes = match Limited::new(body, max).collect().await {
         Ok(c) => c.to_bytes().to_vec(),
-        Err(_) => Vec::new(),
+        Err(_) => {
+            return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "askr: request body too large"));
+        }
     };
 
     let request = cgi::build_request(

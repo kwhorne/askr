@@ -145,8 +145,8 @@ own interpreter and a CoW-shared heap.
 | **A5b** | Octane-style per-request state reset (no bleed between requests) | ✅ |
 | **A5c** | TLS (rustls) + HTTP/2 (ALPN) + `askr doctor` pre-flight | ✅ |
 | **A5d** | Graceful rolling reload (SIGHUP) + `--tls-self-signed` | ✅ |
-| A5e | HTTP/3 (QUIC), `askr-laravel` package, io_uring core (Linux) | next |
-| A2 | Prod-grade static serving + `$_SERVER`/body/header edge cases | |
+| **A2** | Request edge cases: body-size limit (413), HEAD, GET/POST verified | ✅ |
+| A5e | HTTP/3 (QUIC), `askr-laravel` package, io_uring core (Linux), `$_FILES` | next |
 
 ```
 askr serve --root ./public --listen 0.0.0.0:8000 --workers 8 [--https]
@@ -286,6 +286,13 @@ for local dev/testing, so you don't need to mint one:
 askr serve --root ./public --worker-script examples/laravel-worker.php \
   --tls-self-signed
 ```
+
+**Request hardening (A2).** `--max-body-size` (default `16M`, accepts `512K` /
+`16M` / `2G`) caps request bodies — an oversized request gets `413`, rejected
+early on a declared `Content-Length` and also capped for chunked bodies (no
+`Content-Length`), so neither can exhaust memory. `HEAD` returns headers +
+`Content-Length` with no body; `GET`/`POST` (form and JSON, with query strings
+and cookies) are verified end-to-end. Multipart uploads (`$_FILES`) are next.
 
 ## Layout
 

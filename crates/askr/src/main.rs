@@ -81,6 +81,11 @@ enum Command {
         /// Generate a self-signed cert on startup (dev/testing; browsers warn).
         #[arg(long, conflicts_with = "tls_cert")]
         tls_self_signed: bool,
+
+        /// Maximum request body size (e.g. 16M, 512K, 2G). Larger requests get
+        /// a 413. Protects against memory exhaustion.
+        #[arg(long, default_value = "16M")]
+        max_body_size: String,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -113,7 +118,9 @@ fn main() -> anyhow::Result<()> {
             tls_cert,
             tls_key,
             tls_self_signed,
+            max_body_size,
         } => {
+            let max_body_size = parse_size(&max_body_size)?;
             let docroot = resolve_root(root)?;
             let script = docroot.join(&front);
             if !script.is_file() {
@@ -145,6 +152,7 @@ fn main() -> anyhow::Result<()> {
                 tls_cert,
                 tls_key,
                 tls_self_signed,
+                max_body_size,
             };
 
             let workers = workers.unwrap_or_else(default_workers).max(1);
@@ -331,6 +339,22 @@ fn install_signals() {
         libc::signal(libc::SIGTERM, on_terminate as *const () as libc::sighandler_t);
         libc::signal(libc::SIGHUP, on_reload as *const () as libc::sighandler_t);
     }
+}
+
+/// Parse a size like `16M`, `512K`, `2G`, or a plain byte count.
+fn parse_size(s: &str) -> anyhow::Result<usize> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('K') | Some('k') => (&s[..s.len() - 1], 1024),
+        Some('M') | Some('m') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('G') | Some('g') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1),
+    };
+    let n: usize = num
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid size: {s:?} (use e.g. 16M, 512K, 2G)"))?;
+    Ok(n * mult)
 }
 
 fn resolve_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
