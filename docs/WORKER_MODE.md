@@ -1,0 +1,134 @@
+# Worker mode
+
+Worker mode is where Askr wins big. Instead of running the front controller from
+scratch on every request (per-request mode, like PHP-FPM), a long-lived **worker
+script** boots the application **once** and then loops, serving every request
+against the already-booted app — the Laravel Octane model, but entirely
+in-process (no IPC).
+
+On a real Laravel + Livewire app this drops per-request latency from ~110 ms to
+~9 ms and roughly **9×**'s throughput.
+
+## How it works
+
+The embed shim registers one PHP function:
+
+```php
+bool askr_handle_request(callable $handler)
+```
+
+Each call **blocks** until Askr delivers the next request, invokes
+`$handler($request)` against the warm app, ships the captured output / headers /
+status back to Rust, and returns `true` (or `false` when the worker is being
+shut down). The worker is simply:
+
+```php
+$app = /* boot the framework once */;
+
+while (askr_handle_request(function (array $request) use ($app) {
+    // handle $request against the warm $app
+    // echo body; header(...); http_response_code(...);
+})) {
+    // one request per iteration
+}
+```
+
+The `$request` array Askr passes the handler:
+
+| Key | Value |
+| --- | --- |
+| `method` | HTTP method (`GET`, `POST`, …) |
+| `uri` | request URI incl. query string |
+| `query` | raw query string |
+| `headers` | the full CGI `$_SERVER` map (REQUEST_METHOD, HTTP_*, HTTPS, CONTENT_TYPE, …) |
+| `body` | raw request body |
+
+The handler produces its response the normal PHP way — `echo`/`print` for the
+body, `header()` for headers, `http_response_code()` for the status — all
+captured by the shim. Nothing is written to a socket by PHP.
+
+## The Laravel worker
+
+[`examples/laravel-worker.php`](../examples/laravel-worker.php) is a ready
+template (the future `askr-laravel` package will generate and maintain it). It:
+
+1. `require`s the autoloader and boots `bootstrap/app.php` **once**;
+2. per request, builds a fresh `Illuminate\Http\Request` via `Request::create()`
+   from the data Askr passes — no fragile PHP-superglobal surgery;
+3. runs `$kernel->handle($request)`, emits the response via `header()`/`echo`,
+   and `$kernel->terminate(...)`;
+4. **resets per-request state** (below).
+
+Point Askr at it and set the app base:
+
+```bash
+ASKR_APP_BASE=/var/www/app askr serve \
+  --root /var/www/app/public \
+  --worker-script /opt/askr/examples/laravel-worker.php \
+  --workers "$(nproc)"
+```
+
+or in `askr.toml`:
+
+```toml
+[worker]
+script = "/opt/askr/examples/laravel-worker.php"
+app_base = "/var/www/app"
+```
+
+## State reset — no bleed between requests
+
+A long-lived worker must not leak state across requests. `askr_reset_state()` in
+the template performs an Octane-style reset after each request:
+
+- `forgetScopedInstances()` — scoped bindings (and anything `scoped()`),
+- forget the resolved `request`,
+- `auth` → `forgetGuards()` so a prior request's user can't leak,
+- roll back any DB transaction a request left open,
+- flush `Str` caches.
+
+This is verified with a deliberate bleed probe: a `scoped()` binding returns the
+**same** id on every request *without* the reset (bleed) and a **distinct** id
+*with* it (isolated). Under load: 500/500 requests `200`, worker RSS flat
+(~64→66 MB over 600 requests — no accumulation), zero errors.
+
+> The full, framework-version-aware reset (covering every flow: sessions, auth,
+> config sandboxing, …) will live in the `askr-laravel` package. The template
+> covers the common sources of bleed; audit your app's own static/singleton
+> state.
+
+## Recycling
+
+Long-lived workers can still drift or leak over time (in app code or extensions).
+Recycle them periodically with `--max-requests N` (or `[server] max_requests`):
+each worker gracefully drains and exits after N requests and the master respawns
+a fresh one. See [Deployment](DEPLOYMENT.md).
+
+## Writing your own worker
+
+Any framework works — implement the same loop:
+
+```php
+<?php
+$app = boot_my_framework();
+
+while (askr_handle_request(function (array $r) use ($app) {
+    $response = $app->handle($r['method'], $r['uri'], $r['headers'], $r['body']);
+    http_response_code($response->status);
+    foreach ($response->headers as $name => $value) {
+        header("$name: $value", false);
+    }
+    echo $response->body;
+    // reset per-request state here
+})) {}
+```
+
+Guidelines:
+
+- Boot everything expensive **before** the loop.
+- Build request objects from the passed array — don't rely on PHP superglobals
+  being refreshed.
+- Reset per-request/scoped state at the end of each iteration.
+- Avoid mutating global/static state that should be per-request.
+- `STDIN`/`STDOUT`/`STDERR` constants are **not** defined (this is the embed
+  SAPI, not CLI) — don't `fwrite(STDERR, …)`.

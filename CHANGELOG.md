@@ -3,7 +3,12 @@
 All notable changes to Askr. This is pre-1.0 exploratory work; milestones follow
 the roadmap in [`docs/PRD.md`](docs/PRD.md).
 
-## Unreleased
+## 0.1.0 — 2026-07-03
+
+First tagged release. A complete, deployable PHP application server: embedded
+non-ZTS PHP running real Laravel 12 in worker mode (~9× the FPM model),
+multi-core, TLS + HTTP/2, graceful recycling and zero-downtime reload, a typed
+config and an admin dashboard. See [`docs/`](docs/README.md).
 
 ### Server (`askr`)
 - **A1** — standalone `askr serve`: serves a real app over HTTP through the

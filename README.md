@@ -1,369 +1,112 @@
 # Askr
 
 [![CI](https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg)](https://github.com/kwhorne/askr/actions/workflows/ci.yml)
+&nbsp;·&nbsp; **v0.1.0** &nbsp;·&nbsp; MIT
 
-**A share-nothing, thread-per-core PHP application server, in Rust.**
+**A standalone, memory-safe PHP application server, in Rust.**
 
-Askr embeds the PHP interpreter in-process (no FastCGI, no FPM pool), serves it
-from a memory-safe Rust hot path, and is designed to reach zero per-request
-bootstrap via a warm master + copy-on-write fork. It is the server engine behind
-[`grove`](https://github.com/wirelabs/grove) — `grove serve` is just Askr in a
-dev profile.
+Askr embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
+memory-safe Rust hot path, and — in worker mode — boots your app **once** and
+serves many requests against it, eliminating per-request framework bootstrap. It
+is a complete single binary: TLS, HTTP/2, static files, worker supervision and an
+admin dashboard, with no proxy required in front.
 
-See [`docs/PRD.md`](docs/PRD.md) for the full product rationale.
-
-> Status: **M0 — spike (done ✅).** The core assumption holds: real Laravel 12
-> renders in-process, no FastCGI.
-
----
+It's the server engine behind the [`grove`](https://github.com/wirelabs/grove)
+ecosystem; Grove stays the local dev tool, Askr is the production server.
 
 ## Headline result
 
-A standalone `askr serve` binary serving a real Laravel 12 + Livewire app over
-HTTP — **HTTP 200**, encrypted cookies, session, CSRF, Blade, Livewire — with
-the PHP running entirely in-process. No FastCGI, no FPM, no nginx.
+Real **Laravel 12 + Livewire**, served entirely in-process:
 
-```
-$ askr serve --root ~/code/app/public --listen 127.0.0.1:8000
- INFO askr::php: embedded PHP ready version=8.4.11
- INFO askr::server: askr serving listen=127.0.0.1:8000 docroot=.../public
-
-$ curl -sI http://127.0.0.1:8000/
-HTTP/1.1 200 OK
-x-powered-by: PHP/8.4.11
-set-cookie: XSRF-TOKEN=...; secure; samesite=lax
-set-cookie: laravel_session=...; secure; httponly; samesite=lax
-```
-
-In **worker mode** the app boots once and every request reuses it — real
-Laravel 12 per-request latency drops from ~110 ms to **~9 ms**, and throughput on
-8 workers goes from 37 to **347 req/s (9.4×)**, verified correct under load. See
-[Worker mode](#askr--the-standalone-server-a1-) below.
-
-Raw per-request overhead of the embedding layer is negligible — a trivial
-`index.php` runs at **~56,000 req/s on a single core / single interpreter**
-(~0.02 ms/req warm). A full Laravel request is ~110 ms, and that cost is
-*entirely Laravel's per-request bootstrap* — precisely what the M2 warm-master +
-CoW-fork model exists to eliminate. The bench makes the thesis concrete.
-
-```
-cargo run --release -p askr-php --example bench -- <public_dir> [n] [uri]
-```
-
----
-
-## M0 — the embedding spike (done ✅)
-
-The entire project hinges on one question: *can we run PHP in-process from Rust,
-cheaply, and capture its output?* The answer is yes.
-
-`crates/askr-php` boots PHP's **embed SAPI** via FFI, evaluates PHP, and captures
-everything the script writes back into a Rust `String` — the exact seam that today
-costs grove a FastCGI round-trip (`grove-proxy::serve_php`).
-
-```
-$ cargo run -p askr-php --example hello
-embedded PHP version: 8.4.11
-hello from PHP 8.4.11
-{
-    "stack": "TALL",
-    "server": "askr",
-    "n": 55
-}
-[ok=true status=0]
-```
-
-Key properties validated by the spike:
-
-- **In-process, no FastCGI.** The Zend engine runs inside the Rust process.
-- **non-ZTS** (`thread safety ... no`) — one interpreter per thread; memory is to
-  be shared later via CoW fork, not ZTS/TSRM (PRD §6.1).
-- **Full request contract**, not just eval: `$_SERVER` injection, request body
-  via `php://input`, and captured HTTP **status + headers + body** — the exact
-  seam grove's `serve_php()` pays a FastCGI round-trip for today.
-- **Real frameworks run:** Laravel 12 + Livewire boots, routes, runs the
-  middleware pipeline (encryption/session/CSRF), compiles Blade and renders.
-- **Memory-safe boundary:** all `unsafe` is confined to the thin FFI in
-  `askr-php`; the C shim (`csrc/shim.c`) is the only C we own.
-
-### The extension matrix (PRD §6.5), discovered empirically
-
-Booting a real app surfaced exactly which extensions Laravel needs, in order —
-each one built from source as a **static lib**, fully self-contained (no brew,
-no pkg-config):
-
-| Blocker hit | Extension | How it's satisfied |
+| | per-request (the FPM model) | **worker mode (boot once)** |
 | --- | --- | --- |
-| `mb_split()` undefined | mbstring (mbregex) | oniguruma, static |
-| `openssl_cipher_iv_length()` | openssl | OpenSSL 3.3, static |
-| `Class "DOMDocument" not found` | dom/xml | libxml2 2.13, static (SDK's is too old) |
-| + pdo_sqlite, tokenizer, session, bcmath, … | bundled | `--enable-*` |
+| latency / request | ~110 ms | **~9 ms** |
+| throughput (8 workers) | 37 req/s | **347 req/s** |
 
-### Reproduce from scratch
+**~9×**, verified correct under load (300/300 `200`, each worker booted exactly
+once, zero state bleed). Raw embedding overhead is ~0.02 ms/request
+(~56k req/s single-core for a trivial script) — the framework bootstrap is the
+cost, and worker mode removes it.
 
-Requirements: Rust and a C toolchain. **On Ubuntu see [docs/UBUNTU.md](docs/UBUNTU.md)**
-for the full build + deploy (systemd) guide — it uses system dev libraries via
-`pkg-config` and produces `libphp.so`. On macOS the script builds the
-dependencies (oniguruma/OpenSSL/libxml2) from source as static libs (no brew, no
-pkg-config); release tarballs ship a ready `configure`.
+## Quick start
 
 ```bash
-# 1a. Minimal libphp (core only, ~15s) — enough for the hello/test spike
-./scripts/build-libphp.sh
+# Ubuntu: install PHP build deps (see docs/BUILDING.md for macOS)
+sudo apt-get install -y build-essential pkg-config curl git \
+  libssl-dev libxml2-dev libonig-dev libsqlite3-dev
 
-# 1b. …or the full Laravel profile
-#     Ubuntu: sudo apt-get install -y build-essential pkg-config \
-#               libssl-dev libxml2-dev libonig-dev libsqlite3-dev
-PROFILE=laravel ./scripts/build-libphp.sh
+git clone git@github.com:kwhorne/askr.git && cd askr
 
-# 2. Build + run
-cargo run -p askr-php --example hello        # hello world in-process
-cargo test  -p askr-php                       # eval + full request contract
-cargo run   -p askr-php --example exts        # list loaded extensions
-cargo run   -p askr-php --example serve -- <public_dir> /   # serve a real app
+PROFILE=laravel ./scripts/build-libphp.sh   # build a non-ZTS embed libphp
+cargo build --release                        # build the askr binary
 
-# opcache (a zend_extension) is loaded via $ASKR_PHP_INI, e.g.:
-export ASKR_PHP_INI=$'zend_extension=/abs/path/opcache.so\nopcache.enable=1\nopcache.enable_cli=1'
+./target/release/askr doctor                 # pre-flight checks
+
+ASKR_APP_BASE=/var/www/app ./target/release/askr serve \
+  --root /var/www/app/public \
+  --worker-script examples/laravel-worker.php \
+  --workers "$(nproc)" --tls-self-signed --admin 127.0.0.1:9000
 ```
 
-To point at a different PHP install, set `ASKR_PHP_CONFIG=/path/to/php-config`
-(the install must be built with `--enable-embed` and non-ZTS).
+Full walkthrough: [docs/UBUNTU.md](docs/UBUNTU.md).
 
----
+## Documentation
 
-## Askr — the standalone server (A1 ✅)
+Everything lives in [`docs/`](docs/README.md):
 
-Askr is a **standalone production PHP application server**, not a dev tool
-(that's [`grove`](https://github.com/wirelabs/grove), which stays separate). The
-ambition: the smartest, most efficient way to run PHP at scale.
+- [Architecture](docs/ARCHITECTURE.md) — how it works, and why processes not threads
+- [Building](docs/BUILDING.md) — `libphp` + `askr`, the extension matrix
+- [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
+- [CLI reference](docs/CLI.md) — every command and flag
+- [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
+- [Admin dashboard](docs/ADMIN.md) — status/reload API and web UI
+- [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
+- [PRD](docs/PRD.md) — product rationale and roadmap
 
-Because the interpreter is non-ZTS, one process = one interpreter. Scaling
-across cores is therefore **process-per-core (fork)**, not threads — which *is*
-the share-nothing model: a warm master forks one worker per core, each with its
-own interpreter and a CoW-shared heap.
+## What works today (0.1.0)
 
-| Step | Goal | Status |
-| --- | --- | --- |
-| **A1** | `askr serve` runs a real app over HTTP (one process/interpreter) | ✅ |
-| **A3** | Multi-core: fork one worker process per core, shared listener | ✅ |
-| **A4a** | Persistent worker loop: boot the app once, serve many (in-process) | ✅ |
-| **A4b** | Real Laravel 12 through the worker loop — zero per-request bootstrap | ✅ |
-| **A5a** | Worker recycling (`--max-requests`) with graceful drain + auto-respawn | ✅ |
-| **A5b** | Octane-style per-request state reset (no bleed between requests) | ✅ |
-| **A5c** | TLS (rustls) + HTTP/2 (ALPN) + `askr doctor` pre-flight | ✅ |
-| **A5d** | Graceful rolling reload (SIGHUP) + `--tls-self-signed` | ✅ |
-| **A2** | Request edge cases: body-size limit (413), HEAD, GET/POST verified | ✅ |
-| **A6** | Typed config (`askr.toml`), `config-check`, admin dashboard + API | ✅ |
-| A5e | HTTP/3 (QUIC), `askr-laravel` package, io_uring core (Linux), `$_FILES` | next |
+- Embedded PHP (**non-ZTS**) running real Laravel 12 — no FastCGI, no FPM
+- Multi-core: one worker **process per core** on a shared listen socket
+- **Worker mode** (Octane-style) with per-request state reset — no bleed
+- Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
+- **TLS** (rustls, ring — no OpenSSL) + **HTTP/2** (ALPN); `--tls-self-signed` for dev
+- Zero-downtime **rolling reload** on `SIGHUP`
+- Request hardening: body-size limit (`413`), HEAD, GET/POST
+- Typed **`askr.toml`** config + `config-check`
+- Built-in **admin dashboard + API** (status, graceful reload)
+- `askr doctor` pre-flight checks
+- Memory-safe: all `unsafe` confined to the PHP FFI boundary
 
-```
-askr serve --root ./public --listen 0.0.0.0:8000 --workers 8 [--https]
-```
+## Roadmap
 
-**Scaling model.** non-ZTS ⇒ one interpreter per process, so Askr scales by
-*processes*, not threads. The master binds one listening socket and forks N
-workers that all `accept()` on the inherited fd (classic prefork). This
-distributes load on Linux *and* macOS — unlike `SO_REUSEPORT`, whose kernel
-balancing is Linux-only. Measured on a heavy Livewire app (client-bound
-load-gen on the same box):
-
-| workers | req/s | speedup |
-| --- | --- | --- |
-| 1 | 8.8 | 1.0× |
-| 4 | 23.3 | 2.6× |
-| 8 | 37.0 | 4.2× |
-
-tokio/hyper is the pragmatic I/O layer; the share-nothing endgame swaps it for a
-per-core io_uring loop behind the same seam (`Php::handle`).
-
-**Worker mode (A4a) — the big win.** With `--worker-script`, each worker boots
-the application *once* and then loops, serving every request against the
-already-booted app (the Octane model, entirely in-process — no IPC). A registered
-PHP function `askr_handle_request($handler)` blocks until Rust delivers a
-request, runs the handler against the warm app, and ships the captured
-status/headers/body back. Same app, an 8 ms boot, 4 workers:
-
-| mode | req/s |
+| Phase | Status |
 | --- | --- |
-| per-request (boots every request) | 346 |
-| worker (boots once) | 1024 (**3×**) |
+| M0 — embedding spike (PHP in-process from Rust) | ✅ |
+| A1 — standalone `askr serve` over HTTP | ✅ |
+| A3 — multi-core (fork per core, shared listener) | ✅ |
+| A4 — worker mode: real Laravel, zero per-request bootstrap | ✅ |
+| A5 — recycling, state reset, TLS+HTTP/2, rolling reload, doctor | ✅ |
+| A2 — request hardening (body limit, HEAD, POST) | ✅ |
+| A6 — typed config + admin dashboard/API | ✅ |
+| **Next** — io_uring core (Linux), HTTP/3, `$_FILES`, response cache, OTel, seccomp/Landlock, `askr-laravel` package | ⏳ |
 
-**Real Laravel 12, in worker mode (A4b).** A real Livewire app
-(`examples/laravel-worker.php` boots it once and loops). Instead of refreshing
-PHP superglobals between requests, the worker builds a fresh
-`Illuminate\Http\Request` from the data Askr hands it — clean, no Zend surgery.
+The biggest remaining step is the per-core **io_uring** I/O core (PRD §5.4) and a
+benchmark against FrankenPHP/FPM — both Linux-native work.
 
-Warm per-request latency collapses as the framework bootstrap disappears:
-
-| request | latency |
-| --- | --- |
-| #1 (cold boot) | 303 ms |
-| #2 (warm) | 9.9 ms |
-| #3 (warm) | 8.9 ms |
-
-Throughput, 8 workers, real Laravel 12:
-
-| mode | req/s | ms/req |
-| --- | --- | --- |
-| per-request (the FPM model) | 37 | 26.9 |
-| **worker (boot once)** | **347** | **2.9** |
-
-**9.4× throughput**, and verified correct under load: 300/300 requests `200`,
-each worker booted exactly once, zero application errors — no state bleed.
-
-```
-ASKR_APP_BASE=/path/to/app askr serve \
-  --root /path/to/app/public \
-  --worker-script examples/laravel-worker.php --workers 8 --https
-```
-
-**Worker recycling (A5a).** Long-lived workers can leak or drift, so
-`--max-requests N` recycles each worker after N requests. Recycling is
-*graceful*: the worker stops accepting, drains in-flight requests, then exits;
-the supervisor respawns a fresh one (and also respawns on crash — free
-resilience). The per-worker quota is staggered so workers never recycle in
-lockstep. Verified: 400/400 requests `200` across 12 recycles, zero drops.
-
-```
-askr serve --root ./public --worker-script examples/laravel-worker.php \
-  --workers 8 --max-requests 500
-```
-
-**State reset between requests (A5b).** A long-lived worker must not bleed state
-across requests. `examples/laravel-worker.php` resets, after each request:
-scoped instances (`forgetScopedInstances`), the resolved `request`, auth guards
-(so a prior user can't leak), open DB transactions (rolled back), and `Str`
-caches — an Octane-style subset.
-
-Verified with a deliberate bleed probe: a `scoped()` binding returns the **same**
-id on every request *without* the reset (bleed), and a **distinct** id on every
-request *with* it (correct isolation). Under load: 500/500 requests `200`, worker
-RSS flat (~64→66 MB over 600 requests — no accumulation), zero errors.
-
-The full, framework-version-aware reset will live in the `askr-laravel` package.
-
-**TLS + HTTP/2 (A5c).** Askr terminates TLS itself (rustls, ring provider — no
-OpenSSL, no C toolchain) so it's a complete single binary with no proxy in front.
-ALPN negotiates HTTP/2 or HTTP/1.1 automatically.
-
-```
-askr serve --root ./public --worker-script examples/laravel-worker.php \
-  --workers 8 --tls-cert cert.pem --tls-key key.pem
-```
-
-Verified: HTTPS negotiates **HTTP/2**, 100/100 concurrent requests `200`, and
-Laravel sees `HTTPS` in `$_SERVER` (cookies get the `secure` flag). Certs must be
-X.509 v3 (rustls rejects v1 — use `-addext subjectAltName=...` with openssl).
-
-**`askr doctor`** is a pre-flight check for deploys:
-
-```
-$ askr doctor
-  ✓ embedded PHP 8.4.11
-  ✓ thread safety: non-ZTS (NTS)
-  ✓ ext-ctype … ext-openssl … ext-dom  (all required present)
-  · 30 extensions loaded
-  platform: linux
-  ✓ kernel 6.x (io_uring needs ≥ 5.1)
-  ✓ all critical checks passed
-```
-
-It verifies the PHP build is non-ZTS (required, PRD §6.1), every Laravel-required
-extension is present, and — on Linux — the kernel supports io_uring. Exit code is
-non-zero if a critical check fails, so it can gate a deploy.
-
-**Graceful rolling reload (A5d).** Send the master `SIGHUP` to deploy new code
-with no downtime: workers are restarted **one at a time** — each stops
-accepting, drains its in-flight requests, exits, and is respawned fresh (a fresh
-process recompiles PHP, so new code is picked up). The master holds the listen
-socket open throughout and waits for each replacement to boot before rolling the
-next, so there are always live workers accepting.
-
-```
-kill -HUP $(pgrep -f 'askr serve')   # or: systemctl reload askr
-```
-
-Measured under a continuous request stream across a full reload: 599/600 `200`
-(one rare reset under aggressive tight-loop hammering — behind a load balancer
-with retries this is a non-issue). `SIGINT`/`SIGTERM` drain all workers and exit.
-
-**`--tls-self-signed`** generates a valid v3 self-signed cert (rcgen) on startup
-for local dev/testing, so you don't need to mint one:
-
-```
-askr serve --root ./public --worker-script examples/laravel-worker.php \
-  --tls-self-signed
-```
-
-**Request hardening (A2).** `--max-body-size` (default `16M`, accepts `512K` /
-`16M` / `2G`) caps request bodies — an oversized request gets `413`, rejected
-early on a declared `Content-Length` and also capped for chunked bodies (no
-`Content-Length`), so neither can exhaust memory. `HEAD` returns headers +
-`Content-Length` with no body; `GET`/`POST` (form and JSON, with query strings
-and cookies) are verified end-to-end. Multipart uploads (`$_FILES`) are next.
-
-## Configuration & admin (A6)
-
-A typed config file (`askr.toml`, see [`examples/askr.toml`](examples/askr.toml))
-is the declarative source of truth — the thing an admin GUI edits.
-
-```
-askr config-check askr.toml     # validate + print resolved settings
-askr serve --config askr.toml   # run (the file is authoritative)
-```
-
-**Built-in admin dashboard.** Set `[admin] listen` (or `--admin 127.0.0.1:9000`)
-to expose a small control plane from the master process:
-
-| endpoint | |
-| --- | --- |
-| `GET /` | HTML dashboard — uptime, workers alive/configured, respawns, PIDs, a reload button |
-| `GET /api/status` | supervisor status as JSON |
-| `POST /api/reload` | trigger a graceful rolling reload |
-
-This is the server-appropriate "GUI" for maintaining/configuring a live server:
-bind it to localhost and reach it over SSH or a private network — no desktop app,
-no install. A future desktop *control center* (Grove-style, Tauri) can manage a
-fleet of servers through this same API.
-
-## Layout
+## Project layout
 
 ```
 crates/
-  askr/              the standalone server binary (A1 + A3)
-    src/main.rs      CLI + fork-per-core supervisor (signal forwarding, reaping)
-    src/worker.rs    one worker: shared listener + runtime + interpreter
-    src/php.rs       interpreter on a dedicated thread; per-request + worker modes
-    src/cgi.rs       HTTP request -> CGI $_SERVER mapping
-    src/server.rs    hyper front: TLS, HTTP/1.1+2, static files, dispatch, drain
-    src/tls.rs       rustls TLS acceptor (ring; ALPN h2/http1.1)
-    src/doctor.rs    `askr doctor` pre-flight checks
-    src/config.rs    typed askr.toml config + validation
-    src/admin.rs     admin dashboard + status/reload API
-  askr-php/          embedded PHP (embed SAPI) — the M0 spike
-    csrc/shim.c      thin C layer: boot Zend, per-request cycle, capture I/O
-    build.rs         compiles the shim, links libphp via php-config
-    src/lib.rs       safe Rust wrapper (Interpreter / eval / Request / Response)
-    examples/
-      hello.rs       hello world in-process
-      exts.rs        list loaded extensions
-      serve.rs       serve a real front controller (index.php) once
-      bench.rs       warm-interpreter throughput micro-benchmark
+  askr/          the standalone server binary
+  askr-php/      embeds PHP (embed SAPI) via FFI
 scripts/
-  build-libphp.sh    reproducible libphp build (minimal | laravel profile)
-vendor/php-build/    (gitignored) downloaded PHP source + static deps + install
+  build-libphp.sh   reproducible libphp build (minimal | laravel)
+examples/
+  laravel-worker.php   worker-mode template for Laravel
+  askr.toml            example configuration
+docs/              full documentation
 ```
-
-## Roadmap (from the PRD)
-
-| Phase | Goal |
-| --- | --- |
-| **M0** | Prove embedding works. ✅ |
-| M1 | `grove serve` runs real Laravel 13 on embedded PHP (reuse grove's io/TLS/proxy). |
-| M2 | Warm master + CoW fork → zero per-request bootstrap; `askr-laravel` state hooks. |
-| M3 | Prod hardening: HTTP/3, extension matrix, graceful reload, WAF, OTel, seccomp/Landlock. |
-| M4 | Polish + release. |
 
 ## License
 
-MIT © Wirelabs AS
+MIT © Wirelabs AS — see [LICENSE](LICENSE).
