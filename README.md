@@ -142,7 +142,8 @@ own interpreter and a CoW-shared heap.
 | **A4a** | Persistent worker loop: boot the app once, serve many (in-process) | ✅ |
 | **A4b** | Real Laravel 12 through the worker loop — zero per-request bootstrap | ✅ |
 | **A5a** | Worker recycling (`--max-requests`) with graceful drain + auto-respawn | ✅ |
-| A5b | `askr-laravel` state reset; TLS (rustls), HTTP/2·3, graceful config reload | next |
+| **A5b** | Octane-style per-request state reset (no bleed between requests) | ✅ |
+| A5c | TLS (rustls), HTTP/2·3, graceful config reload, `askr doctor` | next |
 | A2 | Prod-grade static serving + `$_SERVER`/body/header edge cases | |
 
 ```
@@ -218,9 +219,18 @@ askr serve --root ./public --worker-script examples/laravel-worker.php \
   --workers 8 --max-requests 500
 ```
 
-Production-grade *state reset* between requests (full Octane-level: scoped
-instances, rebound singletons, auth/session isolation across every flow) is the
-`askr-laravel` package — that's A5b.
+**State reset between requests (A5b).** A long-lived worker must not bleed state
+across requests. `examples/laravel-worker.php` resets, after each request:
+scoped instances (`forgetScopedInstances`), the resolved `request`, auth guards
+(so a prior user can't leak), open DB transactions (rolled back), and `Str`
+caches — an Octane-style subset.
+
+Verified with a deliberate bleed probe: a `scoped()` binding returns the **same**
+id on every request *without* the reset (bleed), and a **distinct** id on every
+request *with* it (correct isolation). Under load: 500/500 requests `200`, worker
+RSS flat (~64→66 MB over 600 requests — no accumulation), zero errors.
+
+The full, framework-version-aware reset will live in the `askr-laravel` package.
 
 ## Layout
 

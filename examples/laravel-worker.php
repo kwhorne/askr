@@ -39,6 +39,11 @@ $handler = function (array $r) use ($app, $kernel): int {
     // Askr passes the CGI $_SERVER map as `headers`.
     $server = $r['headers'];
 
+    $query = [];
+    if (!empty($r['query'])) {
+        parse_str($r['query'], $query);
+    }
+
     $cookies = [];
     if (!empty($server['HTTP_COOKIE'])) {
         foreach (explode('; ', $server['HTTP_COOKIE']) as $pair) {
@@ -52,7 +57,7 @@ $handler = function (array $r) use ($app, $kernel): int {
     $request = Illuminate\Http\Request::create(
         $r['uri'],
         $r['method'],
-        [],        // parameters (parsed from the URI / body by Symfony)
+        $query,    // query/POST params
         $cookies,
         [],        // files (TODO: multipart uploads)
         $server,
@@ -75,14 +80,45 @@ $handler = function (array $r) use ($app, $kernel): int {
 
     $kernel->terminate($request, $response);
 
-    // Minimal per-request state reset. The `askr-laravel` package will do the
-    // full Octane-grade reset (scoped instances, rebound singletons, etc.).
+    askr_reset_state($app);
+
+    return $response->getStatusCode();
+};
+
+/**
+ * Reset per-request state so the long-lived worker doesn't bleed data between
+ * requests (an Octane-style subset). The future `askr-laravel` package will
+ * own the full, framework-version-aware reset.
+ */
+function askr_reset_state($app): void
+{
+    // Scoped instances (request, and anything bound via scoped()).
     if (method_exists($app, 'forgetScopedInstances')) {
         $app->forgetScopedInstances();
     }
 
-    return $response->getStatusCode();
-};
+    // Drop the resolved request so the next one is fresh.
+    $app->forgetInstance('request');
+
+    // Auth: forget resolved guards so a user from a prior request can't leak.
+    if ($app->resolved('auth')) {
+        $app->make('auth')->forgetGuards();
+    }
+
+    // Database: roll back any transaction a request left open.
+    if ($app->resolved('db')) {
+        foreach ($app->make('db')->getConnections() as $connection) {
+            while ($connection->transactionLevel() > 0) {
+                $connection->rollBack();
+            }
+        }
+    }
+
+    // String helper caches (locale/snake/camel etc.).
+    if (class_exists(\Illuminate\Support\Str::class)) {
+        \Illuminate\Support\Str::flushCache();
+    }
+}
 
 // Serve until Askr shuts the worker down.
 while (askr_handle_request($handler)) {
