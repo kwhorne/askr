@@ -1,0 +1,4 @@
+# Map all commits to the maintainer so contributors resolve to one identity.
+# See https://git-scm.com/docs/gitmailmap
+Knut W. Horne <kh@gets.no> <knut@wirelabs.no>
+Knut W. Horne <kh@gets.no> Knut / Wirelabs AS <knut@wirelabs.no>
