@@ -17,18 +17,20 @@ See [`docs/PRD.md`](docs/PRD.md) for the full product rationale.
 
 ## Headline result
 
-Real Laravel 12 + Livewire (a TALL app), served entirely in-process through the
-embedded interpreter — **HTTP 200**, encrypted cookies, session, CSRF, Blade,
-Livewire components — no FastCGI, no FPM:
+A standalone `askr serve` binary serving a real Laravel 12 + Livewire app over
+HTTP — **HTTP 200**, encrypted cookies, session, CSRF, Blade, Livewire — with
+the PHP running entirely in-process. No FastCGI, no FPM, no nginx.
 
 ```
-$ cargo run -p askr-php --example serve -- ~/code/app/public /
-== embedded PHP 8.4.11 ==
-HTTP 200 (php_status=0)
-  Set-Cookie: XSRF-TOKEN=...; secure; samesite=lax
-  Set-Cookie: laravel_session=...; secure; httponly; samesite=lax
----- body (159669 bytes) ----
-<!DOCTYPE html> <html ...> <title>Laravel</title> ...
+$ askr serve --root ~/code/app/public --listen 127.0.0.1:8000
+ INFO askr::php: embedded PHP ready version=8.4.11
+ INFO askr::server: askr serving listen=127.0.0.1:8000 docroot=.../public
+
+$ curl -sI http://127.0.0.1:8000/
+HTTP/1.1 200 OK
+x-powered-by: PHP/8.4.11
+set-cookie: XSRF-TOKEN=...; secure; samesite=lax
+set-cookie: laravel_session=...; secure; httponly; samesite=lax
 ```
 
 Raw per-request overhead of the embedding layer is negligible — a trivial
@@ -117,10 +119,41 @@ To point at a different PHP install, set `ASKR_PHP_CONFIG=/path/to/php-config`
 
 ---
 
+## Askr — the standalone server (A1 ✅)
+
+Askr is a **standalone production PHP application server**, not a dev tool
+(that's [`grove`](https://github.com/wirelabs/grove), which stays separate). The
+ambition: the smartest, most efficient way to run PHP at scale.
+
+Because the interpreter is non-ZTS, one process = one interpreter. Scaling
+across cores is therefore **process-per-core (fork)**, not threads — which *is*
+the share-nothing model: a warm master forks one worker per core, each with its
+own interpreter and a CoW-shared heap.
+
+| Step | Goal | Status |
+| --- | --- | --- |
+| **A1** | `askr serve` runs a real app over HTTP (one process/interpreter) | ✅ |
+| A2 | Prod-grade static serving + `$_SERVER`/body/header mapping | in progress |
+| A3 | Multi-core: `SO_REUSEPORT` + fork one worker per core | |
+| A4 | Warm master + CoW fork → zero per-request bootstrap | |
+| A5 | TLS (rustls), HTTP/2 & /3, graceful reload, `askr doctor` | |
+
+```
+askr serve --root ./public --listen 0.0.0.0:8000 [--https] [--front index.php]
+```
+
+tokio/hyper is the pragmatic A1 I/O layer; the share-nothing endgame swaps it
+for a per-core io_uring loop behind the same seam (`Php::handle`).
+
 ## Layout
 
 ```
 crates/
+  askr/              the standalone server binary (A1)
+    src/main.rs      CLI (`askr serve`)
+    src/php.rs       interpreter pinned to a dedicated thread (non-ZTS)
+    src/cgi.rs       HTTP request -> CGI $_SERVER mapping
+    src/server.rs    hyper front: static files + dispatch to PHP
   askr-php/          embedded PHP (embed SAPI) — the M0 spike
     csrc/shim.c      thin C layer: boot Zend, per-request cycle, capture I/O
     build.rs         compiles the shim, links libphp via php-config

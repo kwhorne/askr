@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/askr-php",
+    "crates/askr",
 ]
 
 [workspace.package]
@@ -15,6 +16,14 @@ rust-version = "1.80"
 [workspace.dependencies]
 anyhow = "1"
 cc = "1"
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 lto = "thin"
