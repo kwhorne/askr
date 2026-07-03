@@ -4,11 +4,17 @@
 //! tokio/hyper here is the pragmatic A1 I/O layer. The share-nothing endgame
 //! swaps this for a per-core io_uring loop (PRD §5.4) behind the same seam:
 //! `Php::handle`.
+//!
+//! Recycling is graceful: after `recycle_after` requests we stop accepting new
+//! connections, let the in-flight ones drain, and return — the caller then exits
+//! the process and the supervisor respawns a fresh worker. No dropped requests.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -18,6 +24,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 
 use crate::cgi;
 use crate::php::Php;
@@ -29,40 +36,75 @@ pub struct Config {
     pub listen: SocketAddr,
     pub https: bool,
     pub worker_script: Option<PathBuf>,
+    pub max_requests: usize,
 }
 
-/// Serve on an already-bound listener (built with SO_REUSEPORT by the worker).
-pub async fn run(listener: TcpListener, config: Arc<Config>, php: Php) -> anyhow::Result<()> {
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let config = config.clone();
-        let php = php.clone();
+/// Shared per-worker runtime state for recycling/draining.
+struct Runtime {
+    config: Arc<Config>,
+    php: Php,
+    served: AtomicUsize,
+    recycle_after: usize,
+    shutdown: Notify,
+    active: AtomicUsize,
+}
 
-        tokio::task::spawn(async move {
-            let service = service_fn(move |req| {
-                handle(req, config.clone(), php.clone(), peer)
-            });
-            if let Err(e) = http1::Builder::new()
-                .serve_connection(io, service)
-                .await
-            {
-                tracing::debug!(error = %e, "connection closed");
+/// Serve on an already-bound listener. Returns when a graceful recycle/shutdown
+/// has drained; `recycle_after` = 0 means serve forever.
+pub async fn run(
+    listener: TcpListener,
+    config: Arc<Config>,
+    php: Php,
+    recycle_after: usize,
+) -> anyhow::Result<()> {
+    let rt = Arc::new(Runtime {
+        config,
+        php,
+        served: AtomicUsize::new(0),
+        recycle_after,
+        shutdown: Notify::new(),
+        active: AtomicUsize::new(0),
+    });
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted?;
+                let io = TokioIo::new(stream);
+                let rt = rt.clone();
+                rt.active.fetch_add(1, Ordering::SeqCst);
+                tokio::task::spawn(async move {
+                    let service = service_fn(|req| handle(req, rt.clone(), peer));
+                    if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+                        tracing::debug!(error = %e, "connection closed");
+                    }
+                    rt.active.fetch_sub(1, Ordering::SeqCst);
+                });
             }
-        });
+            _ = rt.shutdown.notified() => {
+                tracing::info!(served = rt.served.load(Ordering::SeqCst), "recycling: draining");
+                break;
+            }
+        }
     }
+
+    // Drain: let in-flight connections finish (bounded).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rt.active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
 }
 
 async fn handle(
     req: Request<Incoming>,
-    config: Arc<Config>,
-    php: Php,
+    rt: Arc<Runtime>,
     peer: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    let config = &rt.config;
     let port = config.listen.port();
 
-    // try_files: serve an existing static file (built assets, images, …)
-    // directly; otherwise fall through to the front controller.
+    // try_files: serve an existing static file directly.
     let rel = sanitize(req.uri().path());
     if !rel.as_os_str().is_empty() {
         let candidate = config.docroot.join(&rel);
@@ -91,13 +133,23 @@ async fn handle(
         port,
     );
 
-    match php.handle(request).await {
-        Ok(resp) => Ok(build_response(resp)),
+    let response = match rt.php.handle(request).await {
+        Ok(resp) => build_response(resp),
         Err(e) => {
             tracing::error!(error = %e, "php handling failed");
-            Ok(text(StatusCode::BAD_GATEWAY, &format!("askr: {e}")))
+            text(StatusCode::BAD_GATEWAY, &format!("askr: {e}"))
+        }
+    };
+
+    // Count the request; trigger a graceful recycle when we hit the cap.
+    if rt.recycle_after > 0 {
+        let n = rt.served.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == rt.recycle_after {
+            rt.shutdown.notify_one();
         }
     }
+
+    Ok(response)
 }
 
 fn build_response(resp: askr_php::Response) -> Response<Full<Bytes>> {
@@ -105,7 +157,6 @@ fn build_response(resp: askr_php::Response) -> Response<Full<Bytes>> {
         .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
 
     for (name, value) in &resp.headers {
-        // hyper sets these itself from the body/framing.
         if name.eq_ignore_ascii_case("Content-Length")
             || name.eq_ignore_ascii_case("Transfer-Encoding")
         {
@@ -142,9 +193,8 @@ fn text(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
 fn sanitize(path: &str) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in Path::new(path.trim_start_matches('/')).components() {
-        match comp {
-            Component::Normal(c) => out.push(c),
-            _ => {} // drop RootDir, CurDir, ParentDir, Prefix
+        if let Component::Normal(c) = comp {
+            out.push(c);
         }
     }
     out

@@ -33,7 +33,8 @@ pub struct Php {
 
 impl Php {
     /// Per-request mode: boot an interpreter and run the front controller fresh
-    /// for every request.
+    /// for every request. The loop ends when the server drops the sender (during
+    /// a graceful drain on recycle/shutdown).
     pub fn spawn(ini: Option<String>) -> anyhow::Result<Self> {
         let (tx, mut rx) = mpsc::channel::<Job>(1024);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -67,7 +68,8 @@ impl Php {
     }
 
     /// Worker mode: boot the app once via `script`, then serve many requests
-    /// against the booted app — no per-request bootstrap.
+    /// against the booted app — no per-request bootstrap. The loop ends when the
+    /// server drops the sender (graceful drain on recycle/shutdown).
     pub fn spawn_worker(script: PathBuf, ini: Option<String>) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::channel::<Job>(1024);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -103,7 +105,7 @@ impl Php {
                         ctx,
                     )
                 };
-                tracing::warn!(rc, "worker loop ended");
+                tracing::debug!(rc, "worker loop ended");
             })?;
 
         wait_ready(ready_rx)?;

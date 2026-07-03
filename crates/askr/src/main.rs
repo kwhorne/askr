@@ -61,6 +61,12 @@ enum Command {
         /// front controller from scratch.
         #[arg(long)]
         worker_script: Option<PathBuf>,
+
+        /// Recycle each worker after handling this many requests (0 = never).
+        /// Guards against memory leaks / state drift; the supervisor respawns a
+        /// fresh worker to replace it. Requires the multi-process supervisor.
+        #[arg(long, default_value = "0")]
+        max_requests: usize,
     },
 }
 
@@ -82,6 +88,7 @@ fn main() -> anyhow::Result<()> {
             https,
             ini,
             worker_script,
+            max_requests,
         } => {
             let docroot = resolve_root(root)?;
             let script = docroot.join(&front);
@@ -104,12 +111,14 @@ fn main() -> anyhow::Result<()> {
                 listen,
                 https,
                 worker_script,
+                max_requests,
             };
 
             let workers = workers.unwrap_or_else(default_workers).max(1);
             let listener = bind_listener(listen)?;
-            if workers == 1 {
-                // Single process: no fork, run the worker inline.
+            // Recycling needs the supervisor to respawn workers, so use it
+            // whenever workers > 1 or a request cap is set.
+            if workers == 1 && max_requests == 0 {
                 tracing::info!(%listen, workers = 1, "askr serving (single process)");
                 run_worker(listener, config, ini)
             } else {
@@ -142,12 +151,19 @@ fn supervise(
     let workers = workers.min(MAX_WORKERS);
     let listen_fd: RawFd = listener.as_raw_fd();
 
-    for i in 0..workers {
+    // Fork one worker into slot `i`. In the child this never returns (it runs
+    // the worker and exits); in the parent it records the pid.
+    let spawn_slot = |i: usize| {
         // SAFETY: fork before any tokio runtime exists on this thread; the child
         // builds its own runtime. Only async-signal-safe work runs pre-exec.
         match unsafe { libc::fork() } {
             0 => {
-                // Child: adopt the inherited listener fd and run the worker.
+                // Child: default signal handlers (don't inherit the forwarder),
+                // adopt the inherited listener fd, run the worker.
+                unsafe {
+                    libc::signal(libc::SIGINT, libc::SIG_DFL);
+                    libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                }
                 let inherited = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
                 let code = match run_worker(inherited, config.clone(), ini.clone()) {
                     Ok(()) => 0,
@@ -158,30 +174,38 @@ fn supervise(
                 };
                 std::process::exit(code);
             }
-            -1 => anyhow::bail!("fork failed: {}", std::io::Error::last_os_error()),
+            -1 => {
+                tracing::error!(worker = i, "fork failed: {}", std::io::Error::last_os_error());
+            }
             pid => {
                 CHILDREN[i].store(pid, Ordering::SeqCst);
                 tracing::info!(pid, worker = i, "spawned worker");
             }
         }
+    };
+
+    for i in 0..workers {
+        spawn_slot(i);
     }
 
     install_signal_forwarding();
-    tracing::info!(%config.listen, workers, "askr master supervising");
+    tracing::info!(%config.listen, workers, max_requests = config.max_requests, "askr master supervising");
 
-    // Reap children. A3: no auto-restart yet (that's A5 hardening).
+    // Reap exited workers and respawn a replacement (recycling + crash
+    // resilience). Normal shutdown goes through the signal handler, which kills
+    // the workers and _exit()s the master, so we never respawn during shutdown.
     loop {
         let mut status: libc::c_int = 0;
         let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
         if pid <= 0 {
             break;
         }
-        for c in CHILDREN.iter() {
-            let _ = c.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
-        }
-        tracing::warn!(pid, "worker exited");
-        if CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0) {
-            break;
+        for i in 0..workers {
+            if CHILDREN[i].load(Ordering::SeqCst) == pid {
+                CHILDREN[i].store(0, Ordering::SeqCst);
+                tracing::warn!(pid, worker = i, "worker exited; respawning");
+                spawn_slot(i);
+            }
         }
     }
     Ok(())

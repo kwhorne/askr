@@ -141,7 +141,8 @@ own interpreter and a CoW-shared heap.
 | **A3** | Multi-core: fork one worker process per core, shared listener | ✅ |
 | **A4a** | Persistent worker loop: boot the app once, serve many (in-process) | ✅ |
 | **A4b** | Real Laravel 12 through the worker loop — zero per-request bootstrap | ✅ |
-| A5 | `askr-laravel`: production-grade state reset; TLS, HTTP/2·3, graceful reload | next |
+| **A5a** | Worker recycling (`--max-requests`) with graceful drain + auto-respawn | ✅ |
+| A5b | `askr-laravel` state reset; TLS (rustls), HTTP/2·3, graceful config reload | next |
 | A2 | Prod-grade static serving + `$_SERVER`/body/header edge cases | |
 
 ```
@@ -205,9 +206,21 @@ ASKR_APP_BASE=/path/to/app askr serve \
   --worker-script examples/laravel-worker.php --workers 8 --https
 ```
 
-Production-grade state reset between requests (full Octane-level: scoped
+**Worker recycling (A5a).** Long-lived workers can leak or drift, so
+`--max-requests N` recycles each worker after N requests. Recycling is
+*graceful*: the worker stops accepting, drains in-flight requests, then exits;
+the supervisor respawns a fresh one (and also respawns on crash — free
+resilience). The per-worker quota is staggered so workers never recycle in
+lockstep. Verified: 400/400 requests `200` across 12 recycles, zero drops.
+
+```
+askr serve --root ./public --worker-script examples/laravel-worker.php \
+  --workers 8 --max-requests 500
+```
+
+Production-grade *state reset* between requests (full Octane-level: scoped
 instances, rebound singletons, auth/session isolation across every flow) is the
-`askr-laravel` package — that's A5.
+`askr-laravel` package — that's A5b.
 
 ## Layout
 

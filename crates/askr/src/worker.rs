@@ -36,6 +36,10 @@ pub fn run_worker(listener: StdListener, config: Config, ini: Option<String>) ->
         None => Php::spawn(ini)?,
     };
 
+    // Stagger recycling across workers (distinct pid per worker) so they don't
+    // all recycle at the same instant and leave a gap with no live workers.
+    let recycle_after = stagger(config.max_requests);
+
     listener.set_nonblocking(true)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -45,6 +49,15 @@ pub fn run_worker(listener: StdListener, config: Config, ini: Option<String>) ->
 
     rt.block_on(async move {
         let listener = TcpListener::from_std(listener)?;
-        server::run(listener, Arc::new(config), php).await
+        server::run(listener, Arc::new(config), php, recycle_after).await
     })
+}
+
+/// Add a per-process jitter so workers recycle at different times.
+fn stagger(max: usize) -> usize {
+    if max == 0 {
+        return 0;
+    }
+    let span = (max / 2).max(1);
+    max + (std::process::id() as usize) % span
 }
