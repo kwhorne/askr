@@ -10,6 +10,7 @@ use hyper::http::request::Parts;
 use askr_php::Request;
 
 /// Build an [`askr_php::Request`] for the front controller.
+#[allow(clippy::too_many_arguments)]
 pub fn build_request(
     parts: &Parts,
     body: Vec<u8>,
@@ -22,11 +23,7 @@ pub fn build_request(
 ) -> Request {
     let method = parts.method.as_str().to_string();
     let path = parts.uri.path().to_string();
-    let query = parts
-        .uri
-        .query()
-        .map(|q| q.to_string())
-        .unwrap_or_default();
+    let query = parts.uri.query().map(|q| q.to_string()).unwrap_or_default();
     let request_uri = match parts.uri.path_and_query() {
         Some(pq) => pq.as_str().to_string(),
         None => path.clone(),
@@ -65,10 +62,7 @@ pub fn build_request(
             "DOCUMENT_ROOT".into(),
             docroot.to_string_lossy().into_owned(),
         ),
-        (
-            "SERVER_PROTOCOL".into(),
-            format!("{:?}", parts.version),
-        ),
+        ("SERVER_PROTOCOL".into(), format!("{:?}", parts.version)),
         ("GATEWAY_INTERFACE".into(), "CGI/1.1".into()),
         ("SERVER_SOFTWARE".into(), "askr".into()),
         ("SERVER_NAME".into(), host.clone()),

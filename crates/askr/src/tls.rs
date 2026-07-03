@@ -22,7 +22,11 @@ pub fn acceptor(cert_path: &Path, key_path: &Path) -> anyhow::Result<TlsAcceptor
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
         .collect::<Result<_, _>>()
         .context("parsing TLS certificate chain")?;
-    anyhow::ensure!(!certs.is_empty(), "no certificates found in {}", cert_path.display());
+    anyhow::ensure!(
+        !certs.is_empty(),
+        "no certificates found in {}",
+        cert_path.display()
+    );
 
     let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_slice())
         .context("parsing TLS private key")?

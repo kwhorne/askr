@@ -1,5 +1,7 @@
 # Askr
 
+[![CI](https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg)](https://github.com/kwhorne/askr/actions/workflows/ci.yml)
+
 **A share-nothing, thread-per-core PHP application server, in Rust.**
 
 Askr embeds the PHP interpreter in-process (no FastCGI, no FPM pool), serves it

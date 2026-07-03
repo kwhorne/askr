@@ -119,7 +119,8 @@ impl Php {
             .send(Job { req, reply })
             .await
             .map_err(|_| "php worker unavailable".to_string())?;
-        rx.await.map_err(|_| "php worker dropped reply".to_string())?
+        rx.await
+            .map_err(|_| "php worker dropped reply".to_string())?
     }
 }
 

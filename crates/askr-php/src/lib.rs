@@ -165,7 +165,9 @@ impl Interpreter {
                 script.as_ptr(),
                 method.as_ptr(),
                 query.as_ptr(),
-                content_type.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+                content_type
+                    .as_ref()
+                    .map_or(std::ptr::null(), |c| c.as_ptr()),
                 req.body.len(),
                 req.body.as_ptr() as *const c_char,
                 req.body.len(),
@@ -297,11 +299,7 @@ pub mod worker {
         /// Clear the current worker request.
         pub fn askr_req_reset();
         /// Set method / uri / query for the current worker request.
-        pub fn askr_req_set_meta(
-            method: *const c_char,
-            uri: *const c_char,
-            query: *const c_char,
-        );
+        pub fn askr_req_set_meta(method: *const c_char, uri: *const c_char, query: *const c_char);
         /// Append a header to the current worker request.
         pub fn askr_req_add_header(name: *const c_char, value: *const c_char);
         /// Set the body of the current worker request.
@@ -330,7 +328,9 @@ mod tests {
         let mut php = Interpreter::new().expect("php_embed_init");
 
         // 1. Hello world — the M0 goal.
-        let hello = php.eval(r#"echo "hello from PHP " . PHP_VERSION;"#).unwrap();
+        let hello = php
+            .eval(r#"echo "hello from PHP " . PHP_VERSION;"#)
+            .unwrap();
         assert!(hello.ok(), "status {}", hello.status);
         assert!(hello.output.starts_with("hello from PHP 8.4"), "{hello:?}");
 
@@ -339,7 +339,9 @@ mod tests {
         assert_eq!(calc.output, "5050");
 
         // 3. Bundled extensions (json) are available.
-        let json = php.eval(r#"echo json_encode(["a" => 1, "b" => [2, 3]]);"#).unwrap();
+        let json = php
+            .eval(r#"echo json_encode(["a" => 1, "b" => [2, 3]]);"#)
+            .unwrap();
         assert_eq!(json.output, r#"{"a":1,"b":[2,3]}"#);
 
         // 4. $_SERVER superglobal exists — this is the seam serve_php() fills.
@@ -394,19 +396,22 @@ mod tests {
         let resp = php.handle(&req).unwrap();
         assert_eq!(resp.status, 201, "resp: {resp:?}");
         assert!(
-            resp.headers.iter().any(|(k, v)| k == "X-Askr" && v == "hit"),
+            resp.headers
+                .iter()
+                .any(|(k, v)| k == "X-Askr" && v == "hit"),
             "headers: {:?}",
             resp.headers
         );
         // setcookie() must reach us as a Set-Cookie header.
         assert!(
-            resp.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("Set-Cookie")),
+            resp.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("Set-Cookie")),
             "headers: {:?}",
             resp.headers
         );
 
-        let body: serde_json::Value =
-            serde_json::from_slice(&resp.body).expect("json body");
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("json body");
         assert_eq!(body["method"], "POST");
         assert_eq!(body["uri"], "/api?a=1&b=2");
         assert_eq!(body["q"], "a=1&b=2");

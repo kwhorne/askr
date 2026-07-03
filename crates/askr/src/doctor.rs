@@ -10,8 +10,18 @@ use askr_php::Interpreter;
 
 /// Extensions a modern Laravel app requires.
 const REQUIRED: &[&str] = &[
-    "ctype", "filter", "hash", "json", "mbstring", "openssl", "pdo", "session",
-    "tokenizer", "dom", "fileinfo", "phar",
+    "ctype",
+    "filter",
+    "hash",
+    "json",
+    "mbstring",
+    "openssl",
+    "pdo",
+    "session",
+    "tokenizer",
+    "dom",
+    "fileinfo",
+    "phar",
 ];
 
 struct PhpInfo {
@@ -49,7 +59,11 @@ pub fn run(ini: Option<String>) -> bool {
             println!("  · {loaded} extensions loaded");
         }
         Err(e) => {
-            check(&mut ok, false, &format!("embedded PHP failed to start: {e}"));
+            check(
+                &mut ok,
+                false,
+                &format!("embedded PHP failed to start: {e}"),
+            );
         }
     }
 

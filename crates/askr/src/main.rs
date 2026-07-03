@@ -22,13 +22,18 @@ use crate::server::Config;
 use crate::worker::{bind_listener, run_worker};
 
 #[derive(Parser)]
-#[command(name = "askr", version, about = "The smartest, most efficient PHP web server.")]
+#[command(
+    name = "askr",
+    version,
+    about = "The smartest, most efficient PHP web server."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // clap owns these once at startup
 enum Command {
     /// Serve a PHP application over HTTP.
     Serve {
@@ -232,7 +237,11 @@ fn supervise(
                 std::process::exit(code);
             }
             -1 => {
-                tracing::error!(worker = i, "fork failed: {}", std::io::Error::last_os_error());
+                tracing::error!(
+                    worker = i,
+                    "fork failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             pid => {
                 CHILDREN[i].store(pid, Ordering::SeqCst);
@@ -258,15 +267,15 @@ fn supervise(
         if pid == -1 {
             match std::io::Error::last_os_error().raw_os_error() {
                 Some(libc::EINTR) => continue, // interrupted by a signal; retry
-                _ => break,                     // ECHILD: no children left
+                _ => break,                    // ECHILD: no children left
             }
         }
         if pid <= 0 {
             continue;
         }
-        for i in 0..workers {
-            if CHILDREN[i].load(Ordering::SeqCst) == pid {
-                CHILDREN[i].store(0, Ordering::SeqCst);
+        for (i, child) in CHILDREN.iter().enumerate().take(workers) {
+            if child.load(Ordering::SeqCst) == pid {
+                child.store(0, Ordering::SeqCst);
                 if SHUTDOWN.load(Ordering::SeqCst) {
                     tracing::info!(pid, worker = i, "worker exited (shutdown)");
                 } else {
@@ -282,7 +291,8 @@ fn supervise(
                 }
             }
         }
-        if SHUTDOWN.load(Ordering::SeqCst) && CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0) {
+        if SHUTDOWN.load(Ordering::SeqCst) && CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0)
+        {
             break;
         }
     }
@@ -335,8 +345,14 @@ extern "C" fn on_reload(_sig: libc::c_int) {
 
 fn install_signals() {
     unsafe {
-        libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_terminate as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            on_terminate as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            on_terminate as *const () as libc::sighandler_t,
+        );
         libc::signal(libc::SIGHUP, on_reload as *const () as libc::sighandler_t);
     }
 }
@@ -372,4 +388,21 @@ fn resolve_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let canonical = std::fs::canonicalize(&root)
         .map_err(|e| anyhow::anyhow!("bad --root {}: {e}", root.display()))?;
     Ok(canonical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_size;
+
+    #[test]
+    fn parses_sizes() {
+        assert_eq!(parse_size("1024").unwrap(), 1024);
+        assert_eq!(parse_size("512K").unwrap(), 512 * 1024);
+        assert_eq!(parse_size("16M").unwrap(), 16 * 1024 * 1024);
+        assert_eq!(parse_size("2G").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size("8m").unwrap(), 8 * 1024 * 1024);
+        assert!(parse_size("").is_err());
+        assert!(parse_size("abc").is_err());
+        assert!(parse_size("10X").is_err());
+    }
 }

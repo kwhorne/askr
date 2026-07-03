@@ -167,13 +167,19 @@ async fn handle(
         .and_then(|v| v.parse::<usize>().ok())
     {
         if len > max {
-            return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "askr: request body too large"));
+            return Ok(text(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "askr: request body too large",
+            ));
         }
     }
     let body_bytes = match Limited::new(body, max).collect().await {
         Ok(c) => c.to_bytes().to_vec(),
         Err(_) => {
-            return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "askr: request body too large"));
+            return Ok(text(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "askr: request body too large",
+            ));
         }
     };
 
@@ -208,8 +214,8 @@ async fn handle(
 }
 
 fn build_response(resp: askr_php::Response) -> Response<Full<Bytes>> {
-    let mut builder = Response::builder()
-        .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
 
     for (name, value) in &resp.headers {
         if name.eq_ignore_ascii_case("Content-Length")
@@ -272,5 +278,49 @@ fn mime_for(path: &Path) -> &'static str {
         Some("map") => "application/json",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_traversal() {
+        assert_eq!(sanitize("/build/app.js"), PathBuf::from("build/app.js"));
+        // path traversal and absolute components are dropped
+        assert_eq!(sanitize("/../../etc/passwd"), PathBuf::from("etc/passwd"));
+        assert_eq!(sanitize("/a/../b/./c"), PathBuf::from("a/b/c"));
+        assert!(sanitize("/").as_os_str().is_empty());
+    }
+
+    #[test]
+    fn mime_types() {
+        assert_eq!(mime_for(Path::new("a.css")), "text/css; charset=utf-8");
+        assert_eq!(
+            mime_for(Path::new("a.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(mime_for(Path::new("a.woff2")), "font/woff2");
+        assert_eq!(mime_for(Path::new("a.unknown")), "application/octet-stream");
+        assert_eq!(mime_for(Path::new("noext")), "application/octet-stream");
+    }
+
+    #[test]
+    fn build_response_maps_status_and_headers() {
+        let resp = askr_php::Response {
+            status: 201,
+            headers: vec![
+                ("X-Test".into(), "yes".into()),
+                ("Content-Length".into(), "5".into()), // must be dropped
+            ],
+            body: b"hello".to_vec(),
+            php_status: 0,
+        };
+        let out = build_response(resp);
+        assert_eq!(out.status(), StatusCode::CREATED);
+        assert_eq!(out.headers().get("X-Test").unwrap(), "yes");
+        // hyper computes framing; our explicit Content-Length is stripped.
+        assert!(out.headers().get(hyper::header::CONTENT_LENGTH).is_none());
     }
 }

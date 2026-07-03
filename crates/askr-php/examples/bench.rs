@@ -39,7 +39,10 @@ fn main() {
             ("QUERY_STRING".into(), query.clone()),
             ("SCRIPT_NAME".into(), "/index.php".into()),
             ("SCRIPT_FILENAME".into(), script_s.clone()),
-            ("DOCUMENT_ROOT".into(), docroot.to_string_lossy().into_owned()),
+            (
+                "DOCUMENT_ROOT".into(),
+                docroot.to_string_lossy().into_owned(),
+            ),
             ("SERVER_PROTOCOL".into(), "HTTP/1.1".into()),
             ("SERVER_SOFTWARE".into(), "askr".into()),
             ("SERVER_NAME".into(), "localhost".into()),
@@ -51,7 +54,10 @@ fn main() {
     };
 
     let mut php = askr_php::Interpreter::new().expect("php init");
-    println!("embedded PHP {}  —  {n} requests to {uri}\n", php.php_version());
+    println!(
+        "embedded PHP {}  —  {n} requests to {uri}\n",
+        php.php_version()
+    );
 
     let mut times = Vec::with_capacity(n);
     let mut last_status = 0;
@@ -65,8 +71,12 @@ fn main() {
         last_status = resp.status;
         last_len = resp.body.len();
         if i == 0 {
-            println!("req #1  (cold opcache): {:>8.2} ms  -> {} ({} bytes)",
-                us as f64 / 1000.0, resp.status, resp.body.len());
+            println!(
+                "req #1  (cold opcache): {:>8.2} ms  -> {} ({} bytes)",
+                us as f64 / 1000.0,
+                resp.status,
+                resp.body.len()
+            );
         }
     }
 
@@ -81,7 +91,16 @@ fn main() {
     let p99 = sorted[((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1)] as f64;
 
     println!("\nwarm requests (#2..#{n}), status {last_status}, {last_len} bytes:");
-    println!("  avg {:.2} ms   p50 {:.2} ms   p99 {:.2} ms   min {:.2} ms   max {:.2} ms",
-        avg / 1000.0, p50 / 1000.0, p99 / 1000.0, min / 1000.0, max / 1000.0);
-    println!("  ~{:.0} req/s (single core, single interpreter)", 1_000_000.0 / avg);
+    println!(
+        "  avg {:.2} ms   p50 {:.2} ms   p99 {:.2} ms   min {:.2} ms   max {:.2} ms",
+        avg / 1000.0,
+        p50 / 1000.0,
+        p99 / 1000.0,
+        min / 1000.0,
+        max / 1000.0
+    );
+    println!(
+        "  ~{:.0} req/s (single core, single interpreter)",
+        1_000_000.0 / avg
+    );
 }
