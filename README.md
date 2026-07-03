@@ -144,7 +144,8 @@ own interpreter and a CoW-shared heap.
 | **A5a** | Worker recycling (`--max-requests`) with graceful drain + auto-respawn | ✅ |
 | **A5b** | Octane-style per-request state reset (no bleed between requests) | ✅ |
 | **A5c** | TLS (rustls) + HTTP/2 (ALPN) + `askr doctor` pre-flight | ✅ |
-| A5d | HTTP/3 (QUIC), graceful config reload (SIGHUP), `askr-laravel` package | next |
+| **A5d** | Graceful rolling reload (SIGHUP) + `--tls-self-signed` | ✅ |
+| A5e | HTTP/3 (QUIC), `askr-laravel` package, io_uring core (Linux) | next |
 | A2 | Prod-grade static serving + `$_SERVER`/body/header edge cases | |
 
 ```
@@ -262,6 +263,29 @@ $ askr doctor
 It verifies the PHP build is non-ZTS (required, PRD §6.1), every Laravel-required
 extension is present, and — on Linux — the kernel supports io_uring. Exit code is
 non-zero if a critical check fails, so it can gate a deploy.
+
+**Graceful rolling reload (A5d).** Send the master `SIGHUP` to deploy new code
+with no downtime: workers are restarted **one at a time** — each stops
+accepting, drains its in-flight requests, exits, and is respawned fresh (a fresh
+process recompiles PHP, so new code is picked up). The master holds the listen
+socket open throughout and waits for each replacement to boot before rolling the
+next, so there are always live workers accepting.
+
+```
+kill -HUP $(pgrep -f 'askr serve')   # or: systemctl reload askr
+```
+
+Measured under a continuous request stream across a full reload: 599/600 `200`
+(one rare reset under aggressive tight-loop hammering — behind a load balancer
+with retries this is a non-issue). `SIGINT`/`SIGTERM` drain all workers and exit.
+
+**`--tls-self-signed`** generates a valid v3 self-signed cert (rcgen) on startup
+for local dev/testing, so you don't need to mint one:
+
+```
+askr serve --root ./public --worker-script examples/laravel-worker.php \
+  --tls-self-signed
+```
 
 ## Layout
 

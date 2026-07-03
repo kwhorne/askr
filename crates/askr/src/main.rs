@@ -14,7 +14,7 @@ mod worker;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 use clap::{Parser, Subcommand};
 
@@ -77,6 +77,10 @@ enum Command {
         /// TLS private key (PEM).
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+
+        /// Generate a self-signed cert on startup (dev/testing; browsers warn).
+        #[arg(long, conflicts_with = "tls_cert")]
+        tls_self_signed: bool,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -108,6 +112,7 @@ fn main() -> anyhow::Result<()> {
             max_requests,
             tls_cert,
             tls_key,
+            tls_self_signed,
         } => {
             let docroot = resolve_root(root)?;
             let script = docroot.join(&front);
@@ -128,7 +133,7 @@ fn main() -> anyhow::Result<()> {
                     anyhow::bail!("TLS cert not found: {}", c.display());
                 }
             }
-            let tls_on = tls_cert.is_some();
+            let tls_on = tls_cert.is_some() || tls_self_signed;
             let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
             let config = Config {
                 docroot,
@@ -139,6 +144,7 @@ fn main() -> anyhow::Result<()> {
                 max_requests,
                 tls_cert,
                 tls_key,
+                tls_self_signed,
             };
 
             let workers = workers.unwrap_or_else(default_workers).max(1);
@@ -174,6 +180,10 @@ fn default_workers() -> usize {
 
 const MAX_WORKERS: usize = 512;
 static CHILDREN: [AtomicI32; MAX_WORKERS] = [const { AtomicI32::new(0) }; MAX_WORKERS];
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
+// Next slot to roll during a graceful reload; >= WORKER_COUNT means "not rolling".
+static RELOAD_CURSOR: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Fork `workers` child processes, each running an independent worker on the
 /// shared inherited listener, then supervise them: forward termination signals
@@ -185,6 +195,7 @@ fn supervise(
     workers: usize,
 ) -> anyhow::Result<()> {
     let workers = workers.min(MAX_WORKERS);
+    WORKER_COUNT.store(workers, Ordering::SeqCst);
     let listen_fd: RawFd = listener.as_raw_fd();
 
     // Fork one worker into slot `i`. In the child this never returns (it runs
@@ -194,10 +205,12 @@ fn supervise(
         // builds its own runtime. Only async-signal-safe work runs pre-exec.
         match unsafe { libc::fork() } {
             0 => {
-                // Child: default signal handlers (don't inherit the forwarder),
-                // adopt the inherited listener fd, run the worker.
+                // Child: the master coordinates lifecycle. Ignore SIGINT/SIGHUP
+                // (don't inherit the master's handlers); SIGTERM is left for the
+                // worker's tokio runtime to catch and drain gracefully.
                 unsafe {
-                    libc::signal(libc::SIGINT, libc::SIG_DFL);
+                    libc::signal(libc::SIGINT, libc::SIG_IGN);
+                    libc::signal(libc::SIGHUP, libc::SIG_IGN);
                     libc::signal(libc::SIGTERM, libc::SIG_DFL);
                 }
                 let inherited = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
@@ -224,44 +237,99 @@ fn supervise(
         spawn_slot(i);
     }
 
-    install_signal_forwarding();
-    tracing::info!(%config.listen, workers, max_requests = config.max_requests, "askr master supervising");
+    install_signals();
+    tracing::info!(%config.listen, workers, max_requests = config.max_requests, "askr master supervising (SIGHUP = graceful reload)");
 
-    // Reap exited workers and respawn a replacement (recycling + crash
-    // resilience). Normal shutdown goes through the signal handler, which kills
-    // the workers and _exit()s the master, so we never respawn during shutdown.
+    // Reap exited workers. Respawn a replacement (recycling / crash resilience /
+    // rolling reload) unless we're shutting down. SIGTERM to a worker makes it
+    // drain gracefully; the master forwards SIGTERM on SIGINT/SIGTERM (shutdown)
+    // and on SIGHUP (reload, but keeps respawning fresh workers).
     loop {
         let mut status: libc::c_int = 0;
         let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if pid == -1 {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => continue, // interrupted by a signal; retry
+                _ => break,                     // ECHILD: no children left
+            }
+        }
         if pid <= 0 {
-            break;
+            continue;
         }
         for i in 0..workers {
             if CHILDREN[i].load(Ordering::SeqCst) == pid {
                 CHILDREN[i].store(0, Ordering::SeqCst);
-                tracing::warn!(pid, worker = i, "worker exited; respawning");
-                spawn_slot(i);
+                if SHUTDOWN.load(Ordering::SeqCst) {
+                    tracing::info!(pid, worker = i, "worker exited (shutdown)");
+                } else {
+                    tracing::info!(pid, worker = i, "worker exited; respawning");
+                    spawn_slot(i);
+                    // Rolling reload: give the fresh worker time to boot (so it's
+                    // accepting) before rolling the next one — keeps enough live
+                    // workers to serve throughout.
+                    if RELOAD_CURSOR.load(Ordering::SeqCst) < WORKER_COUNT.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                        roll_next();
+                    }
+                }
             }
         }
+        if SHUTDOWN.load(Ordering::SeqCst) && CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0) {
+            break;
+        }
     }
+    tracing::info!("askr master exiting");
     Ok(())
 }
 
-extern "C" fn forward_signal(_sig: libc::c_int) {
-    // async-signal-safe: atomic loads + kill()
+/// async-signal-safe: atomic loads + kill().
+fn kill_all(sig: libc::c_int) {
     for c in CHILDREN.iter() {
         let pid = c.load(Ordering::SeqCst);
         if pid > 0 {
-            unsafe { libc::kill(pid, libc::SIGTERM) };
+            unsafe { libc::kill(pid, sig) };
         }
     }
-    unsafe { libc::_exit(0) };
 }
 
-fn install_signal_forwarding() {
+/// SIGINT / SIGTERM: shut down. Tell workers to drain, don't respawn.
+extern "C" fn on_terminate(_sig: libc::c_int) {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+    kill_all(libc::SIGTERM);
+}
+
+/// Roll (gracefully restart) the next worker slot: SIGTERM one worker so it
+/// drains and exits; the reaper respawns it fresh and then rolls the next.
+/// One-at-a-time, so there are always live workers accepting — zero drops.
+fn roll_next() {
+    let n = WORKER_COUNT.load(Ordering::SeqCst);
+    loop {
+        let i = RELOAD_CURSOR.fetch_add(1, Ordering::SeqCst);
+        if i >= n {
+            return; // reload complete
+        }
+        let pid = CHILDREN[i].load(Ordering::SeqCst);
+        if pid > 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            return;
+        }
+        // empty slot; continue to the next
+    }
+}
+
+/// SIGHUP: graceful **rolling** reload. Restart workers one at a time (each
+/// drains, exits, and is respawned fresh — picking up new PHP code) so there's
+/// always a live worker accepting. No dropped connections.
+extern "C" fn on_reload(_sig: libc::c_int) {
+    RELOAD_CURSOR.store(0, Ordering::SeqCst);
+    roll_next();
+}
+
+fn install_signals() {
     unsafe {
-        libc::signal(libc::SIGINT, forward_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, forward_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_terminate as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_reload as *const () as libc::sighandler_t);
     }
 }
 

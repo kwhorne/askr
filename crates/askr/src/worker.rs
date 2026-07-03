@@ -41,9 +41,14 @@ pub fn run_worker(listener: StdListener, config: Config, ini: Option<String>) ->
     let recycle_after = stagger(config.max_requests);
 
     // Build the TLS acceptor (if configured) once per worker.
-    let tls = match (config.tls_cert.clone(), config.tls_key.clone()) {
-        (Some(cert), Some(key)) => Some(crate::tls::acceptor(&cert, &key)?),
-        _ => None,
+    let tls = if config.tls_self_signed {
+        let hosts = vec!["localhost".to_string(), config.listen.ip().to_string()];
+        Some(crate::tls::self_signed(&hosts)?)
+    } else {
+        match (config.tls_cert.clone(), config.tls_key.clone()) {
+            (Some(cert), Some(key)) => Some(crate::tls::acceptor(&cert, &key)?),
+            _ => None,
+        }
     };
 
     listener.set_nonblocking(true)?;

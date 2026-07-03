@@ -26,5 +26,6 @@ tracing-subscriber = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 tokio-rustls = { workspace = true }
+rcgen = { workspace = true }
 libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }

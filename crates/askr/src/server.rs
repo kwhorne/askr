@@ -40,6 +40,7 @@ pub struct Config {
     pub max_requests: usize,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
+    pub tls_self_signed: bool,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -73,6 +74,9 @@ pub async fn run(
         tls,
     });
 
+    // SIGTERM triggers a graceful drain (used for shutdown and rolling reload).
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -86,6 +90,10 @@ pub async fn run(
             }
             _ = rt.shutdown.notified() => {
                 tracing::info!(served = rt.served.load(Ordering::SeqCst), "recycling: draining");
+                break;
+            }
+            _ = sigterm.recv() => {
+                tracing::info!(served = rt.served.load(Ordering::SeqCst), "SIGTERM: draining");
                 break;
             }
         }

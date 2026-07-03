@@ -12,7 +12,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
-/// Build a `TlsAcceptor` from a PEM certificate chain and private key.
+/// Build a `TlsAcceptor` from a PEM certificate chain and private key on disk.
 pub fn acceptor(cert_path: &Path, key_path: &Path) -> anyhow::Result<TlsAcceptor> {
     let cert_pem = std::fs::read(cert_path)
         .with_context(|| format!("reading TLS cert {}", cert_path.display()))?;
@@ -28,6 +28,26 @@ pub fn acceptor(cert_path: &Path, key_path: &Path) -> anyhow::Result<TlsAcceptor
         .context("parsing TLS private key")?
         .with_context(|| format!("no private key found in {}", key_path.display()))?;
 
+    from_parts(certs, key)
+}
+
+/// Build a `TlsAcceptor` with a freshly generated self-signed v3 certificate for
+/// the given hostnames (for dev / testing — browsers will warn).
+pub fn self_signed(hosts: &[String]) -> anyhow::Result<TlsAcceptor> {
+    let cert = rcgen::generate_simple_self_signed(hosts.to_vec())
+        .context("generating self-signed certificate")?;
+
+    let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+    let key_der = PrivateKeyDer::try_from(cert.key_pair.serialize_der())
+        .map_err(|e| anyhow::anyhow!("self-signed key: {e}"))?;
+
+    from_parts(vec![cert_der], key_der)
+}
+
+fn from_parts(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> anyhow::Result<TlsAcceptor> {
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
