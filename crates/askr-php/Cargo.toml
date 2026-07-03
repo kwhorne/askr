@@ -6,7 +6,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Embedded PHP interpreter (embed SAPI) for the Askr application server — M0 spike."
+description = "Embedded PHP interpreter (embed SAPI) via FFI for the Askr application server."
+keywords = ["php", "embed", "sapi", "ffi", "interpreter"]
+categories = ["external-ffi-bindings", "web-programming"]
 
 [dependencies]
 

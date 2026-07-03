@@ -6,7 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Askr — a standalone, memory-safe PHP application server."
+description = "Askr — a standalone, memory-safe PHP application server (embedded PHP, no FastCGI/FPM)."
+keywords = ["php", "server", "laravel", "embedded", "http"]
+categories = ["web-programming::http-server", "command-line-utilities"]
+readme = "../../README.md"
 
 [[bin]]
 name = "askr"
