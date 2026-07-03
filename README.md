@@ -1,4 +1,4 @@
-# Askr
+# Askr — the real server for Laravel & PHP
 
 [![CI](https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg)](https://github.com/kwhorne/askr/actions/workflows/ci.yml)
 &nbsp;·&nbsp; **v0.1.0** &nbsp;·&nbsp; MIT
