@@ -99,14 +99,19 @@ no pkg-config):
 
 ### Reproduce from scratch
 
-Requirements: Rust, a C toolchain (Xcode CLT / build-essential). No brew, no
-autoconf/re2c/pkg-config needed — release tarballs ship a ready `configure`.
+Requirements: Rust and a C toolchain. **On Ubuntu see [docs/UBUNTU.md](docs/UBUNTU.md)**
+for the full build + deploy (systemd) guide — it uses system dev libraries via
+`pkg-config` and produces `libphp.so`. On macOS the script builds the
+dependencies (oniguruma/OpenSSL/libxml2) from source as static libs (no brew, no
+pkg-config); release tarballs ship a ready `configure`.
 
 ```bash
 # 1a. Minimal libphp (core only, ~15s) — enough for the hello/test spike
 ./scripts/build-libphp.sh
 
-# 1b. …or the full Laravel profile (builds oniguruma+openssl+libxml2 statically)
+# 1b. …or the full Laravel profile
+#     Ubuntu: sudo apt-get install -y build-essential pkg-config \
+#               libssl-dev libxml2-dev libonig-dev libsqlite3-dev
 PROFILE=laravel ./scripts/build-libphp.sh
 
 # 2. Build + run
