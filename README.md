@@ -33,6 +33,11 @@ set-cookie: XSRF-TOKEN=...; secure; samesite=lax
 set-cookie: laravel_session=...; secure; httponly; samesite=lax
 ```
 
+In **worker mode** the app boots once and every request reuses it — real
+Laravel 12 per-request latency drops from ~110 ms to **~9 ms**, and throughput on
+8 workers goes from 37 to **347 req/s (9.4×)**, verified correct under load. See
+[Worker mode](#askr--the-standalone-server-a1-) below.
+
 Raw per-request overhead of the embedding layer is negligible — a trivial
 `index.php` runs at **~56,000 req/s on a single core / single interpreter**
 (~0.02 ms/req warm). A full Laravel request is ~110 ms, and that cost is
@@ -135,9 +140,9 @@ own interpreter and a CoW-shared heap.
 | **A1** | `askr serve` runs a real app over HTTP (one process/interpreter) | ✅ |
 | **A3** | Multi-core: fork one worker process per core, shared listener | ✅ |
 | **A4a** | Persistent worker loop: boot the app once, serve many (in-process) | ✅ |
-| A4b | `askr-laravel`: wire real Laravel through the worker loop (state reset) | next |
-| A2 | Prod-grade static serving + `$_SERVER`/body/header mapping | |
-| A5 | TLS (rustls), HTTP/2 & /3, graceful reload, `askr doctor` | |
+| **A4b** | Real Laravel 12 through the worker loop — zero per-request bootstrap | ✅ |
+| A5 | `askr-laravel`: production-grade state reset; TLS, HTTP/2·3, graceful reload | next |
+| A2 | Prod-grade static serving + `$_SERVER`/body/header edge cases | |
 
 ```
 askr serve --root ./public --listen 0.0.0.0:8000 --workers 8 [--https]
@@ -171,13 +176,38 @@ status/headers/body back. Same app, an 8 ms boot, 4 workers:
 | per-request (boots every request) | 346 |
 | worker (boots once) | 1024 (**3×**) |
 
-The gap widens with heavier boots — a real Laravel bootstrap is ~110 ms, most of
-which worker mode eliminates. Wiring real Laravel through this (superglobal +
-container reset between requests) is A4b, the `askr-laravel` package.
+**Real Laravel 12, in worker mode (A4b).** A real Livewire app
+(`examples/laravel-worker.php` boots it once and loops). Instead of refreshing
+PHP superglobals between requests, the worker builds a fresh
+`Illuminate\Http\Request` from the data Askr hands it — clean, no Zend surgery.
+
+Warm per-request latency collapses as the framework bootstrap disappears:
+
+| request | latency |
+| --- | --- |
+| #1 (cold boot) | 303 ms |
+| #2 (warm) | 9.9 ms |
+| #3 (warm) | 8.9 ms |
+
+Throughput, 8 workers, real Laravel 12:
+
+| mode | req/s | ms/req |
+| --- | --- | --- |
+| per-request (the FPM model) | 37 | 26.9 |
+| **worker (boot once)** | **347** | **2.9** |
+
+**9.4× throughput**, and verified correct under load: 300/300 requests `200`,
+each worker booted exactly once, zero application errors — no state bleed.
 
 ```
-askr serve --root ./public --worker-script ./askr-worker.php --workers 8
+ASKR_APP_BASE=/path/to/app askr serve \
+  --root /path/to/app/public \
+  --worker-script examples/laravel-worker.php --workers 8 --https
 ```
+
+Production-grade state reset between requests (full Octane-level: scoped
+instances, rebound singletons, auth/session isolation across every flow) is the
+`askr-laravel` package — that's A5.
 
 ## Layout
 

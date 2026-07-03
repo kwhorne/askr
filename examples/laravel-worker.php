@@ -1,0 +1,90 @@
+<?php
+
+/**
+ * Askr worker script for a real Laravel application (A4b).
+ *
+ * Boots the Laravel app ONCE, then serves every request against the already
+ * booted app — the Octane model, entirely in-process (no FastCGI, no IPC). This
+ * eliminates the per-request framework bootstrap (~110 ms on a typical app).
+ *
+ * Usage:
+ *   ASKR_APP_BASE=/path/to/app \
+ *     askr serve --root /path/to/app/public \
+ *                --worker-script /path/to/askr/examples/laravel-worker.php \
+ *                --workers 8 --https
+ *
+ * This is a hand-written template; the future `askr-laravel` package will
+ * generate and maintain it (with production-grade state reset between requests).
+ *
+ * Key design choice: instead of refreshing PHP superglobals between requests
+ * (fragile Zend surgery), we build a fresh Illuminate\Http\Request from the
+ * request data Askr hands us via `askr_handle_request($handler)`. The `headers`
+ * entry Askr passes is the full CGI $_SERVER map, so it maps straight onto
+ * Request::create()'s $server argument.
+ */
+
+define('LARAVEL_START', microtime(true));
+
+$base = getenv('ASKR_APP_BASE') ?: dirname(__DIR__);
+
+require $base . '/vendor/autoload.php';
+
+/** @var \Illuminate\Foundation\Application $app */
+$app = require $base . '/bootstrap/app.php';
+
+/** @var \Illuminate\Contracts\Http\Kernel $kernel */
+$kernel = $app->make(Illuminate\Contracts\Http\Kernel::class);
+
+$handler = function (array $r) use ($app, $kernel): int {
+    // Askr passes the CGI $_SERVER map as `headers`.
+    $server = $r['headers'];
+
+    $cookies = [];
+    if (!empty($server['HTTP_COOKIE'])) {
+        foreach (explode('; ', $server['HTTP_COOKIE']) as $pair) {
+            $kv = explode('=', $pair, 2);
+            if (count($kv) === 2) {
+                $cookies[urldecode($kv[0])] = urldecode($kv[1]);
+            }
+        }
+    }
+
+    $request = Illuminate\Http\Request::create(
+        $r['uri'],
+        $r['method'],
+        [],        // parameters (parsed from the URI / body by Symfony)
+        $cookies,
+        [],        // files (TODO: multipart uploads)
+        $server,
+        $r['body']
+    );
+
+    $response = $kernel->handle($request);
+
+    // Emit the response — header()/echo are captured by Askr's SAPI shim.
+    http_response_code($response->getStatusCode());
+    foreach ($response->headers->allPreserveCaseWithoutCookies() as $name => $values) {
+        foreach ((array) $values as $value) {
+            header($name . ': ' . $value, false);
+        }
+    }
+    foreach ($response->headers->getCookies() as $cookie) {
+        header('Set-Cookie: ' . $cookie->__toString(), false);
+    }
+    echo $response->getContent();
+
+    $kernel->terminate($request, $response);
+
+    // Minimal per-request state reset. The `askr-laravel` package will do the
+    // full Octane-grade reset (scoped instances, rebound singletons, etc.).
+    if (method_exists($app, 'forgetScopedInstances')) {
+        $app->forgetScopedInstances();
+    }
+
+    return $response->getStatusCode();
+};
+
+// Serve until Askr shuts the worker down.
+while (askr_handle_request($handler)) {
+    // one request handled per iteration
+}
