@@ -4,7 +4,9 @@
 //! A3: scale across cores with SO_REUSEPORT + one forked worker process per core
 //!     (non-ZTS means one interpreter per process, so we scale by processes).
 
+mod admin;
 mod cgi;
+mod config;
 mod doctor;
 mod php;
 mod server;
@@ -14,7 +16,8 @@ mod worker;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 
@@ -37,6 +40,15 @@ struct Cli {
 enum Command {
     /// Serve a PHP application over HTTP.
     Serve {
+        /// Load all settings from a config file (askr.toml). When set, the
+        /// other flags are ignored — the file is the source of truth.
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Admin dashboard/API listen address (e.g. 127.0.0.1:9000). Off if unset.
+        #[arg(long)]
+        admin: Option<SocketAddr>,
+
         /// Document root (the app's public/ directory). Defaults to ./public
         /// if present, otherwise the current directory.
         #[arg(long)]
@@ -99,6 +111,12 @@ enum Command {
         #[arg(long)]
         ini: Option<String>,
     },
+
+    /// Validate a config file and print the resolved settings (no server start).
+    ConfigCheck {
+        /// Path to askr.toml.
+        file: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -112,6 +130,8 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Serve {
+            config: config_file,
+            admin,
             root,
             front,
             listen,
@@ -125,60 +145,109 @@ fn main() -> anyhow::Result<()> {
             tls_self_signed,
             max_body_size,
         } => {
-            let max_body_size = parse_size(&max_body_size)?;
-            let docroot = resolve_root(root)?;
-            let script = docroot.join(&front);
-            if !script.is_file() {
-                anyhow::bail!(
-                    "front controller not found: {} (use --root / --front)",
-                    script.display()
-                );
-            }
-            if let Some(ws) = &worker_script {
-                if !ws.is_file() {
-                    anyhow::bail!("worker script not found: {}", ws.display());
+            // The config file, when given, is the single source of truth.
+            let (config, workers, ini, admin_listen) = if let Some(path) = config_file {
+                let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
+                if let Some(base) = &r.app_base {
+                    // Exported for the worker script; children inherit it across fork.
+                    std::env::set_var("ASKR_APP_BASE", base);
                 }
-            }
-
-            if let Some(c) = &tls_cert {
-                if !c.is_file() {
-                    anyhow::bail!("TLS cert not found: {}", c.display());
+                (r.config, r.workers, r.ini, r.admin_listen)
+            } else {
+                let max_body_size = parse_size(&max_body_size)?;
+                let docroot = resolve_root(root)?;
+                if !docroot.join(&front).is_file() {
+                    anyhow::bail!(
+                        "front controller not found: {} (use --root / --front)",
+                        docroot.join(&front).display()
+                    );
                 }
-            }
-            let tls_on = tls_cert.is_some() || tls_self_signed;
-            let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
-            let config = Config {
-                docroot,
-                front_controller: front,
-                listen,
-                https: https || tls_on, // TLS implies https in $_SERVER
-                worker_script,
-                max_requests,
-                tls_cert,
-                tls_key,
-                tls_self_signed,
-                max_body_size,
+                if let Some(ws) = &worker_script {
+                    anyhow::ensure!(ws.is_file(), "worker script not found: {}", ws.display());
+                }
+                if let Some(c) = &tls_cert {
+                    anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
+                }
+                let tls_on = tls_cert.is_some() || tls_self_signed;
+                let cfg = Config {
+                    docroot,
+                    front_controller: front,
+                    listen,
+                    https: https || tls_on,
+                    worker_script,
+                    max_requests,
+                    tls_cert,
+                    tls_key,
+                    tls_self_signed,
+                    max_body_size,
+                };
+                let w = workers.unwrap_or_else(default_workers).max(1);
+                (
+                    cfg,
+                    w,
+                    ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
+                    admin,
+                )
             };
 
-            let workers = workers.unwrap_or_else(default_workers).max(1);
-            let listener = bind_listener(listen)?;
-            // Recycling needs the supervisor to respawn workers, so use it
-            // whenever workers > 1 or a request cap is set.
-            if workers == 1 && max_requests == 0 {
-                tracing::info!(%listen, workers = 1, "askr serving (single process)");
+            let listener = bind_listener(config.listen)?;
+            // The supervisor is needed for recycling, the admin plane, or >1 worker.
+            let need_supervisor = workers > 1 || config.max_requests > 0 || admin_listen.is_some();
+            if !need_supervisor {
+                tracing::info!(listen = %config.listen, workers = 1, "askr serving (single process)");
                 run_worker(listener, config, ini)
             } else {
-                supervise(listener, config, ini, workers)
+                supervise(listener, config, ini, workers, admin_listen)
             }
         }
         Command::Doctor { ini } => {
             let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
-            let ok = doctor::run(ini);
-            if ok {
+            if doctor::run(ini) {
                 Ok(())
             } else {
                 std::process::exit(1);
             }
+        }
+        Command::ConfigCheck { file } => {
+            let raw = config::FileConfig::load(&file)?;
+            let resolved = raw.resolve(default_workers())?;
+            println!("✓ config OK: {}", file.display());
+            let c = &resolved.config;
+            println!("  listen:        {}", c.listen);
+            println!("  root:          {}", c.docroot.display());
+            println!("  front:         {}", c.front_controller.display());
+            println!("  workers:       {}", resolved.workers);
+            println!(
+                "  mode:          {}",
+                if c.worker_script.is_some() {
+                    "worker (boot once)"
+                } else {
+                    "per-request"
+                }
+            );
+            if let Some(ws) = &c.worker_script {
+                println!("  worker script: {}", ws.display());
+            }
+            println!("  max_requests:  {}", c.max_requests);
+            println!("  max_body_size: {} bytes", c.max_body_size);
+            println!(
+                "  tls:           {}",
+                if c.tls_self_signed {
+                    "self-signed".into()
+                } else if c.tls_cert.is_some() {
+                    "cert + key".into()
+                } else {
+                    "off".to_string()
+                }
+            );
+            println!(
+                "  admin:         {}",
+                resolved
+                    .admin_listen
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "off".into())
+            );
+            Ok(())
         }
     }
 }
@@ -197,6 +266,45 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 // Next slot to roll during a graceful reload; >= WORKER_COUNT means "not rolling".
 static RELOAD_CURSOR: AtomicUsize = AtomicUsize::new(usize::MAX);
+static START_TIME: AtomicU64 = AtomicU64::new(0);
+static RESPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Live supervisor status, consumed by the admin API/dashboard.
+pub struct Status {
+    pub uptime_secs: u64,
+    pub workers_configured: usize,
+    pub workers_alive: usize,
+    pub respawns: usize,
+    pub pids: Vec<i32>,
+}
+
+pub fn status() -> Status {
+    let pids: Vec<i32> = CHILDREN
+        .iter()
+        .map(|c| c.load(Ordering::SeqCst))
+        .filter(|&p| p > 0)
+        .collect();
+    Status {
+        uptime_secs: now_secs().saturating_sub(START_TIME.load(Ordering::SeqCst)),
+        workers_configured: WORKER_COUNT.load(Ordering::SeqCst),
+        workers_alive: pids.len(),
+        respawns: RESPAWN_COUNT.load(Ordering::SeqCst),
+        pids,
+    }
+}
+
+/// Trigger a graceful rolling reload (used by SIGHUP and the admin API).
+pub fn trigger_reload() {
+    RELOAD_CURSOR.store(0, Ordering::SeqCst);
+    roll_next();
+}
 
 /// Fork `workers` child processes, each running an independent worker on the
 /// shared inherited listener, then supervise them: forward termination signals
@@ -206,10 +314,25 @@ fn supervise(
     config: Config,
     ini: Option<String>,
     workers: usize,
+    admin_listen: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
     let workers = workers.min(MAX_WORKERS);
     WORKER_COUNT.store(workers, Ordering::SeqCst);
+    START_TIME.store(now_secs(), Ordering::SeqCst);
     let listen_fd: RawFd = listener.as_raw_fd();
+
+    // Optional admin dashboard/API (runs in its own thread in the master).
+    if let Some(addr) = admin_listen {
+        let info = admin::Info {
+            server_listen: config.listen,
+            mode: if config.worker_script.is_some() {
+                "worker"
+            } else {
+                "per-request"
+            },
+        };
+        admin::spawn(addr, info);
+    }
 
     // Fork one worker into slot `i`. In the child this never returns (it runs
     // the worker and exits); in the parent it records the pid.
@@ -280,6 +403,7 @@ fn supervise(
                     tracing::info!(pid, worker = i, "worker exited (shutdown)");
                 } else {
                     tracing::info!(pid, worker = i, "worker exited; respawning");
+                    RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
                     spawn_slot(i);
                     // Rolling reload: give the fresh worker time to boot (so it's
                     // accepting) before rolling the next one — keeps enough live

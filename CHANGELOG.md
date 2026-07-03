@@ -24,6 +24,10 @@ the roadmap in [`docs/PRD.md`](docs/PRD.md).
   `--tls-self-signed` (rcgen).
 - **A2** — request hardening: `--max-body-size` (413 on oversize, incl. chunked),
   HEAD, and verified GET/POST (form + JSON) handling.
+- **A6** — typed `askr.toml` config (source of truth for tooling/GUI),
+  `askr config-check`, and a built-in **admin dashboard + API** in the master
+  (`GET /`, `GET /api/status`, `POST /api/reload`) — the server-appropriate GUI
+  for maintaining/configuring a live server.
 
 ### Embedded PHP (`askr-php`)
 - **M0** — proved PHP embed SAPI runs in-process from Rust (non-ZTS), capturing

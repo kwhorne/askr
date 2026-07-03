@@ -1,0 +1,33 @@
+# Example Askr configuration.
+#
+#   askr config-check askr.toml   # validate + print resolved settings
+#   askr serve --config askr.toml # run (the file is the source of truth)
+#
+# This is the declarative source of truth an admin GUI edits.
+
+[server]
+listen = "0.0.0.0:8000"
+root = "/var/www/app/public"
+front = "index.php"          # front controller, relative to root
+workers = "auto"             # a number, or "auto" (= CPU cores)
+max_requests = 1000          # recycle each worker after N requests (0 = never)
+max_body_size = "16M"        # 413 above this (K/M/G or plain bytes)
+https = false                # force HTTPS in $_SERVER (behind a TLS terminator)
+
+[worker]
+# Worker mode: boot the app once, serve many (the Octane model, in-process).
+# Omit this whole section to run the front controller fresh per request.
+script = "/opt/askr/examples/laravel-worker.php"
+app_base = "/var/www/app"    # exported as $ASKR_APP_BASE for the worker script
+ini = "zend_extension=/opt/askr/vendor/php-build/install/lib/php/extensions/no-debug-non-zts-20240924/opcache.so\nopcache.enable=1\nopcache.validate_timestamps=0"
+
+[tls]
+# Either provide cert + key, or set self_signed = true (dev only). Omit for HTTP.
+# cert = "/etc/askr/cert.pem"
+# key  = "/etc/askr/key.pem"
+self_signed = false
+
+[admin]
+# Built-in dashboard + API (status, graceful reload). Bind to localhost and
+# reach it over SSH / a private network. Omit to disable.
+listen = "127.0.0.1:9000"

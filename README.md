@@ -153,6 +153,7 @@ own interpreter and a CoW-shared heap.
 | **A5c** | TLS (rustls) + HTTP/2 (ALPN) + `askr doctor` pre-flight | ✅ |
 | **A5d** | Graceful rolling reload (SIGHUP) + `--tls-self-signed` | ✅ |
 | **A2** | Request edge cases: body-size limit (413), HEAD, GET/POST verified | ✅ |
+| **A6** | Typed config (`askr.toml`), `config-check`, admin dashboard + API | ✅ |
 | A5e | HTTP/3 (QUIC), `askr-laravel` package, io_uring core (Linux), `$_FILES` | next |
 
 ```
@@ -301,6 +302,30 @@ early on a declared `Content-Length` and also capped for chunked bodies (no
 `Content-Length` with no body; `GET`/`POST` (form and JSON, with query strings
 and cookies) are verified end-to-end. Multipart uploads (`$_FILES`) are next.
 
+## Configuration & admin (A6)
+
+A typed config file (`askr.toml`, see [`examples/askr.toml`](examples/askr.toml))
+is the declarative source of truth — the thing an admin GUI edits.
+
+```
+askr config-check askr.toml     # validate + print resolved settings
+askr serve --config askr.toml   # run (the file is authoritative)
+```
+
+**Built-in admin dashboard.** Set `[admin] listen` (or `--admin 127.0.0.1:9000`)
+to expose a small control plane from the master process:
+
+| endpoint | |
+| --- | --- |
+| `GET /` | HTML dashboard — uptime, workers alive/configured, respawns, PIDs, a reload button |
+| `GET /api/status` | supervisor status as JSON |
+| `POST /api/reload` | trigger a graceful rolling reload |
+
+This is the server-appropriate "GUI" for maintaining/configuring a live server:
+bind it to localhost and reach it over SSH or a private network — no desktop app,
+no install. A future desktop *control center* (Grove-style, Tauri) can manage a
+fleet of servers through this same API.
+
 ## Layout
 
 ```
@@ -313,6 +338,8 @@ crates/
     src/server.rs    hyper front: TLS, HTTP/1.1+2, static files, dispatch, drain
     src/tls.rs       rustls TLS acceptor (ring; ALPN h2/http1.1)
     src/doctor.rs    `askr doctor` pre-flight checks
+    src/config.rs    typed askr.toml config + validation
+    src/admin.rs     admin dashboard + status/reload API
   askr-php/          embedded PHP (embed SAPI) — the M0 spike
     csrc/shim.c      thin C layer: boot Zend, per-request cycle, capture I/O
     build.rs         compiles the shim, links libphp via php-config
