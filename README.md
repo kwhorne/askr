@@ -134,8 +134,9 @@ own interpreter and a CoW-shared heap.
 | --- | --- | --- |
 | **A1** | `askr serve` runs a real app over HTTP (one process/interpreter) | ✅ |
 | **A3** | Multi-core: fork one worker process per core, shared listener | ✅ |
-| A2 | Prod-grade static serving + `$_SERVER`/body/header mapping | next |
-| A4 | Warm master + CoW fork → zero per-request bootstrap | |
+| **A4a** | Persistent worker loop: boot the app once, serve many (in-process) | ✅ |
+| A4b | `askr-laravel`: wire real Laravel through the worker loop (state reset) | next |
+| A2 | Prod-grade static serving + `$_SERVER`/body/header mapping | |
 | A5 | TLS (rustls), HTTP/2 & /3, graceful reload, `askr doctor` | |
 
 ```
@@ -156,9 +157,27 @@ load-gen on the same box):
 | 8 | 37.0 | 4.2× |
 
 tokio/hyper is the pragmatic I/O layer; the share-nothing endgame swaps it for a
-per-core io_uring loop behind the same seam (`Php::handle`). A4 adds the big win:
-a warm master boots Laravel once and CoW-forks workers, eliminating the
-~110 ms per-request framework bootstrap entirely.
+per-core io_uring loop behind the same seam (`Php::handle`).
+
+**Worker mode (A4a) — the big win.** With `--worker-script`, each worker boots
+the application *once* and then loops, serving every request against the
+already-booted app (the Octane model, entirely in-process — no IPC). A registered
+PHP function `askr_handle_request($handler)` blocks until Rust delivers a
+request, runs the handler against the warm app, and ships the captured
+status/headers/body back. Same app, an 8 ms boot, 4 workers:
+
+| mode | req/s |
+| --- | --- |
+| per-request (boots every request) | 346 |
+| worker (boots once) | 1024 (**3×**) |
+
+The gap widens with heavier boots — a real Laravel bootstrap is ~110 ms, most of
+which worker mode eliminates. Wiring real Laravel through this (superglobal +
+container reset between requests) is A4b, the `askr-laravel` package.
+
+```
+askr serve --root ./public --worker-script ./askr-worker.php --workers 8
+```
 
 ## Layout
 
@@ -167,7 +186,7 @@ crates/
   askr/              the standalone server binary (A1 + A3)
     src/main.rs      CLI + fork-per-core supervisor (signal forwarding, reaping)
     src/worker.rs    one worker: shared listener + runtime + interpreter
-    src/php.rs       interpreter pinned to a dedicated thread (non-ZTS)
+    src/php.rs       interpreter on a dedicated thread; per-request + worker modes
     src/cgi.rs       HTTP request -> CGI $_SERVER mapping
     src/server.rs    hyper front: static files + dispatch to PHP
   askr-php/          embedded PHP (embed SAPI) — the M0 spike

@@ -23,6 +23,7 @@
 
 #include <php_embed.h>
 #include <zend_stream.h>
+#include <zend_API.h>
 #include <SAPI.h>
 
 #include <signal.h>
@@ -89,6 +90,11 @@ typedef struct {
 
 static askr_req g_req;             /* single-threaded: the one in-flight request */
 static const char *g_cookie = NULL; /* Cookie header for the current request */
+static int g_worker_mode = 0;      /* 1 while inside the persistent worker loop */
+
+/* Worker-request body (declared early: askr_read_post references it). */
+static char  *w_body;
+static size_t w_body_len;
 
 /* ------------------------------------------------------------------ */
 /* SAPI callbacks                                                     */
@@ -109,7 +115,18 @@ static void askr_send_header(sapi_header_struct *h, void *server_context) {
     }
 }
 
+static size_t w_body_off_read = 0;
+
 static size_t askr_read_post(char *buffer, size_t count_bytes) {
+    if (g_worker_mode) {
+        size_t avail = w_body_len - w_body_off_read;
+        size_t n = count_bytes < avail ? count_bytes : avail;
+        if (n) {
+            memcpy(buffer, w_body + w_body_off_read, n);
+            w_body_off_read += n;
+        }
+        return n;
+    }
     size_t avail = g_req.body_len - g_req.body_off;
     size_t n = count_bytes < avail ? count_bytes : avail;
     if (n) {
@@ -148,6 +165,10 @@ static char askr_ini[] =
     "error_reporting=E_ALL\n"
     "register_argc_argv=0\n";
 
+/* Defined in the worker section below; registered at module startup so the
+ * function is available to worker scripts. */
+static const zend_function_entry askr_functions[];
+
 int askr_php_startup(void) {
 #if defined(SIGPIPE) && defined(SIG_IGN)
     signal(SIGPIPE, SIG_IGN);
@@ -163,6 +184,9 @@ int askr_php_startup(void) {
     php_embed_module.flush = NULL;
 
     sapi_startup(&php_embed_module);
+
+    /* Register askr_handle_request() at module startup (MINIT). */
+    php_embed_module.additional_functions = askr_functions;
 
     /* Base INI plus optional extra lines from $ASKR_PHP_INI (e.g. to load
      * opcache: "zend_extension=.../opcache.so\nopcache.enable=1"). */
@@ -281,6 +305,176 @@ int askr_php_handle(
         (*out_headers)[g_req.hdr.len] = '\0';
     }
 
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* persistent worker loop (A4: boot once, serve many)                 */
+/* ------------------------------------------------------------------ */
+/*
+ * The worker script boots the application once, then loops calling the PHP
+ * function askr_handle_request($handler). Each call blocks until Rust delivers
+ * a request, invokes $handler($request) against the already-booted app, and
+ * ships the captured output/headers/status back to Rust — with no per-request
+ * framework bootstrap. This is the Octane model, in-process.
+ */
+
+/* Rust-provided bridge callbacks. */
+typedef int (*askr_wait_fn)(void *ctx);   /* block; 1 = request ready, 0 = stop */
+typedef void (*askr_reply_fn)(void *ctx, const char *body, size_t blen,
+                              const char *hdrs, size_t hlen, int status);
+
+static askr_wait_fn  g_wait = NULL;
+static askr_reply_fn g_reply = NULL;
+static void         *g_ctx = NULL;
+
+/* Current worker request, populated by Rust via the setters below. */
+#define ASKR_MAX_HEADERS 128
+static char  *w_method;
+static char  *w_uri;
+static char  *w_query;
+static char  *w_hnames[ASKR_MAX_HEADERS];
+static char  *w_hvalues[ASKR_MAX_HEADERS];
+static int    w_nheaders;
+
+static char *dup_cstr(const char *s) {
+    if (!s) return NULL;
+    size_t n = strlen(s) + 1;
+    char *p = (char *)malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+/* Setters called by Rust from inside the wait callback. */
+void askr_req_reset(void) {
+    free(w_method); w_method = NULL;
+    free(w_uri);    w_uri = NULL;
+    free(w_query);  w_query = NULL;
+    for (int i = 0; i < w_nheaders; i++) { free(w_hnames[i]); free(w_hvalues[i]); }
+    w_nheaders = 0;
+    free(w_body); w_body = NULL; w_body_len = 0;
+}
+
+void askr_req_set_meta(const char *method, const char *uri, const char *query) {
+    w_method = dup_cstr(method);
+    w_uri = dup_cstr(uri);
+    w_query = dup_cstr(query);
+}
+
+void askr_req_add_header(const char *name, const char *value) {
+    if (w_nheaders < ASKR_MAX_HEADERS) {
+        w_hnames[w_nheaders] = dup_cstr(name);
+        w_hvalues[w_nheaders] = dup_cstr(value);
+        w_nheaders++;
+    }
+}
+
+void askr_req_set_body(const char *ptr, size_t len) {
+    free(w_body);
+    w_body = (char *)malloc(len + 1);
+    if (w_body) { memcpy(w_body, ptr, len); w_body[len] = '\0'; }
+    w_body_len = len;
+}
+
+/* Reset SAPI response state between iterations (no RSHUTDOWN). */
+static void worker_reset_response(void) {
+    buf_reset(&g_req.out);
+    buf_reset(&g_req.hdr);
+    SG(sapi_headers).http_response_code = 200;
+    SG(headers_sent) = 0;
+    zend_llist_clean(&SG(sapi_headers).headers);
+    SG(sapi_headers).send_default_content_type = 1;
+}
+
+/* bool askr_handle_request(callable $handler) */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_handle_request, 0, 0, 1)
+    ZEND_ARG_INFO(0, handler)
+ZEND_END_ARG_INFO()
+
+static PHP_FUNCTION(askr_handle_request) {
+    zval *handler;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(handler)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!g_wait || !g_wait(g_ctx)) {
+        RETURN_FALSE;
+    }
+    worker_reset_response();
+
+    /* Build $request = ['method','uri','query','headers'=>[..],'body']. */
+    zval request;
+    array_init(&request);
+    add_assoc_string(&request, "method", w_method ? w_method : "GET");
+    add_assoc_string(&request, "uri", w_uri ? w_uri : "/");
+    add_assoc_string(&request, "query", w_query ? w_query : "");
+    zval headers;
+    array_init(&headers);
+    for (int i = 0; i < w_nheaders; i++) {
+        add_assoc_string(&headers, w_hnames[i], w_hvalues[i]);
+    }
+    add_assoc_zval(&request, "headers", &headers);
+    add_assoc_stringl(&request, "body", w_body ? w_body : "", w_body_len);
+
+    /* $handler($request) */
+    zval retval, params[1];
+    ZVAL_COPY_VALUE(&params[0], &request);
+    if (call_user_function(NULL, NULL, handler, &retval, 1, params) == SUCCESS) {
+        zval_ptr_dtor(&retval);
+    }
+    zval_ptr_dtor(&request);
+
+    /* Flush headers into our capture even if the body was empty. */
+    sapi_send_headers();
+
+    int status = SG(sapi_headers).http_response_code;
+    if (status == 0) status = 200;
+
+    if (g_reply) {
+        g_reply(g_ctx, g_req.out.ptr, g_req.out.len, g_req.hdr.ptr, g_req.hdr.len, status);
+    }
+    RETURN_TRUE;
+}
+
+static const zend_function_entry askr_functions[] = {
+    ZEND_FE(askr_handle_request, arginfo_askr_handle_request)
+    ZEND_FE_END
+};
+
+/* Run the worker script in one long-lived request context. Blocks until the
+ * worker loop ends (g_wait returns 0). */
+int askr_php_run_worker(const char *script, askr_wait_fn wait, askr_reply_fn reply, void *ctx) {
+    g_wait = wait;
+    g_reply = reply;
+    g_ctx = ctx;
+
+    SG(server_context) = &g_req; /* non-NULL => live connection */
+    SG(request_info).request_method = "GET";
+    SG(request_info).path_translated = (char *)script;
+    SG(request_info).request_uri = (char *)"";
+    SG(request_info).proto_num = 1001;
+    SG(sapi_headers).http_response_code = 200;
+
+    if (php_request_startup() == FAILURE) {
+        return -1;
+    }
+    g_worker_mode = 1;
+
+    int rc = 0;
+    zend_first_try {
+        zend_file_handle fh;
+        zend_stream_init_filename(&fh, script);
+        if (php_execute_script(&fh) == false) {
+            rc = 1;
+        }
+        zend_destroy_file_handle(&fh);
+    } zend_catch {
+        rc = 2;
+    } zend_end_try();
+
+    g_worker_mode = 0;
+    php_request_shutdown((void *)0);
+    askr_req_reset();
     return rc;
 }
 

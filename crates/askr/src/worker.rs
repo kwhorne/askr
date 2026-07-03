@@ -30,7 +30,11 @@ pub fn bind_listener(addr: SocketAddr) -> anyhow::Result<StdListener> {
 /// Run the serve loop for one worker on an already-bound (shared) listener.
 pub fn run_worker(listener: StdListener, config: Config, ini: Option<String>) -> anyhow::Result<()> {
     // Boot the interpreter (its own dedicated thread) before the runtime.
-    let php = Php::spawn(ini)?;
+    // Worker mode boots the app once; otherwise each request runs fresh.
+    let php = match config.worker_script.clone() {
+        Some(script) => Php::spawn_worker(script, ini)?,
+        None => Php::spawn(ini)?,
+    };
 
     listener.set_nonblocking(true)?;
 

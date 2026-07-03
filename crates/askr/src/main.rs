@@ -55,6 +55,12 @@ enum Command {
         /// Extra php.ini lines, e.g. to load opcache. Overrides $ASKR_PHP_INI.
         #[arg(long)]
         ini: Option<String>,
+
+        /// Worker script: boot the app once and serve many requests against it
+        /// (the Octane model, in-process). When omitted, each request runs the
+        /// front controller from scratch.
+        #[arg(long)]
+        worker_script: Option<PathBuf>,
     },
 }
 
@@ -75,6 +81,7 @@ fn main() -> anyhow::Result<()> {
             workers,
             https,
             ini,
+            worker_script,
         } => {
             let docroot = resolve_root(root)?;
             let script = docroot.join(&front);
@@ -84,6 +91,11 @@ fn main() -> anyhow::Result<()> {
                     script.display()
                 );
             }
+            if let Some(ws) = &worker_script {
+                if !ws.is_file() {
+                    anyhow::bail!("worker script not found: {}", ws.display());
+                }
+            }
 
             let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
             let config = Config {
@@ -91,6 +103,7 @@ fn main() -> anyhow::Result<()> {
                 front_controller: front,
                 listen,
                 https,
+                worker_script,
             };
 
             let workers = workers.unwrap_or_else(default_workers).max(1);

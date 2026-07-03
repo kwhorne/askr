@@ -269,6 +269,46 @@ impl Drop for Interpreter {
     }
 }
 
+/// Persistent worker-loop bridge (A4). The interpreter runs a long-lived worker
+/// script that boots the app once and loops; each iteration blocks in
+/// `wait`, runs the app, and delivers the response through `reply`. All items
+/// here are raw FFI — the callbacks use the C ABI and receive an opaque `ctx`
+/// pointer, so the caller wires up its own trampolines and state.
+pub mod worker {
+    use std::ffi::{c_char, c_int, c_void};
+
+    /// Blocks until a request is ready. Return 1 to process, 0 to stop the loop.
+    pub type WaitFn = extern "C" fn(*mut c_void) -> c_int;
+    /// Delivers a finished response (body, headers, status) back to the caller.
+    pub type ReplyFn =
+        extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize, c_int);
+
+    extern "C" {
+        /// Run the worker script in one long-lived request context. Blocks
+        /// until the loop ends. Must be called on the interpreter's thread,
+        /// after the engine has started.
+        pub fn askr_php_run_worker(
+            script: *const c_char,
+            wait: WaitFn,
+            reply: ReplyFn,
+            ctx: *mut c_void,
+        ) -> c_int;
+
+        /// Clear the current worker request.
+        pub fn askr_req_reset();
+        /// Set method / uri / query for the current worker request.
+        pub fn askr_req_set_meta(
+            method: *const c_char,
+            uri: *const c_char,
+            query: *const c_char,
+        );
+        /// Append a header to the current worker request.
+        pub fn askr_req_add_header(name: *const c_char, value: *const c_char);
+        /// Set the body of the current worker request.
+        pub fn askr_req_set_body(ptr: *const c_char, len: usize);
+    }
+}
+
 /// Convenience: helper used by tests to read a C string (unused in normal flow).
 #[allow(dead_code)]
 unsafe fn cstr_to_string(p: *const c_char) -> String {

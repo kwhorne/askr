@@ -28,6 +28,7 @@ pub struct Config {
     pub front_controller: PathBuf, // relative, e.g. index.php
     pub listen: SocketAddr,
     pub https: bool,
+    pub worker_script: Option<PathBuf>,
 }
 
 /// Serve on an already-bound listener (built with SO_REUSEPORT by the worker).
