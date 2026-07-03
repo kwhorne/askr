@@ -19,12 +19,13 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
+use tokio_rustls::TlsAcceptor;
 
 use crate::cgi;
 use crate::php::Php;
@@ -37,6 +38,8 @@ pub struct Config {
     pub https: bool,
     pub worker_script: Option<PathBuf>,
     pub max_requests: usize,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -47,15 +50,18 @@ struct Runtime {
     recycle_after: usize,
     shutdown: Notify,
     active: AtomicUsize,
+    tls: Option<TlsAcceptor>,
 }
 
 /// Serve on an already-bound listener. Returns when a graceful recycle/shutdown
-/// has drained; `recycle_after` = 0 means serve forever.
+/// has drained; `recycle_after` = 0 means serve forever. When `tls` is set,
+/// every connection is TLS-terminated (ALPN: h2, http/1.1).
 pub async fn run(
     listener: TcpListener,
     config: Arc<Config>,
     php: Php,
     recycle_after: usize,
+    tls: Option<TlsAcceptor>,
 ) -> anyhow::Result<()> {
     let rt = Arc::new(Runtime {
         config,
@@ -64,20 +70,17 @@ pub async fn run(
         recycle_after,
         shutdown: Notify::new(),
         active: AtomicUsize::new(0),
+        tls,
     });
 
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, peer) = accepted?;
-                let io = TokioIo::new(stream);
                 let rt = rt.clone();
                 rt.active.fetch_add(1, Ordering::SeqCst);
                 tokio::task::spawn(async move {
-                    let service = service_fn(|req| handle(req, rt.clone(), peer));
-                    if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                        tracing::debug!(error = %e, "connection closed");
-                    }
+                    serve_conn(stream, rt.clone(), peer).await;
                     rt.active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -94,6 +97,32 @@ pub async fn run(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     Ok(())
+}
+
+/// Handle one connection: optionally TLS-terminate, then serve HTTP/1.1 or
+/// HTTP/2 (auto-negotiated) until the connection closes.
+async fn serve_conn(stream: tokio::net::TcpStream, rt: Arc<Runtime>, peer: SocketAddr) {
+    if let Some(acceptor) = rt.tls.clone() {
+        match acceptor.accept(stream).await {
+            Ok(tls) => serve_io(TokioIo::new(tls), rt, peer).await,
+            Err(e) => tracing::debug!(error = %e, "TLS handshake failed"),
+        }
+    } else {
+        serve_io(TokioIo::new(stream), rt, peer).await;
+    }
+}
+
+async fn serve_io<I>(io: I, rt: Arc<Runtime>, peer: SocketAddr)
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let service = service_fn(move |req| handle(req, rt.clone(), peer));
+    if let Err(e) = auto::Builder::new(TokioExecutor::new())
+        .serve_connection(io, service)
+        .await
+    {
+        tracing::debug!(error = %e, "connection closed");
+    }
 }
 
 async fn handle(

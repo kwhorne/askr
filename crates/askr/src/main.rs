@@ -5,8 +5,10 @@
 //!     (non-ZTS means one interpreter per process, so we scale by processes).
 
 mod cgi;
+mod doctor;
 mod php;
 mod server;
+mod tls;
 mod worker;
 
 use std::net::SocketAddr;
@@ -67,6 +69,21 @@ enum Command {
         /// fresh worker to replace it. Requires the multi-process supervisor.
         #[arg(long, default_value = "0")]
         max_requests: usize,
+
+        /// TLS certificate chain (PEM). Enables HTTPS (ALPN: h2, http/1.1).
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key (PEM).
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+    },
+
+    /// Pre-flight checks: PHP build, extensions, and platform support.
+    Doctor {
+        /// Extra php.ini lines (e.g. to load opcache).
+        #[arg(long)]
+        ini: Option<String>,
     },
 }
 
@@ -89,6 +106,8 @@ fn main() -> anyhow::Result<()> {
             ini,
             worker_script,
             max_requests,
+            tls_cert,
+            tls_key,
         } => {
             let docroot = resolve_root(root)?;
             let script = docroot.join(&front);
@@ -104,14 +123,22 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
+            if let Some(c) = &tls_cert {
+                if !c.is_file() {
+                    anyhow::bail!("TLS cert not found: {}", c.display());
+                }
+            }
+            let tls_on = tls_cert.is_some();
             let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
             let config = Config {
                 docroot,
                 front_controller: front,
                 listen,
-                https,
+                https: https || tls_on, // TLS implies https in $_SERVER
                 worker_script,
                 max_requests,
+                tls_cert,
+                tls_key,
             };
 
             let workers = workers.unwrap_or_else(default_workers).max(1);
@@ -123,6 +150,15 @@ fn main() -> anyhow::Result<()> {
                 run_worker(listener, config, ini)
             } else {
                 supervise(listener, config, ini, workers)
+            }
+        }
+        Command::Doctor { ini } => {
+            let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
+            let ok = doctor::run(ini);
+            if ok {
+                Ok(())
+            } else {
+                std::process::exit(1);
             }
         }
     }
@@ -168,7 +204,7 @@ fn supervise(
                 let code = match run_worker(inherited, config.clone(), ini.clone()) {
                     Ok(()) => 0,
                     Err(e) => {
-                        eprintln!("askr worker {i}: {e}");
+                        eprintln!("askr worker {i}: {e:#}");
                         1
                     }
                 };

@@ -40,6 +40,12 @@ pub fn run_worker(listener: StdListener, config: Config, ini: Option<String>) ->
     // all recycle at the same instant and leave a gap with no live workers.
     let recycle_after = stagger(config.max_requests);
 
+    // Build the TLS acceptor (if configured) once per worker.
+    let tls = match (config.tls_cert.clone(), config.tls_key.clone()) {
+        (Some(cert), Some(key)) => Some(crate::tls::acceptor(&cert, &key)?),
+        _ => None,
+    };
+
     listener.set_nonblocking(true)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -49,7 +55,7 @@ pub fn run_worker(listener: StdListener, config: Config, ini: Option<String>) ->
 
     rt.block_on(async move {
         let listener = TcpListener::from_std(listener)?;
-        server::run(listener, Arc::new(config), php, recycle_after).await
+        server::run(listener, Arc::new(config), php, recycle_after, tls).await
     })
 }
 

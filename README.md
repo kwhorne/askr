@@ -143,7 +143,8 @@ own interpreter and a CoW-shared heap.
 | **A4b** | Real Laravel 12 through the worker loop — zero per-request bootstrap | ✅ |
 | **A5a** | Worker recycling (`--max-requests`) with graceful drain + auto-respawn | ✅ |
 | **A5b** | Octane-style per-request state reset (no bleed between requests) | ✅ |
-| A5c | TLS (rustls), HTTP/2·3, graceful config reload, `askr doctor` | next |
+| **A5c** | TLS (rustls) + HTTP/2 (ALPN) + `askr doctor` pre-flight | ✅ |
+| A5d | HTTP/3 (QUIC), graceful config reload (SIGHUP), `askr-laravel` package | next |
 | A2 | Prod-grade static serving + `$_SERVER`/body/header edge cases | |
 
 ```
@@ -232,6 +233,36 @@ RSS flat (~64→66 MB over 600 requests — no accumulation), zero errors.
 
 The full, framework-version-aware reset will live in the `askr-laravel` package.
 
+**TLS + HTTP/2 (A5c).** Askr terminates TLS itself (rustls, ring provider — no
+OpenSSL, no C toolchain) so it's a complete single binary with no proxy in front.
+ALPN negotiates HTTP/2 or HTTP/1.1 automatically.
+
+```
+askr serve --root ./public --worker-script examples/laravel-worker.php \
+  --workers 8 --tls-cert cert.pem --tls-key key.pem
+```
+
+Verified: HTTPS negotiates **HTTP/2**, 100/100 concurrent requests `200`, and
+Laravel sees `HTTPS` in `$_SERVER` (cookies get the `secure` flag). Certs must be
+X.509 v3 (rustls rejects v1 — use `-addext subjectAltName=...` with openssl).
+
+**`askr doctor`** is a pre-flight check for deploys:
+
+```
+$ askr doctor
+  ✓ embedded PHP 8.4.11
+  ✓ thread safety: non-ZTS (NTS)
+  ✓ ext-ctype … ext-openssl … ext-dom  (all required present)
+  · 30 extensions loaded
+  platform: linux
+  ✓ kernel 6.x (io_uring needs ≥ 5.1)
+  ✓ all critical checks passed
+```
+
+It verifies the PHP build is non-ZTS (required, PRD §6.1), every Laravel-required
+extension is present, and — on Linux — the kernel supports io_uring. Exit code is
+non-zero if a critical check fails, so it can gate a deploy.
+
 ## Layout
 
 ```
@@ -241,7 +272,9 @@ crates/
     src/worker.rs    one worker: shared listener + runtime + interpreter
     src/php.rs       interpreter on a dedicated thread; per-request + worker modes
     src/cgi.rs       HTTP request -> CGI $_SERVER mapping
-    src/server.rs    hyper front: static files + dispatch to PHP
+    src/server.rs    hyper front: TLS, HTTP/1.1+2, static files, dispatch, drain
+    src/tls.rs       rustls TLS acceptor (ring; ALPN h2/http1.1)
+    src/doctor.rs    `askr doctor` pre-flight checks
   askr-php/          embedded PHP (embed SAPI) — the M0 spike
     csrc/shim.c      thin C layer: boot Zend, per-request cycle, capture I/O
     build.rs         compiles the shim, links libphp via php-config
