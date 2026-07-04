@@ -16,9 +16,11 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
+      # For a tag push this is the tag; for manual dispatch it's the branch the
+      # workflow was started from (so it always has the packaging script).
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 
