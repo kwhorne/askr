@@ -24,6 +24,7 @@
 #include <php_embed.h>
 #include <zend_stream.h>
 #include <zend_API.h>
+#include <zend_exceptions.h>
 #include <SAPI.h>
 
 #include <signal.h>
@@ -396,6 +397,48 @@ static void worker_reset_response(void) {
     SG(sapi_headers).send_default_content_type = 1;
 }
 
+/* Deferred closures (askr_defer): run after the response is handed to Rust, so
+ * the client already has the reply while the worker does the extra work (email,
+ * webhooks, logging) before it accepts the next request. */
+#define ASKR_MAX_DEFER 256
+static zval g_deferred[ASKR_MAX_DEFER];
+static int  g_ndeferred = 0;
+
+/* void askr_defer(callable $fn) */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_defer, 0, 0, 1)
+    ZEND_ARG_INFO(0, callback)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_defer) {
+    zval *cb;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(cb)
+    ZEND_PARSE_PARAMETERS_END();
+    if (g_ndeferred < ASKR_MAX_DEFER) {
+        ZVAL_COPY(&g_deferred[g_ndeferred], cb);
+        g_ndeferred++;
+        RETURN_TRUE;
+    }
+    RETURN_FALSE;
+}
+
+/* Run and clear the deferred queue. Each callback is isolated: a thrown
+ * exception is reported and cleared so it can't poison the next callback or the
+ * next request. */
+static void askr_run_deferred(void) {
+    for (int i = 0; i < g_ndeferred; i++) {
+        zval dret;
+        if (call_user_function(NULL, NULL, &g_deferred[i], &dret, 0, NULL) == SUCCESS) {
+            zval_ptr_dtor(&dret);
+        }
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+        zval_ptr_dtor(&g_deferred[i]);
+        ZVAL_UNDEF(&g_deferred[i]);
+    }
+    g_ndeferred = 0;
+}
+
 /* bool askr_handle_request(callable $handler) */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_handle_request, 0, 0, 1)
     ZEND_ARG_INFO(0, handler)
@@ -442,6 +485,12 @@ static PHP_FUNCTION(askr_handle_request) {
 
     if (g_reply) {
         g_reply(g_ctx, g_req.out.ptr, g_req.out.len, g_req.hdr.ptr, g_req.hdr.len, status);
+    }
+
+    /* Response is now in Rust's hands (being flushed to the client). Run any
+     * deferred work before we block for the next request. */
+    if (g_ndeferred > 0) {
+        askr_run_deferred();
     }
     RETURN_TRUE;
 }
@@ -595,6 +644,7 @@ static PHP_FUNCTION(askr_cow_ready) {
 
 static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_handle_request, arginfo_askr_handle_request)
+    ZEND_FE(askr_defer, arginfo_askr_defer)
     ZEND_FE(askr_cache_get, arginfo_askr_cache_get)
     ZEND_FE(askr_cache_set, arginfo_askr_cache_set)
     ZEND_FE(askr_cache_delete, arginfo_askr_cache_delete)
