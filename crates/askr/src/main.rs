@@ -5,6 +5,7 @@
 //!     (non-ZTS means one interpreter per process, so we scale by processes).
 
 mod admin;
+mod broadcast;
 mod cache;
 mod cgi;
 mod config;
@@ -128,6 +129,11 @@ enum Command {
         /// Exposes askr_cache_* to PHP (cache, counters, locks — no Redis).
         #[arg(long, default_value = "0")]
         cache_slots: usize,
+
+        /// Enable broadcasting: askr_broadcast() from PHP + the SSE endpoint
+        /// GET /askr/events?channel=NAME (live updates without Reverb/Pusher).
+        #[arg(long)]
+        broadcast: bool,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -174,9 +180,10 @@ fn main() -> anyhow::Result<()> {
             queue_script,
             scheduler_script,
             cache_slots,
+            broadcast,
         } => {
             // The config file, when given, is the single source of truth.
-            let (config, workers, ini, admin_listen, paranoid, sidecars, cache_slots) =
+            let (config, workers, ini, admin_listen, paranoid, sidecars, cache_slots, broadcast) =
                 if let Some(path) = config_file {
                     let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
                     if let Some(base) = &r.app_base {
@@ -196,6 +203,7 @@ fn main() -> anyhow::Result<()> {
                         r.paranoid,
                         sc,
                         r.cache_slots,
+                        r.broadcast,
                     )
                 } else {
                     let max_body_size = parse_size(&max_body_size)?;
@@ -249,12 +257,16 @@ fn main() -> anyhow::Result<()> {
                         paranoid,
                         sc,
                         cache_slots,
+                        broadcast,
                     )
                 };
 
-            // Map the shared cache before any fork so all workers share it.
+            // Map shared regions before any fork so all workers share them.
             if cache_slots > 0 {
                 cache::init(cache_slots);
+            }
+            if broadcast {
+                broadcast::init();
             }
 
             if paranoid {

@@ -537,6 +537,30 @@ static PHP_FUNCTION(askr_cache_flush) {
     if (g_cache_flush) g_cache_flush();
 }
 
+/* ------------------------------------------------------------------ */
+/* broadcast bridge (askr_broadcast)                                  */
+/* ------------------------------------------------------------------ */
+
+typedef int (*askr_broadcast_fn)(const char *chan, size_t clen, const char *payload, size_t plen);
+static askr_broadcast_fn g_broadcast = NULL;
+
+void askr_php_set_broadcast_bridge(askr_broadcast_fn f) {
+    g_broadcast = f;
+}
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_broadcast, 0, 0, 2)
+    ZEND_ARG_INFO(0, channel)
+    ZEND_ARG_INFO(0, payload)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_broadcast) {
+    char *chan, *payload; size_t clen, plen;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(chan, clen)
+        Z_PARAM_STRING(payload, plen)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(g_broadcast ? g_broadcast(chan, clen, payload, plen) : 0);
+}
+
 static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_handle_request, arginfo_askr_handle_request)
     ZEND_FE(askr_cache_get, arginfo_askr_cache_get)
@@ -544,6 +568,7 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_cache_delete, arginfo_askr_cache_delete)
     ZEND_FE(askr_cache_increment, arginfo_askr_cache_increment)
     ZEND_FE(askr_cache_flush, arginfo_askr_cache_flush)
+    ZEND_FE(askr_broadcast, arginfo_askr_broadcast)
     ZEND_FE_END
 };
 

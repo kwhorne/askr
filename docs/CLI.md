@@ -46,6 +46,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--queue-script <FILE>` | — | Queue runner script (e.g. `examples/askr-queue.php`). |
 | `--scheduler-script <FILE>` | — | Run the scheduler (built-in cron) with this runner (e.g. `examples/askr-scheduler.php`). |
 | `--cache-slots <N>` | `0` | Enable the shared cache with N slots (`0` = off; ~4.3 KB each). Exposes `askr_cache_*` to PHP. See [Cache](CACHE.md). |
+| `--broadcast` | off | Enable `askr_broadcast()` + the SSE endpoint `GET /askr/events`. See [Broadcasting](BROADCAST.md). |
 | `--ini <LINES>` | `$ASKR_PHP_INI` | Extra php.ini lines (e.g. to load opcache). |
 
 Notes:

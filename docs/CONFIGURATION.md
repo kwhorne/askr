@@ -85,6 +85,14 @@ Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See
 | --- | --- | --- |
 | `slots` | int | Number of cache slots (`0` = disabled). Each slot is ~4.3 KB. |
 
+### `[broadcast]`
+
+Enable `askr_broadcast()` and the SSE endpoint. See [Broadcasting](BROADCAST.md).
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `enabled` | bool | Turn on the broadcast ring + `GET /askr/events`. |
+
 ### Example
 
 ```toml

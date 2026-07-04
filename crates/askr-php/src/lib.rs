@@ -338,6 +338,18 @@ pub mod cache_bridge {
     }
 }
 
+/// Broadcast bridge (A #4). `askr_broadcast($channel, $payload)` in PHP calls
+/// this callback, which publishes into the shared broadcast ring.
+pub mod broadcast_bridge {
+    use std::ffi::{c_char, c_int};
+
+    pub type BroadcastFn = extern "C" fn(*const c_char, usize, *const c_char, usize) -> c_int;
+
+    extern "C" {
+        pub fn askr_php_set_broadcast_bridge(f: BroadcastFn);
+    }
+}
+
 /// Convenience: helper used by tests to read a C string (unused in normal flow).
 #[allow(dead_code)]
 unsafe fn cstr_to_string(p: *const c_char) -> String {

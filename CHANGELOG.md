@@ -4,6 +4,12 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Broadcasting (SSE)** — push live updates to browsers with no external broker.
+  `askr_broadcast($channel, $payload)` from PHP publishes into a shared-memory
+  ring; each worker tails it and fans events out to the SSE connections it holds,
+  so a publish from any process reaches subscribers on any process. Browsers
+  subscribe at `GET /askr/events?channel=NAME` (true streaming body). Enable with
+  `--broadcast` / `[broadcast]`. Verified cross-process incl. channel filtering.
 - **Shared-memory cache exposed to PHP** — a fixed-slot hash table in an
   anonymous shared mmap (created before fork, shared by all workers) backs
   `askr_cache_get/set/delete/increment/flush`: cache, **atomic counters** (rate

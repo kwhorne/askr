@@ -12,23 +12,33 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::{Body as _, Incoming};
+use hyper::body::{Body, Frame, Incoming};
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 use tokio_rustls::TlsAcceptor;
 
 use crate::cgi;
 use crate::php::Php;
+
+/// Response body: buffered (Full) or streaming (SSE), unified as a boxed body.
+type ResBody = BoxBody<Bytes, std::io::Error>;
+
+fn full(bytes: Bytes) -> ResBody {
+    Full::new(bytes).map_err(|never| match never {}).boxed()
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -53,6 +63,67 @@ struct Runtime {
     shutdown: Notify,
     active: AtomicUsize,
     tls: Option<TlsAcceptor>,
+    sse: SseHub,
+}
+
+/// Per-worker registry of live SSE subscribers. A background task tails the
+/// shared broadcast ring and pushes matching events to these.
+#[derive(Default)]
+struct SseHub {
+    subs: Mutex<Vec<Sub>>,
+}
+
+struct Sub {
+    channel: String,
+    tx: mpsc::Sender<Bytes>,
+}
+
+impl SseHub {
+    fn subscribe(&self, channel: String) -> mpsc::Receiver<Bytes> {
+        let (tx, rx) = mpsc::channel(128);
+        let _ = tx.try_send(Bytes::from_static(b": connected\n\n"));
+        self.subs.lock().unwrap().push(Sub { channel, tx });
+        rx
+    }
+
+    fn deliver(&self, channel: &str, data: &Bytes) {
+        self.subs.lock().unwrap().retain(|s| {
+            if s.channel == channel {
+                s.tx.try_send(data.clone()).is_ok()
+            } else {
+                !s.tx.is_closed()
+            }
+        });
+    }
+
+    fn ping(&self) {
+        let msg = Bytes::from_static(b": ping\n\n");
+        self.subs
+            .lock()
+            .unwrap()
+            .retain(|s| s.tx.try_send(msg.clone()).is_ok());
+    }
+}
+
+/// Streaming body for an SSE connection: yields frames as events arrive.
+struct SseBody {
+    rx: mpsc::Receiver<Bytes>,
+}
+
+impl Body for SseBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        match self.get_mut().rx.poll_recv(cx) {
+            Poll::Ready(Some(b)) => Poll::Ready(Some(Ok(Frame::data(b)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// Serve on an already-bound listener. Returns when a graceful recycle/shutdown
@@ -73,7 +144,32 @@ pub async fn run(
         shutdown: Notify::new(),
         active: AtomicUsize::new(0),
         tls,
+        sse: SseHub::default(),
     });
+
+    // Tail the shared broadcast ring and fan events out to local SSE subscribers.
+    if crate::broadcast::enabled() {
+        let rt2 = rt.clone();
+        tokio::spawn(async move {
+            let mut last = crate::broadcast::current_seq();
+            let mut ticks: u32 = 0;
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let (events, nl) = crate::broadcast::read_from(last);
+                last = nl;
+                for (ch, payload) in events {
+                    let channel = String::from_utf8_lossy(&ch);
+                    let frame =
+                        Bytes::from(format!("data: {}\n\n", String::from_utf8_lossy(&payload)));
+                    rt2.sse.deliver(&channel, &frame);
+                }
+                ticks += 1;
+                if ticks % 300 == 0 {
+                    rt2.sse.ping(); // ~15s keep-alive
+                }
+            }
+        });
+    }
 
     // SIGTERM triggers a graceful drain (used for shutdown and rolling reload).
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -138,10 +234,16 @@ async fn handle(
     req: Request<Incoming>,
     rt: Arc<Runtime>,
     peer: SocketAddr,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+) -> Result<Response<ResBody>, Infallible> {
     let t_start = Instant::now();
     let config = &rt.config;
     let port = config.listen.port();
+
+    // Reserved SSE endpoint: GET /askr/events?channel=NAME streams broadcast
+    // events (see askr_broadcast() in PHP).
+    if req.method() == Method::GET && req.uri().path() == "/askr/events" {
+        return Ok(sse_response(req.uri().query(), &rt));
+    }
 
     // try_files: serve an existing static file directly.
     let rel = sanitize(req.uri().path());
@@ -229,7 +331,7 @@ async fn handle(
     Ok(response)
 }
 
-fn build_response(resp: askr_php::Response) -> Response<Full<Bytes>> {
+fn build_response(resp: askr_php::Response) -> Response<ResBody> {
     let mut builder =
         Response::builder().status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
 
@@ -243,26 +345,45 @@ fn build_response(resp: askr_php::Response) -> Response<Full<Bytes>> {
     }
 
     builder
-        .body(Full::new(Bytes::from(resp.body)))
+        .body(full(Bytes::from(resp.body)))
         .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
 }
 
-async fn serve_static(path: &Path) -> Response<Full<Bytes>> {
+/// Subscribe to a channel and stream Server-Sent Events.
+fn sse_response(query: Option<&str>, rt: &Runtime) -> Response<ResBody> {
+    let channel = query
+        .and_then(|q| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("channel=").map(|c| c.to_string()))
+        })
+        .unwrap_or_else(|| "default".to_string());
+
+    let rx = rt.sse.subscribe(channel);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "text/event-stream")
+        .header(hyper::header::CACHE_CONTROL, "no-cache")
+        .header("X-Accel-Buffering", "no")
+        .body(SseBody { rx }.boxed())
+        .unwrap()
+}
+
+async fn serve_static(path: &Path) -> Response<ResBody> {
     match tokio::fs::read(path).await {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
             .header(hyper::header::CONTENT_TYPE, mime_for(path))
-            .body(Full::new(Bytes::from(bytes)))
+            .body(full(Bytes::from(bytes)))
             .unwrap(),
         Err(_) => text(StatusCode::NOT_FOUND, "askr: file not found"),
     }
 }
 
-fn text(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
+fn text(status: StatusCode, msg: &str) -> Response<ResBody> {
     Response::builder()
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Full::new(Bytes::from(msg.to_owned())))
+        .body(full(Bytes::from(msg.to_owned())))
         .unwrap()
 }
 

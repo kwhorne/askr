@@ -30,6 +30,8 @@ pub struct FileConfig {
     pub scheduler: SchedulerSection,
     #[serde(default)]
     pub cache: CacheSection,
+    #[serde(default)]
+    pub broadcast: BroadcastSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +113,14 @@ pub struct CacheSection {
     pub slots: usize,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BroadcastSection {
+    /// Enable the broadcast ring + SSE endpoint (askr_broadcast()).
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 impl Default for ServerSection {
     fn default() -> Self {
         ServerSection {
@@ -147,6 +157,7 @@ pub struct Resolved {
     pub queue_script: Option<PathBuf>,
     pub scheduler_script: Option<PathBuf>,
     pub cache_slots: usize,
+    pub broadcast: bool,
 }
 
 impl FileConfig {
@@ -267,6 +278,7 @@ impl FileConfig {
             queue_script: self.queue.script,
             scheduler_script: self.scheduler.script,
             cache_slots: self.cache.slots,
+            broadcast: self.broadcast.enabled,
         })
     }
 }
