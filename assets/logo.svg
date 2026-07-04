@@ -1,0 +1,38 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    Askr logo mark.
+    Concept: the Ansuz rune (the Old Norse "A", for Askr, the ash tree)
+    with data points streaming from its branches - requests leaving the server.
+    Gradient runs Rust-orange to PHP-purple: the two worlds Askr joins.
+  -->
+  <defs>
+    <linearGradient id="askr-mark" x1="150" y1="96" x2="400" y2="416" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF7A29"/>
+      <stop offset="0.55" stop-color="#E85D75"/>
+      <stop offset="1" stop-color="#8B7BF7"/>
+    </linearGradient>
+    <radialGradient id="askr-bg" cx="0.28" cy="0.2" r="1.1">
+      <stop offset="0" stop-color="#232838"/>
+      <stop offset="1" stop-color="#12141D"/>
+    </radialGradient>
+  </defs>
+
+  <!-- badge -->
+  <rect width="512" height="512" rx="118" fill="url(#askr-bg)"/>
+  <rect x="6" y="6" width="500" height="500" rx="112" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="2"/>
+
+  <!-- the rune -->
+  <g stroke="url(#askr-mark)" stroke-width="38" stroke-linecap="round">
+    <path d="M 186 110 V 402"/>
+    <path d="M 186 152 L 314 244"/>
+    <path d="M 186 260 L 314 352"/>
+  </g>
+
+  <!-- requests streaming off the branches -->
+  <g fill="url(#askr-mark)">
+    <circle cx="357" cy="273" r="12"/>
+    <circle cx="392" cy="297" r="7"/>
+    <circle cx="357" cy="381" r="12"/>
+    <circle cx="392" cy="405" r="7"/>
+  </g>
+</svg>

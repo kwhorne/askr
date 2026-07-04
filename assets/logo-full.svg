@@ -1,0 +1,29 @@
+<svg width="880" height="260" viewBox="0 0 880 260" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Askr lockup - for light backgrounds -->
+  <defs>
+    <linearGradient id="askr-mark-f" x1="150" y1="96" x2="400" y2="416" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF7A29"/>
+      <stop offset="0.55" stop-color="#E85D75"/>
+      <stop offset="1" stop-color="#8B7BF7"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(30 18) scale(0.44)">
+    <g stroke="url(#askr-mark-f)" stroke-width="38" stroke-linecap="round">
+      <path d="M 186 110 V 402"/>
+      <path d="M 186 152 L 314 244"/>
+      <path d="M 186 260 L 314 352"/>
+    </g>
+    <g fill="url(#askr-mark-f)">
+      <circle cx="357" cy="273" r="12"/>
+      <circle cx="392" cy="297" r="7"/>
+      <circle cx="357" cy="381" r="12"/>
+      <circle cx="392" cy="405" r="7"/>
+    </g>
+  </g>
+
+  <text x="248" y="162" font-family="Inter, 'SF Pro Display', 'Segoe UI', -apple-system, sans-serif"
+        font-size="132" font-weight="700" letter-spacing="-4" fill="#1B1E2B">askr</text>
+  <text x="252" y="208" font-family="Inter, 'SF Pro Display', 'Segoe UI', -apple-system, sans-serif"
+        font-size="30" font-weight="500" letter-spacing="6" fill="#8A8FA3">THE REAL SERVER FOR PHP</text>
+</svg>

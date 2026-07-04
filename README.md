@@ -1,7 +1,14 @@
-# Askr — the real server for Laravel & PHP
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-full-dark.svg">
+    <img src="assets/logo-full.svg" alt="Askr — the real server for Laravel & PHP" width="440">
+  </picture>
+</p>
 
-[![CI](https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg)](https://github.com/kwhorne/askr/actions/workflows/ci.yml)
-&nbsp;·&nbsp; **v0.1.0** &nbsp;·&nbsp; MIT
+<p align="center">
+  <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  &nbsp;·&nbsp; <strong>v0.1.0</strong> &nbsp;·&nbsp; MIT
+</p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
 
