@@ -14,7 +14,15 @@ permissions:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       # For a tag push this is the tag; for manual dispatch it's the branch the
       # workflow was started from (so it always has the packaging script).
