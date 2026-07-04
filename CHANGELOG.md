@@ -2,6 +2,17 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Self-contained release packages** — `scripts/package-release.sh` and a
+  `release.yml` workflow build relocatable tarballs (binary + libphp + opcache +
+  examples, rpath fixed to `$ORIGIN/lib`) for **Linux x86_64 and arm64**, and
+  attach them to the GitHub Release on each tag.
+- **Ubuntu production setup guide** — `docs/UBUNTU.md` rewritten as a
+  recommended, hardened production install (release tarball, non-root systemd on
+  `:443` via capabilities, Let's Encrypt via webroot, tuned opcache, canary
+  deploys, recommended settings). README and docs index refreshed for 0.2.0.
+
 ## 0.2.0 — 2026-07-04
 
 Seven differentiators beyond the core server (see the guides in `docs/`):

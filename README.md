@@ -35,42 +35,45 @@ once, zero state bleed). Raw embedding overhead is ~0.02 ms/request
 (~56k req/s single-core for a trivial script) — the framework bootstrap is the
 cost, and worker mode removes it.
 
-## Quick start
+## Install
+
+Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
+embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-# Ubuntu: install PHP build deps (see docs/BUILDING.md for macOS)
-sudo apt-get install -y build-essential pkg-config curl git \
-  libssl-dev libxml2-dev libonig-dev libsqlite3-dev
+VER=v0.2.0; ARCH=$(uname -m)
+curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
+tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
-git clone git@github.com:kwhorne/askr.git && cd askr
-
-PROFILE=laravel ./scripts/build-libphp.sh   # build a non-ZTS embed libphp
-cargo build --release                        # build the askr binary
-
-./target/release/askr doctor                 # pre-flight checks
-
-ASKR_APP_BASE=/var/www/app ./target/release/askr serve \
+./askr-run.sh doctor
+ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
   --root /var/www/app/public \
   --worker-script examples/laravel-worker.php \
   --workers "$(nproc)" --tls-self-signed --admin 127.0.0.1:9000
 ```
 
-Full walkthrough: [docs/UBUNTU.md](docs/UBUNTU.md).
+> Runtime libs (usually already present): `sudo apt-get install -y libssl3 libxml2 libonig5 libsqlite3-0`.
+
+**Production setup** (systemd, TLS, hardening, recommended settings):
+**[docs/UBUNTU.md](docs/UBUNTU.md)**. Building from source: [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Documentation
 
 Everything lives in [`docs/`](docs/README.md):
 
+- [Ubuntu setup](docs/UBUNTU.md) — **recommended production install** (systemd, TLS, tuning)
 - [Architecture](docs/ARCHITECTURE.md) — how it works, and why processes not threads
 - [Building](docs/BUILDING.md) — `libphp` + `askr`, the extension matrix
 - [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
 - [CLI reference](docs/CLI.md) — every command and flag
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
+- [Shared cache](docs/CACHE.md) — `askr_cache_*` + Laravel driver (no Redis)
+- [Broadcasting](docs/BROADCAST.md) — live updates via SSE (no Reverb/Pusher)
 - [CoW template](docs/COW.md) — boot once, fork workers for ~ms warm respawn (experimental)
-- [Admin dashboard](docs/ADMIN.md) — status/reload API and web UI
+- [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.1.0)
+## What works today (0.2.0)
 
 - Embedded PHP (**non-ZTS**) running real Laravel 12 — no FastCGI, no FPM
 - Multi-core: one worker **process per core** on a shared listen socket
@@ -101,7 +104,9 @@ Everything lives in [`docs/`](docs/README.md):
 | A5 — recycling, state reset, TLS+HTTP/2, rolling reload, doctor | ✅ |
 | A2 — request hardening (body limit, HEAD, POST) | ✅ |
 | A6 — typed config + admin dashboard/API | ✅ |
-| **Next** — io_uring core (Linux), HTTP/3, `$_FILES`, response cache, OTel, seccomp/Landlock, `askr-laravel` package | ⏳ |
+| **0.2.0** — paranoid, shared cache, SSE broadcast, queue+scheduler, metrics, canary reload, CoW template | ✅ |
+| self-contained Linux releases (x86_64 + arm64) | ✅ |
+| **Next** — io_uring core (Linux), HTTP/3 (QUIC), WebSockets/Reverb-compat, `$_FILES`, OTel, seccomp/Landlock | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
 benchmark against FrankenPHP/FPM — both Linux-native work.

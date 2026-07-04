@@ -5,7 +5,7 @@ embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
 memory-safe hot path, and — in worker mode — boots your app once and serves many
 requests against it, eliminating per-request framework bootstrap.
 
-> Version **0.1.0**. Production target is Linux; development also works on macOS.
+> Version **0.2.0**. Production target is Linux; development also works on macOS.
 
 ## Start here
 
@@ -21,42 +21,49 @@ requests against it, eliminating per-request framework bootstrap.
 | [Broadcasting](BROADCAST.md) | Live updates to browsers via SSE + `askr_broadcast()` (no Reverb/Pusher). |
 | [Admin dashboard](ADMIN.md) | The built-in status/reload/metrics API and web dashboard. |
 | [Deployment](DEPLOYMENT.md) | Production: systemd, TLS, zero-downtime reload, recycling, scaling, hardening. |
-| [Ubuntu quickstart](UBUNTU.md) | End-to-end build + run on Ubuntu. |
+| [Ubuntu setup](UBUNTU.md) | **Recommended production install** on Ubuntu (release tarball, systemd, TLS, tuning). |
 
 ## 60-second tour
 
+Install a self-contained release (Linux x86_64 / arm64) and serve a Laravel app:
+
 ```bash
-# 1. Build an embed-enabled, non-ZTS libphp (Ubuntu shown; see Building for macOS)
-sudo apt-get install -y build-essential pkg-config curl git \
-  libssl-dev libxml2-dev libonig-dev libsqlite3-dev
-PROFILE=laravel ./scripts/build-libphp.sh
+VER=v0.2.0; ARCH=$(uname -m)
+curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
+tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
-# 2. Build Askr
-cargo build --release
-
-# 3. Pre-flight, then serve a Laravel app in worker mode
-./target/release/askr doctor
-ASKR_APP_BASE=/var/www/app ./target/release/askr serve \
+./askr-run.sh doctor
+ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
   --root /var/www/app/public \
   --worker-script examples/laravel-worker.php \
   --workers "$(nproc)" --tls-self-signed --admin 127.0.0.1:9000
 ```
 
-## What works today (0.1.0)
+Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md).
+Building from source: [Building](BUILDING.md).
+
+## What works today (0.2.0)
 
 - Embedded PHP (non-ZTS) running real Laravel 12, **~9× the per-request/FPM model**
 - Multi-core via one worker **process per core** on a shared listen socket
 - **Worker mode** (Octane-style) with per-request state reset — no bleed
-- Graceful worker **recycling** + auto-respawn + crash resilience
-- **TLS** (rustls) + **HTTP/2** (ALPN); `--tls-self-signed` for dev
-- Zero-downtime **rolling reload** on `SIGHUP`
+- **`--paranoid`** state-bleed detector — is your app worker-safe?
+- **CoW template** (`--cow`) — boot once, fork workers for ~ms warm respawn (experimental)
+- **Queue workers + scheduler** in the same binary (no Horizon/cron)
+- **Shared cache** (`askr_cache_*` + Laravel driver) — cache/counters/rate limiting, no Redis
+- **Broadcasting** — live updates via SSE + `askr_broadcast()`, no Reverb/Pusher
+- Graceful **recycling** + auto-respawn + crash resilience
+- **TLS** (rustls) + **HTTP/2**; `--tls-self-signed` for dev
+- Zero-downtime **rolling reload** on `SIGHUP`, with optional **canary**
 - Request hardening: body-size limit (413), HEAD, GET/POST
 - Typed **`askr.toml`** config + `config-check`
-- Built-in **admin dashboard + API**
+- Built-in **admin dashboard + API** (status, reload, live metrics)
+- **In-process metrics** — PHP-vs-I/O split, latency histogram, per-worker RSS
 - `askr doctor` pre-flight checks
 
 ## Not yet
 
-HTTP/3 (QUIC), the per-core **io_uring** I/O core (the biggest efficiency step,
-Linux), multipart `$_FILES`, response cache, OpenTelemetry, seccomp/Landlock
-sandboxing, and the `askr-laravel` composer package.
+The per-core **io_uring** I/O core (the biggest efficiency step, Linux), HTTP/3
+(QUIC), raw WebSockets / Reverb-protocol compatibility, multipart `$_FILES`,
+OpenTelemetry export, seccomp/Landlock sandboxing, and the `askr-laravel`
+composer package.

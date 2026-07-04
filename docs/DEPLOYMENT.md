@@ -1,8 +1,9 @@
 # Deployment
 
-This guide covers running Askr in production on Linux. For a first end-to-end
-walkthrough see the [Ubuntu quickstart](UBUNTU.md); for build details see
-[Building](BUILDING.md).
+This is the operational reference (concepts: reload, canary, scaling, security).
+For the full step-by-step production install on Ubuntu — release tarball, systemd,
+TLS, hardening and recommended settings — follow **[Ubuntu setup](UBUNTU.md)**.
+For build details see [Building](BUILDING.md).
 
 ## Overview
 
