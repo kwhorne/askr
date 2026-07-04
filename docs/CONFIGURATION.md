@@ -40,6 +40,7 @@ Omit this whole section to run in per-request mode. Present it to enable
 | `script` | path | Worker script that boots the app and loops. |
 | `app_base` | path | Application base path, exported as `$ASKR_APP_BASE` for the worker script (inherited across `fork`). |
 | `ini` | string | Extra php.ini lines (newline-separated), e.g. to load opcache. |
+| `paranoid` | bool | Dev only: detect state bleed between requests (expensive). See [Worker mode](WORKER_MODE.md#is-my-app-worker-safe----paranoid). |
 
 ### `[tls]`
 

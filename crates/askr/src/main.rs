@@ -103,6 +103,11 @@ enum Command {
         /// a 413. Protects against memory exhaustion.
         #[arg(long, default_value = "16M")]
         max_body_size: String,
+
+        /// Dev only: detect state bleed between requests in worker mode
+        /// (reports app state that keeps growing). Expensive — not for prod.
+        #[arg(long)]
+        paranoid: bool,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -144,15 +149,16 @@ fn main() -> anyhow::Result<()> {
             tls_key,
             tls_self_signed,
             max_body_size,
+            paranoid,
         } => {
             // The config file, when given, is the single source of truth.
-            let (config, workers, ini, admin_listen) = if let Some(path) = config_file {
+            let (config, workers, ini, admin_listen, paranoid) = if let Some(path) = config_file {
                 let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
                 if let Some(base) = &r.app_base {
                     // Exported for the worker script; children inherit it across fork.
                     std::env::set_var("ASKR_APP_BASE", base);
                 }
-                (r.config, r.workers, r.ini, r.admin_listen)
+                (r.config, r.workers, r.ini, r.admin_listen, r.paranoid)
             } else {
                 let max_body_size = parse_size(&max_body_size)?;
                 let docroot = resolve_root(root)?;
@@ -187,8 +193,17 @@ fn main() -> anyhow::Result<()> {
                     w,
                     ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
                     admin,
+                    paranoid,
                 )
             };
+
+            if paranoid {
+                std::env::set_var("ASKR_PARANOID", "1");
+                tracing::warn!(
+                    "paranoid mode ON — state-bleed detection (dev only). \
+                     Use --workers 1 for readable output."
+                );
+            }
 
             let listener = bind_listener(config.listen)?;
             // The supervisor is needed for recycling, the admin plane, or >1 worker.

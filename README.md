@@ -74,6 +74,7 @@ Everything lives in [`docs/`](docs/README.md):
 - Embedded PHP (**non-ZTS**) running real Laravel 12 — no FastCGI, no FPM
 - Multi-core: one worker **process per core** on a shared listen socket
 - **Worker mode** (Octane-style) with per-request state reset — no bleed
+- **`--paranoid`** state-bleed detector: tells you if your app is worker-safe
 - Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
 - **TLS** (rustls, ring — no OpenSSL) + **HTTP/2** (ALPN); `--tls-self-signed` for dev
 - Zero-downtime **rolling reload** on `SIGHUP`

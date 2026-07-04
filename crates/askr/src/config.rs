@@ -59,6 +59,9 @@ pub struct WorkerSection {
     pub app_base: Option<PathBuf>,
     /// Extra php.ini lines (e.g. to load opcache).
     pub ini: Option<String>,
+    /// Dev only: detect state bleed between requests (expensive; worker mode).
+    #[serde(default)]
+    pub paranoid: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -107,6 +110,7 @@ pub struct Resolved {
     pub workers: usize,
     pub ini: Option<String>,
     pub app_base: Option<PathBuf>,
+    pub paranoid: bool,
     pub admin_listen: Option<SocketAddr>,
 }
 
@@ -203,6 +207,7 @@ impl FileConfig {
             workers,
             ini: self.worker.ini,
             app_base: self.worker.app_base,
+            paranoid: self.worker.paranoid,
             admin_listen,
         })
     }

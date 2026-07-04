@@ -41,6 +41,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--tls-key <FILE>` | — | TLS private key (PEM). Requires `--tls-cert`. |
 | `--tls-self-signed` | off | Generate a v3 self-signed cert on startup (dev/testing). Conflicts with `--tls-cert`. |
 | `--admin <ADDR>` | — | Admin dashboard/API listen address (e.g. `127.0.0.1:9000`). Off if unset. See [Admin](ADMIN.md). |
+| `--paranoid` | off | **Dev only.** Detect state bleed between requests in worker mode (reports app state that keeps growing). Expensive; use `--workers 1`. See [Worker mode](WORKER_MODE.md#is-my-app-worker-safe----paranoid). |
 | `--ini <LINES>` | `$ASKR_PHP_INI` | Extra php.ini lines (e.g. to load opcache). |
 
 Notes:

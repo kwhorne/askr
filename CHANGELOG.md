@@ -2,6 +2,16 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **State-bleed detector (`--paranoid`)** — dev-only worker-mode diagnostic that
+  snapshots app state (static properties, `$GLOBALS`, Laravel container
+  bindings/instances) after each request's reset and reports anything that keeps
+  growing, so Askr can tell you whether your app is worker-safe. Warms up a
+  couple of requests to avoid flagging one-time boot drift; verified clean on a
+  real Laravel app and catching a deliberate leak.
+  `examples/askr-paranoid.php`, `[worker] paranoid`.
+
 ## 0.1.0 — 2026-07-03
 
 First tagged release. A complete, deployable PHP application server: embedded

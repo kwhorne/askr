@@ -97,6 +97,43 @@ This is verified with a deliberate bleed probe: a `scoped()` binding returns the
 > covers the common sources of bleed; audit your app's own static/singleton
 > state.
 
+## Is my app worker-safe? — `--paranoid`
+
+Fear of state leaking between requests is the #1 reason people avoid the worker
+model. Askr can tell you. Run with `--paranoid` (dev only) and it snapshots your
+app's mutable state after each request's reset and reports anything that keeps
+growing:
+
+```
+$ askr serve --root ./public --worker-script examples/laravel-worker.php \
+    --workers 1 --paranoid
+ WARN askr: paranoid mode ON — state-bleed detection (dev only)
+[askr paranoid] baseline set after 2 requests — watching 95 app classes for state bleed
+```
+
+On a worker-safe app that's all you'll see — silence means clean. If something
+leaks, you get the culprit and the growth, every request:
+
+```
+[askr paranoid] request #42 — state changed after reset (possible bleed):
+  ↑ App\Services\Foo::$cache  array:2 → array:3  (+1)
+```
+
+How it works ([`examples/askr-paranoid.php`](../examples/askr-paranoid.php)):
+
+- it reflects over your **app** classes (non-`vendor/`) and fingerprints their
+  static properties, plus `$GLOBALS`, declared class/function counts, and (for
+  Laravel) container bindings/instances;
+- the first couple of requests establish a **baseline** (a framework fully boots
+  on its first request, and services resolve lazily over the first few), so
+  one-time warmup isn't reported as a leak;
+- from then on it reports counters that **grew since the previous request** — a
+  one-time bump when a singleton first resolves is normal and self-limiting;
+  something that grows on *every* request is a leak.
+
+It's expensive (reflection every request) — **dev only**, and use `--workers 1`
+for readable output. Enable it in a config file with `[worker] paranoid = true`.
+
 ## Recycling
 
 Long-lived workers can still drift or leak over time (in app code or extensions).

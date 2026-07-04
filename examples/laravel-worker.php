@@ -35,6 +35,15 @@ $app = require $base . '/bootstrap/app.php';
 /** @var \Illuminate\Contracts\Http\Kernel $kernel */
 $kernel = $app->make(Illuminate\Contracts\Http\Kernel::class);
 
+// State-bleed detector (dev only), enabled by `askr serve --paranoid`.
+$paranoid = null;
+if (getenv('ASKR_PARANOID')) {
+    require __DIR__ . '/askr-paranoid.php';
+    $paranoid = new AskrParanoid($base, $app);
+}
+
+$requestNo = 0;
+
 $handler = function (array $r) use ($app, $kernel): int {
     // Askr passes the CGI $_SERVER map as `headers`.
     $server = $r['headers'];
@@ -121,6 +130,7 @@ function askr_reset_state($app): void
 }
 
 // Serve until Askr shuts the worker down.
+$paranoid?->baseline();
 while (askr_handle_request($handler)) {
-    // one request handled per iteration
+    $paranoid?->check(++$requestNo);
 }
