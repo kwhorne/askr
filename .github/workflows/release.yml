@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config patchelf \
+            libssl-dev libxml2-dev libonig-dev libsqlite3-dev
+
+      - name: Build embedded libphp (laravel profile)
+        run: PROFILE=laravel ./scripts/build-libphp.sh
+
+      - name: Build askr (release)
+        run: cargo build --release
+
+      - name: Package self-contained tarball
+        run: ./scripts/package-release.sh
+
+      - name: Smoke-test the package (relocated)
+        run: |
+          mkdir -p /tmp/pkgtest
+          tar xzf dist/*.tar.gz -C /tmp/pkgtest
+          PKG="$(ls -d /tmp/pkgtest/askr-*)"
+          "$PKG/askr" --version
+          "$PKG/askr-run.sh" doctor
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
