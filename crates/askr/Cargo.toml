@@ -31,6 +31,6 @@ rustls-pemfile = { workspace = true }
 tokio-rustls = { workspace = true }
 rcgen = { workspace = true }
 libc = "0.2"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 serde = { workspace = true }
 toml = { workspace = true }
