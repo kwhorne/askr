@@ -2,6 +2,13 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Dependency maintenance** — `rcgen` 0.13 → 0.14 (adapted for the
+  `CertifiedKey::key_pair` → `signing_key` rename), `toml` 0.8 → 1.1,
+  `thiserror` 1 → 2, and their transitives. CI actions bumped: `actions/checkout`
+  5 → 7, `actions/cache` 4 → 6.
+
 ## 0.2.1 — 2026-07-04
 
 Hardening and distribution — no new user-facing features, but a tougher hot path,

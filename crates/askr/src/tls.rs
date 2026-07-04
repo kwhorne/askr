@@ -42,7 +42,8 @@ pub fn self_signed(hosts: &[String]) -> anyhow::Result<TlsAcceptor> {
         .context("generating self-signed certificate")?;
 
     let cert_der = CertificateDer::from(cert.cert.der().to_vec());
-    let key_der = PrivateKeyDer::try_from(cert.key_pair.serialize_der())
+    // rcgen 0.14 renamed `CertifiedKey::key_pair` to `signing_key`.
+    let key_der = PrivateKeyDer::try_from(cert.signing_key.serialize_der())
         .map_err(|e| anyhow::anyhow!("self-signed key: {e}"))?;
 
     from_parts(vec![cert_der], key_der)
