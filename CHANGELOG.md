@@ -2,16 +2,36 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.2.1 — 2026-07-04
 
-- **Self-contained release packages** — `scripts/package-release.sh` and a
+Hardening and distribution — no new user-facing features, but a tougher hot path,
+deterministic CI, and downloadable releases.
+
+### Server
+- **Static files are streamed** in 64 KB chunks (a large file no longer buffers
+  entirely in RAM per request), with **ETag** + **Cache-Control** (`immutable`
+  for hashed `/build/` assets), **conditional GET** (`304` on `If-None-Match`),
+  and single-**Range** (`206`) support.
+- **Slowloris hardening** — TLS handshake timeout (10s), HTTP/1 header-read
+  timeout (15s), and a per-worker connection cap that sheds load; important since
+  Askr is designed to run with no proxy in front.
+- `try_files` now stats with async `tokio::fs::metadata` (no blocking syscall on
+  the async path); connections are served with upgrades enabled.
+
+### Distribution
+- **Self-contained release packages** — `scripts/package-release.sh` + a
   `release.yml` workflow build relocatable tarballs (binary + libphp + opcache +
-  examples, rpath fixed to `$ORIGIN/lib`) for **Linux x86_64 and arm64**, and
+  examples, rpath fixed to `$ORIGIN/lib`) for **Linux x86_64 and arm64** and
   attach them to the GitHub Release on each tag.
-- **Ubuntu production setup guide** — `docs/UBUNTU.md` rewritten as a
-  recommended, hardened production install (release tarball, non-root systemd on
-  `:443` via capabilities, Let's Encrypt via webroot, tuned opcache, canary
-  deploys, recommended settings). README and docs index refreshed for 0.2.0.
+- **Ubuntu production setup guide** — `docs/UBUNTU.md`: recommended hardened
+  install (release tarball, non-root systemd on `:443` via capabilities, Let's
+  Encrypt via webroot, tuned opcache, canary deploys, recommended settings).
+
+### CI / toolchain
+- **Pinned Rust** (`rust-toolchain.toml` → 1.95.0) so a new release can't turn
+  `main` red under `clippy -D warnings` without a code change; CI reads the pin.
+- **Cached libphp** in CI (keyed on the build script) — skips recompiling PHP on
+  a cache hit, the slowest step. Bumped `checkout@v5` / `cache@v4`.
 
 ## 0.2.0 — 2026-07-04
 
