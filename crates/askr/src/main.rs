@@ -12,6 +12,7 @@ mod config;
 mod doctor;
 mod metrics;
 mod php;
+mod rcache;
 mod server;
 mod tls;
 mod worker;
@@ -130,6 +131,13 @@ enum Command {
         #[arg(long, default_value = "0")]
         cache_slots: usize,
 
+        /// Enable the response cache with this many slots (0 = off; ~140 KB each).
+        /// PHP marks responses cacheable via `header('Askr-Cache: 60, tags=posts')`;
+        /// matching anonymous GETs are served from Rust without touching PHP, and
+        /// `askr_cache_forget_tag('posts')` invalidates across all workers at once.
+        #[arg(long, default_value = "0")]
+        response_cache: usize,
+
         /// Enable broadcasting: askr_broadcast() from PHP + the SSE endpoint
         /// GET /askr/events?channel=NAME (live updates without Reverb/Pusher).
         #[arg(long)]
@@ -192,13 +200,24 @@ fn main() -> anyhow::Result<()> {
             queue_script,
             scheduler_script,
             cache_slots,
+            response_cache,
             broadcast,
             canary,
             cow,
         } => {
             // The config file, when given, is the single source of truth.
-            let (config, workers, ini, admin_listen, paranoid, sidecars, cache_slots, broadcast) =
-                if let Some(path) = config_file {
+            #[allow(clippy::type_complexity)]
+            let (
+                config,
+                workers,
+                ini,
+                admin_listen,
+                paranoid,
+                sidecars,
+                cache_slots,
+                response_cache,
+                broadcast,
+            ) = if let Some(path) = config_file {
                     let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
                     if let Some(base) = &r.app_base {
                         // Exported for the worker script; children inherit it across fork.
@@ -218,6 +237,7 @@ fn main() -> anyhow::Result<()> {
                         r.paranoid,
                         sc,
                         r.cache_slots,
+                        r.response_cache_slots,
                         r.broadcast,
                     )
                 } else {
@@ -273,6 +293,7 @@ fn main() -> anyhow::Result<()> {
                         paranoid,
                         sc,
                         cache_slots,
+                        response_cache,
                         broadcast,
                     )
                 };
@@ -280,6 +301,9 @@ fn main() -> anyhow::Result<()> {
             // Map shared regions before any fork so all workers share them.
             if cache_slots > 0 {
                 cache::init(cache_slots);
+            }
+            if response_cache > 0 {
+                rcache::init(response_cache);
             }
             if broadcast {
                 broadcast::init();

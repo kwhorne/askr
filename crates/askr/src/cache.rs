@@ -357,17 +357,32 @@ extern "C" fn c_incr(key: *const c_char, klen: usize, delta: c_long, ttl: c_long
 
 extern "C" fn c_flush() {
     flush();
+    crate::rcache::flush(); // askr_cache_flush() clears both caches
 }
 
-/// Register the cache callbacks with the PHP shim for this process. No-op if the
-/// cache isn't enabled.
+/// Invalidate every cached response carrying `tag` (response cache, #1).
+extern "C" fn c_forget_tag(tag: *const c_char, tlen: usize) {
+    let tag = unsafe { std::slice::from_raw_parts(tag as *const u8, tlen) };
+    crate::rcache::forget_tag(tag);
+}
+
+/// Register the cache callbacks with the PHP shim for this process. Registered
+/// when either the kv cache or the response cache is enabled (the response cache
+/// needs `askr_cache_forget_tag`); disabled halves return misses.
 pub fn register_bridge() {
-    if !enabled() {
+    if !enabled() && !crate::rcache::enabled() {
         return;
     }
     // SAFETY: one-time registration; the trampolines are 'static fns.
     unsafe {
-        askr_php::cache_bridge::askr_php_set_cache_bridge(c_get, c_set, c_del, c_incr, c_flush);
+        askr_php::cache_bridge::askr_php_set_cache_bridge(
+            c_get,
+            c_set,
+            c_del,
+            c_incr,
+            c_flush,
+            c_forget_tag,
+        );
     }
 }
 

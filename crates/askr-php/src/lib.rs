@@ -347,11 +347,19 @@ pub mod cache_bridge {
     pub type DelFn = extern "C" fn(*const c_char, usize) -> c_int;
     pub type IncrFn = extern "C" fn(*const c_char, usize, c_long, c_long) -> c_long;
     pub type FlushFn = extern "C" fn();
+    pub type ForgetTagFn = extern "C" fn(*const c_char, usize);
 
     extern "C" {
         /// Register the cache callbacks with the shim. Call once per process,
         /// after the engine has started.
-        pub fn askr_php_set_cache_bridge(g: GetFn, s: SetFn, d: DelFn, i: IncrFn, f: FlushFn);
+        pub fn askr_php_set_cache_bridge(
+            g: GetFn,
+            s: SetFn,
+            d: DelFn,
+            i: IncrFn,
+            f: FlushFn,
+            ft: ForgetTagFn,
+        );
     }
 }
 

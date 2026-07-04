@@ -33,6 +33,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::cgi;
 use crate::php::Php;
+use crate::rcache;
 
 /// Response body: buffered (Full) or streaming (SSE / files), unified as a box.
 type ResBody = BoxBody<Bytes, std::io::Error>;
@@ -283,6 +284,21 @@ async fn handle(
         }
     }
 
+    // --- response cache: read before touching PHP (#1) -----------------
+    // Only anonymous (no Cookie) GET/HEAD requests are cacheable — a request
+    // that carries a session/auth cookie may see user-specific content.
+    let cacheable = rcache::enabled()
+        && matches!(*req.method(), Method::GET | Method::HEAD)
+        && !req.headers().contains_key(hyper::header::COOKIE);
+    let cache_key = cacheable.then(|| response_cache_key(&req));
+    if let Some(key) = &cache_key {
+        if let Some(c) = rcache::get(key) {
+            let response = cached_response(c);
+            finish(&rt, &response, t_start, 0);
+            return Ok(response);
+        }
+    }
+
     let script = config.docroot.join(&config.front_controller);
     let script_name = format!("/{}", config.front_controller.display());
 
@@ -332,7 +348,15 @@ async fn handle(
     let php_us = php_start.elapsed().as_micros() as u64;
 
     let response = match php_result {
-        Ok(resp) => build_response(resp),
+        Ok(resp) => {
+            // Cache store: the app opts in per-response with an `Askr-Cache`
+            // header (which we consume, never forwarding it to the client).
+            if let Some(key) = &cache_key {
+                maybe_store(key, &resp);
+            }
+            let state = rcache::enabled().then_some("MISS");
+            build_response(resp, state)
+        }
         Err(e) => {
             tracing::error!(error = %e, "php handling failed");
             if let Some(m) = crate::metrics::Metrics::get() {
@@ -342,35 +366,118 @@ async fn handle(
         }
     };
 
-    // Record metrics into the shared region.
+    finish(&rt, &response, t_start, php_us);
+    Ok(response)
+}
+
+/// Record metrics and advance the recycle counter for a finished request.
+fn finish(rt: &Runtime, response: &Response<ResBody>, t_start: Instant, php_us: u64) {
     if let Some(m) = crate::metrics::Metrics::get() {
         let total_us = t_start.elapsed().as_micros() as u64;
         let bytes = response.body().size_hint().exact().unwrap_or(0);
         m.record(response.status().as_u16(), bytes, php_us, total_us);
     }
-
-    // Count the request; trigger a graceful recycle when we hit the cap.
     if rt.recycle_after > 0 {
         let n = rt.served.fetch_add(1, Ordering::SeqCst) + 1;
         if n == rt.recycle_after {
             rt.shutdown.notify_one();
         }
     }
-
-    Ok(response)
 }
 
-fn build_response(resp: askr_php::Response) -> Response<ResBody> {
+/// Cache key: `METHOD \0 host \0 path?query`.
+fn response_cache_key(req: &Request<Incoming>) -> Vec<u8> {
+    let host = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    format!("{}\0{}\0{}", req.method().as_str(), host.to_ascii_lowercase(), pq).into_bytes()
+}
+
+/// Store a 200 response if the app opted in via an `Askr-Cache` header.
+/// `Set-Cookie` is stripped so a cached page can't pin one client's session
+/// onto every anonymous visitor.
+fn maybe_store(key: &[u8], resp: &askr_php::Response) {
+    if resp.status != 200 {
+        return;
+    }
+    let Some(dir) = resp
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("askr-cache"))
+        .map(|(_, v)| v.as_str())
+    else {
+        return;
+    };
+    let Some((ttl, tags)) = parse_cache_directive(dir) else {
+        return;
+    };
+    let stored: Vec<(String, String)> = resp
+        .headers
+        .iter()
+        .filter(|(k, _)| storable_header(k))
+        .cloned()
+        .collect();
+    rcache::store(key, resp.status, &stored, &resp.body, ttl, &tags);
+}
+
+fn storable_header(name: &str) -> bool {
+    !(name.eq_ignore_ascii_case("set-cookie")
+        || name.eq_ignore_ascii_case("askr-cache")
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("transfer-encoding"))
+}
+
+/// Parse a directive like `60, tags=posts,homepage` → `(60, [posts, homepage])`.
+fn parse_cache_directive(v: &str) -> Option<(u64, Vec<Vec<u8>>)> {
+    let (head, tagstr) = match v.find("tags=") {
+        Some(i) => (&v[..i], &v[i + 5..]),
+        None => (v, ""),
+    };
+    let ttl = head
+        .split([',', ';', ' '])
+        .find_map(|t| t.trim().parse::<u64>().ok())?;
+    let tags = tagstr
+        .split([',', ';', ' '])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_bytes().to_vec())
+        .collect();
+    Some((ttl, tags))
+}
+
+/// Build a hyper response from a cached entry.
+fn cached_response(c: rcache::Cached) -> Response<ResBody> {
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(c.status).unwrap_or(StatusCode::OK));
+    for (name, value) in &c.headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .header("X-Askr-Cache", "HIT")
+        .body(full(Bytes::from(c.body)))
+        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
+}
+
+fn build_response(resp: askr_php::Response, cache_state: Option<&str>) -> Response<ResBody> {
     let mut builder =
         Response::builder().status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
 
     for (name, value) in &resp.headers {
+        // Strip framing headers (hyper recomputes them) and the internal
+        // `Askr-Cache` control header (never leaks to the client).
         if name.eq_ignore_ascii_case("Content-Length")
             || name.eq_ignore_ascii_case("Transfer-Encoding")
+            || name.eq_ignore_ascii_case("Askr-Cache")
         {
             continue;
         }
         builder = builder.header(name, value);
+    }
+    if let Some(state) = cache_state {
+        builder = builder.header("X-Askr-Cache", state);
     }
 
     builder
@@ -635,7 +742,7 @@ mod tests {
             body: b"hello".to_vec(),
             php_status: 0,
         };
-        let out = build_response(resp);
+        let out = build_response(resp, None);
         assert_eq!(out.status(), StatusCode::CREATED);
         assert_eq!(out.headers().get("X-Test").unwrap(), "yes");
         // hyper computes framing; our explicit Content-Length is stripped.

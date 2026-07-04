@@ -504,20 +504,24 @@ typedef int  (*askr_cache_set_fn)(const char *key, size_t klen, const char *val,
 typedef int  (*askr_cache_del_fn)(const char *key, size_t klen);
 typedef long (*askr_cache_incr_fn)(const char *key, size_t klen, long delta, long ttl);
 typedef void (*askr_cache_flush_fn)(void);
+typedef void (*askr_cache_forget_tag_fn)(const char *tag, size_t tlen);
 
-static askr_cache_get_fn   g_cache_get = NULL;
-static askr_cache_set_fn   g_cache_set = NULL;
-static askr_cache_del_fn   g_cache_del = NULL;
-static askr_cache_incr_fn  g_cache_incr = NULL;
-static askr_cache_flush_fn g_cache_flush = NULL;
+static askr_cache_get_fn        g_cache_get = NULL;
+static askr_cache_set_fn        g_cache_set = NULL;
+static askr_cache_del_fn        g_cache_del = NULL;
+static askr_cache_incr_fn       g_cache_incr = NULL;
+static askr_cache_flush_fn      g_cache_flush = NULL;
+static askr_cache_forget_tag_fn g_cache_forget_tag = NULL;
 
 void askr_php_set_cache_bridge(askr_cache_get_fn g, askr_cache_set_fn s, askr_cache_del_fn d,
-                               askr_cache_incr_fn i, askr_cache_flush_fn f) {
+                               askr_cache_incr_fn i, askr_cache_flush_fn f,
+                               askr_cache_forget_tag_fn ft) {
     g_cache_get = g;
     g_cache_set = s;
     g_cache_del = d;
     g_cache_incr = i;
     g_cache_flush = f;
+    g_cache_forget_tag = ft;
 }
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_cache_get, 0, 0, 1)
@@ -586,6 +590,19 @@ static PHP_FUNCTION(askr_cache_flush) {
     if (g_cache_flush) g_cache_flush();
 }
 
+/* void askr_cache_forget_tag(string $tag) — invalidate every cached response
+ * carrying $tag, across all workers, instantly. */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_cache_forget_tag, 0, 0, 1)
+    ZEND_ARG_INFO(0, tag)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_cache_forget_tag) {
+    char *tag; size_t tlen;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(tag, tlen)
+    ZEND_PARSE_PARAMETERS_END();
+    if (g_cache_forget_tag) g_cache_forget_tag(tag, tlen);
+}
+
 /* ------------------------------------------------------------------ */
 /* broadcast bridge (askr_broadcast)                                  */
 /* ------------------------------------------------------------------ */
@@ -650,6 +667,7 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_cache_delete, arginfo_askr_cache_delete)
     ZEND_FE(askr_cache_increment, arginfo_askr_cache_increment)
     ZEND_FE(askr_cache_flush, arginfo_askr_cache_flush)
+    ZEND_FE(askr_cache_forget_tag, arginfo_askr_cache_forget_tag)
     ZEND_FE(askr_broadcast, arginfo_askr_broadcast)
     ZEND_FE(askr_cow_ready, arginfo_askr_cow_ready)
     ZEND_FE_END

@@ -151,8 +151,11 @@ fn metrics_json() -> String {
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    let (chits, cmisses) = crate::rcache::stats();
+    let ctotal = chits + cmisses;
+    let chit_pct = chits.saturating_mul(100).checked_div(ctotal).unwrap_or(0);
     format!(
-        r#"{{"requests":{req},"errors":{err},"bytes_out":{bytes},"avg_total_ms":{att:.2},"avg_php_ms":{aph:.2},"php_pct":{php_pct},"io_pct":{io_pct},"slowest_ms":{slow:.2},"status":{{"1xx":{s1},"2xx":{s2},"3xx":{s3},"4xx":{s4},"5xx":{s5}}},"histogram":{{"bounds_ms":[{bounds_s}],"counts":[{counts_s}]}}}}"#,
+        r#"{{"requests":{req},"errors":{err},"bytes_out":{bytes},"avg_total_ms":{att:.2},"avg_php_ms":{aph:.2},"php_pct":{php_pct},"io_pct":{io_pct},"slowest_ms":{slow:.2},"cache":{{"hits":{chits},"misses":{cmisses},"hit_pct":{chit_pct}}},"status":{{"1xx":{s1},"2xx":{s2},"3xx":{s3},"4xx":{s4},"5xx":{s5}}},"histogram":{{"bounds_ms":[{bounds_s}],"counts":[{counts_s}]}}}}"#,
         req = req,
         err = m.errors.load(Relaxed),
         bytes = m.bytes_out.load(Relaxed),
@@ -218,6 +221,7 @@ const DASHBOARD: &str = r#"<!DOCTYPE html>
     <tr><td>Requests</td><td id="requests">—</td></tr>
     <tr><td>Avg latency</td><td id="avglat">—</td></tr>
     <tr><td>PHP vs I/O</td><td id="split">—</td></tr>
+    <tr><td>Response cache</td><td id="cache">—</td></tr>
     <tr><td>Slowest</td><td id="slowest">—</td></tr>
     <tr><td>Status</td><td id="status">—</td></tr>
     <tr><td>Latency</td><td id="hist" style="font:12px/1.4 ui-monospace,monospace">—</td></tr>
@@ -252,6 +256,8 @@ async function refresh() {
     requests.textContent = m.requests + (m.errors ? '  (' + m.errors + ' errors)' : '');
     avglat.textContent = (m.avg_total_ms||0).toFixed(1) + ' ms';
     split.innerHTML = 'PHP ' + m.php_pct + '%  ' + bar(m.php_pct) + '  I/O ' + m.io_pct + '%';
+    const c = m.cache || {hits:0,misses:0,hit_pct:0};
+    cache.textContent = (c.hits+c.misses) ? (c.hit_pct + '% hit  (' + c.hits + ' hits, ' + c.misses + ' misses)') : 'no lookups';
     slowest.textContent = (m.slowest_ms||0).toFixed(1) + ' ms';
     const st = m.status || {};
     status.textContent = ['2xx','3xx','4xx','5xx'].map(k => k+':'+(st[k]||0)).join('  ');

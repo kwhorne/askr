@@ -110,9 +110,13 @@ pub struct SchedulerSection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheSection {
-    /// Shared cache slots (0 = disabled). Each slot is ~4.3 KB.
+    /// Shared kv cache slots (0 = disabled). Each slot is ~4.3 KB.
     #[serde(default)]
     pub slots: usize,
+    /// Response cache slots (0 = disabled). Full-response edge cache with tag
+    /// invalidation (`Askr-Cache` header + `askr_cache_forget_tag`). ~140 KB each.
+    #[serde(default)]
+    pub response_slots: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -167,6 +171,7 @@ pub struct Resolved {
     pub queue_script: Option<PathBuf>,
     pub scheduler_script: Option<PathBuf>,
     pub cache_slots: usize,
+    pub response_cache_slots: usize,
     pub broadcast: bool,
     pub canary_reload: bool,
 }
@@ -289,6 +294,7 @@ impl FileConfig {
             queue_script: self.queue.script,
             scheduler_script: self.scheduler.script,
             cache_slots: self.cache.slots,
+            response_cache_slots: self.cache.response_slots,
             broadcast: self.broadcast.enabled,
             canary_reload: self.reload.canary,
         })
