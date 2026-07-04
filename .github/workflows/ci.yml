@@ -12,7 +12,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Reads the pinned toolchain + components from rust-toolchain.toml and
       # caches the cargo registry/target keyed on the toolchain + Cargo.lock.
@@ -48,7 +48,7 @@ jobs:
   libphp-laravel-profile:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Cache libphp (laravel)
         id: libphp
