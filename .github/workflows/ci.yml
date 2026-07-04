@@ -22,7 +22,7 @@ jobs:
       # script (which pins the PHP version). Skip the build on a cache hit.
       - name: Cache libphp
         id: libphp
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/php-build/install
           key: libphp-minimal-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
@@ -52,7 +52,7 @@ jobs:
 
       - name: Cache libphp (laravel)
         id: libphp
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/php-build/install
           key: libphp-laravel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
