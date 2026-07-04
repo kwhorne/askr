@@ -2,7 +2,16 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.2.0 — 2026-07-04
+
+Seven differentiators beyond the core server (see the guides in `docs/`):
+
+- **CoW template mode (`--cow`, experimental)** — boot the app once in a template
+  process and fork the workers from it (copy-on-write). Workers inherit the warm,
+  booted heap: **~ms warm respawn** (measured ~35 ms vs ~300 ms cold) and shared
+  opcache/class tables. The template is single-threaded when it forks (tokio
+  starts only in children), so the fork is safe. New code is picked up by
+  restarting the process. `examples/laravel-worker.php` calls `askr_cow_ready()`.
 
 - **Canary reload (`--canary`)** — a `SIGHUP` reload rolls one worker first and
   health-checks it (alive, no error spike) for a few seconds before rolling the

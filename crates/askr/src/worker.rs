@@ -45,15 +45,7 @@ pub fn run_worker(
     let recycle_after = stagger(config.max_requests);
 
     // Build the TLS acceptor (if configured) once per worker.
-    let tls = if config.tls_self_signed {
-        let hosts = vec!["localhost".to_string(), config.listen.ip().to_string()];
-        Some(crate::tls::self_signed(&hosts)?)
-    } else {
-        match (config.tls_cert.clone(), config.tls_key.clone()) {
-            (Some(cert), Some(key)) => Some(crate::tls::acceptor(&cert, &key)?),
-            _ => None,
-        }
-    };
+    let tls = build_tls(&config)?;
 
     listener.set_nonblocking(true)?;
 
@@ -66,6 +58,19 @@ pub fn run_worker(
         let listener = TcpListener::from_std(listener)?;
         server::run(listener, Arc::new(config), php, recycle_after, tls).await
     })
+}
+
+/// Build the TLS acceptor for a config (self-signed or cert+key), if any.
+pub fn build_tls(config: &Config) -> anyhow::Result<Option<tokio_rustls::TlsAcceptor>> {
+    if config.tls_self_signed {
+        let hosts = vec!["localhost".to_string(), config.listen.ip().to_string()];
+        Ok(Some(crate::tls::self_signed(&hosts)?))
+    } else {
+        match (config.tls_cert.clone(), config.tls_key.clone()) {
+            (Some(cert), Some(key)) => Ok(Some(crate::tls::acceptor(&cert, &key)?)),
+            _ => Ok(None),
+        }
+    }
 }
 
 /// Run a sidecar process: boot the interpreter and run a PHP script to

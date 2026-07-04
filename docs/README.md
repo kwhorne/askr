@@ -16,6 +16,7 @@ requests against it, eliminating per-request framework bootstrap.
 | [Configuration](CONFIGURATION.md) | The `askr.toml` reference, CLI flags, and environment variables. |
 | [CLI reference](CLI.md) | Every command and flag (`serve`, `doctor`, `config-check`). |
 | [Worker mode](WORKER_MODE.md) | Boot-once-serve-many, the Laravel worker script, per-request state reset, writing your own worker. |
+| [CoW template](COW.md) | Boot once, fork workers (copy-on-write) — ~ms warm respawn + shared memory (experimental). |
 | [Shared cache](CACHE.md) | In-binary cache, atomic counters and rate limiting (no Redis); the Laravel driver. |
 | [Broadcasting](BROADCAST.md) | Live updates to browsers via SSE + `askr_broadcast()` (no Reverb/Pusher). |
 | [Admin dashboard](ADMIN.md) | The built-in status/reload/metrics API and web dashboard. |

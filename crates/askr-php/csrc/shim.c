@@ -561,6 +561,38 @@ static PHP_FUNCTION(askr_broadcast) {
     RETURN_BOOL(g_broadcast ? g_broadcast(chan, clen, payload, plen) : 0);
 }
 
+/* ------------------------------------------------------------------ */
+/* CoW template hook (askr_cow_ready)                                 */
+/* ------------------------------------------------------------------ */
+/* The worker script calls askr_cow_ready() after booting the app, before its
+ * serving loop. In the template this forks the workers (and never returns); in
+ * each forked worker it sets up that worker's serving bridge and returns, so the
+ * worker's while(askr_handle_request) loop runs against the CoW-inherited app. */
+
+typedef int (*askr_cow_ready_fn)(void *ctx);
+static askr_cow_ready_fn g_cow_ready = NULL;
+static void *g_cow_ctx = NULL;
+
+void askr_php_set_cow(askr_cow_ready_fn f, void *ctx) {
+    g_cow_ready = f;
+    g_cow_ctx = ctx;
+}
+
+/* Point the worker bridge (used by askr_handle_request) at a new context —
+ * each forked CoW worker installs its own. */
+void askr_php_swap_worker_ctx(void *ctx) {
+    g_ctx = ctx;
+}
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_cow_ready, 0, 0, 0)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_cow_ready) {
+    if (g_cow_ready) {
+        g_cow_ready(g_cow_ctx);
+    }
+    RETURN_NULL();
+}
+
 static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_handle_request, arginfo_askr_handle_request)
     ZEND_FE(askr_cache_get, arginfo_askr_cache_get)
@@ -569,6 +601,7 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_cache_increment, arginfo_askr_cache_increment)
     ZEND_FE(askr_cache_flush, arginfo_askr_cache_flush)
     ZEND_FE(askr_broadcast, arginfo_askr_broadcast)
+    ZEND_FE(askr_cow_ready, arginfo_askr_cow_ready)
     ZEND_FE_END
 };
 

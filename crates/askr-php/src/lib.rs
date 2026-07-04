@@ -315,6 +315,23 @@ pub mod worker {
         pub fn askr_req_add_header(name: *const c_char, value: *const c_char);
         /// Set the body of the current worker request.
         pub fn askr_req_set_body(ptr: *const c_char, len: usize);
+
+        /// Point the worker bridge (used by askr_handle_request) at a new
+        /// context — each forked CoW worker installs its own.
+        pub fn askr_php_swap_worker_ctx(ctx: *mut c_void);
+    }
+}
+
+/// CoW template bridge (A #1). The worker script calls `askr_cow_ready()` after
+/// booting the app; this callback forks the workers (template) or sets up a
+/// worker's serving (child).
+pub mod cow_bridge {
+    use std::ffi::{c_int, c_void};
+
+    pub type CowReadyFn = extern "C" fn(*mut c_void) -> c_int;
+
+    extern "C" {
+        pub fn askr_php_set_cow(f: CowReadyFn, ctx: *mut c_void);
     }
 }
 

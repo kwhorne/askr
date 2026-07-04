@@ -140,6 +140,12 @@ enum Command {
         /// deploy takes down one worker instead of all.
         #[arg(long)]
         canary: bool,
+
+        /// Experimental: CoW template. Boot the app once and fork workers from
+        /// it (copy-on-write) — ~ms warm respawn and shared memory. Requires
+        /// --worker-script; the admin plane is unavailable in this mode.
+        #[arg(long)]
+        cow: bool,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -188,6 +194,7 @@ fn main() -> anyhow::Result<()> {
             cache_slots,
             broadcast,
             canary,
+            cow,
         } => {
             // The config file, when given, is the single source of truth.
             let (config, workers, ini, admin_listen, paranoid, sidecars, cache_slots, broadcast) =
@@ -295,7 +302,17 @@ fn main() -> anyhow::Result<()> {
             let has_sidecars = sidecars.queue > 0 || sidecars.scheduler_script.is_some();
             let need_supervisor =
                 workers > 1 || config.max_requests > 0 || admin_listen.is_some() || has_sidecars;
-            if !need_supervisor {
+            if cow {
+                anyhow::ensure!(
+                    config.worker_script.is_some(),
+                    "--cow requires --worker-script"
+                );
+                if admin_listen.is_some() || has_sidecars {
+                    tracing::warn!("--cow: admin plane and sidecars are unavailable in CoW mode");
+                }
+                tracing::info!(listen = %config.listen, workers, "askr serving (CoW template)");
+                run_cow(listener, config, ini, workers)
+            } else if !need_supervisor {
                 tracing::info!(listen = %config.listen, workers = 1, "askr serving (single process)");
                 run_worker(listener, config, ini)
             } else {
@@ -620,6 +637,173 @@ fn supervise(
     }
     tracing::info!("askr master exiting");
     Ok(())
+}
+
+// --- CoW template (fork a warm, booted app; ~ms respawn) -----------------
+
+use std::ffi::{c_int, c_void};
+
+struct CowCtx {
+    config: Config,
+    listener_fd: RawFd,
+    workers: usize,
+    recycle_after: usize,
+}
+
+/// Boot the app once in this (template) process, then supervise workers forked
+/// from it. The template is single-threaded when it forks (tokio starts only in
+/// the children), so the fork is safe; workers inherit the warm heap via CoW.
+fn run_cow(
+    listener: std::net::TcpListener,
+    config: Config,
+    ini: Option<String>,
+    workers: usize,
+) -> anyhow::Result<()> {
+    let listener_fd = listener.as_raw_fd();
+    std::mem::forget(listener); // keep the fd open for forked workers
+    if let Some(ini) = ini {
+        std::env::set_var("ASKR_PHP_INI", ini);
+    }
+    let script = config
+        .worker_script
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("--cow requires --worker-script"))?;
+
+    // Boot the interpreter on THIS thread (keep the process single-threaded so
+    // the fork in cow_ready is safe).
+    let _interp = askr_php::Interpreter::new().map_err(|e| anyhow::anyhow!("php init: {e}"))?;
+    crate::cache::register_bridge();
+    crate::broadcast::register_bridge();
+
+    let recycle_after = config.max_requests;
+    let ctx = Box::into_raw(Box::new(CowCtx {
+        config,
+        listener_fd,
+        workers,
+        recycle_after,
+    }));
+    // SAFETY: ctx lives for the process; the shim calls cow_ready_trampoline.
+    unsafe { askr_php::cow_bridge::askr_php_set_cow(cow_ready_trampoline, ctx as *mut c_void) };
+
+    tracing::info!(workers, "askr CoW: booting the app once in the template…");
+    // Runs the worker script: it boots the app and calls askr_cow_ready(), which
+    // forks the workers. The template never returns here; a recycled child does.
+    let _ = crate::php::Php::run_worker_current(&script);
+    std::process::exit(0);
+}
+
+/// Called from PHP's `askr_cow_ready()`. In the template it forks + supervises
+/// (never returns); in a forked worker it sets up serving and returns so the
+/// worker's `while (askr_handle_request())` loop serves the warm app.
+extern "C" fn cow_ready_trampoline(ctx: *mut c_void) -> c_int {
+    let cc: &CowCtx = unsafe { &*(ctx as *const CowCtx) };
+    WORKER_COUNT.store(cc.workers, Ordering::SeqCst);
+    START_TIME.store(now_secs(), Ordering::SeqCst);
+
+    let mut signals_installed = false;
+    loop {
+        // Fork any missing worker slots (never while shutting down).
+        for (i, child) in CHILDREN.iter().enumerate().take(cc.workers) {
+            if !SHUTDOWN.load(Ordering::SeqCst) && child.load(Ordering::SeqCst) == 0 {
+                match unsafe { libc::fork() } {
+                    0 => {
+                        cow_child_setup(cc);
+                        return 0; // child returns to PHP → serves the warm app
+                    }
+                    -1 => tracing::error!(worker = i, "cow fork failed"),
+                    pid => {
+                        child.store(pid, Ordering::SeqCst);
+                        tracing::info!(pid, worker = i, "cow worker forked (warm)");
+                    }
+                }
+            }
+        }
+        if !signals_installed {
+            // In CoW, all of INT/TERM/HUP shut the template down (new code is
+            // picked up by restarting the process, e.g. systemctl restart).
+            unsafe {
+                libc::signal(
+                    libc::SIGINT,
+                    on_terminate as *const () as libc::sighandler_t,
+                );
+                libc::signal(
+                    libc::SIGTERM,
+                    on_terminate as *const () as libc::sighandler_t,
+                );
+                libc::signal(
+                    libc::SIGHUP,
+                    on_terminate as *const () as libc::sighandler_t,
+                );
+            }
+            signals_installed = true;
+            tracing::info!(workers = cc.workers, "askr CoW template supervising");
+        }
+        // Reap and refork.
+        let mut status: libc::c_int = 0;
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if pid > 0 {
+            for (i, c) in CHILDREN.iter().enumerate().take(cc.workers) {
+                if c.load(Ordering::SeqCst) == pid {
+                    c.store(0, Ordering::SeqCst);
+                    if !SHUTDOWN.load(Ordering::SeqCst) {
+                        RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
+                        tracing::info!(pid, worker = i, "cow worker exited; reforking (warm)");
+                    }
+                }
+            }
+        }
+        if SHUTDOWN.load(Ordering::SeqCst)
+            && CHILDREN
+                .iter()
+                .take(cc.workers)
+                .all(|c| c.load(Ordering::SeqCst) == 0)
+        {
+            tracing::info!("askr CoW template exiting");
+            std::process::exit(0);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// In a forked CoW worker: install its serving bridge and spawn its tokio
+/// runtime + accept loop, then return so the inherited PHP serving loop runs.
+fn cow_child_setup(cc: &CowCtx) {
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+    }
+    let php = crate::php::Php::cow_bridge();
+    let listener_fd = cc.listener_fd;
+    let config = cc.config.clone();
+    let recycle = cc.recycle_after;
+    std::thread::spawn(move || {
+        let tls = worker::build_tls(&config).unwrap_or(None);
+        let std_listener = unsafe { std::net::TcpListener::from_raw_fd(listener_fd) };
+        let _ = std_listener.set_nonblocking(true);
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("cow worker runtime: {e}");
+                std::process::exit(1);
+            }
+        };
+        rt.block_on(async move {
+            match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(l) => {
+                    let _ =
+                        crate::server::run(l, std::sync::Arc::new(config), php, recycle, tls).await;
+                }
+                Err(e) => tracing::error!(error = %e, "cow listener"),
+            }
+        });
+        // Server returned (recycle/drain) → exit so the template reforks warm.
+        std::process::exit(0);
+    });
 }
 
 /// async-signal-safe: atomic loads + kill().

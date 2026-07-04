@@ -116,6 +116,36 @@ impl Php {
         Ok(Php { tx })
     }
 
+    /// CoW: run the worker script on the **current** thread (the template must be
+    /// single-threaded when it forks). Boots the app; `askr_cow_ready()` inside
+    /// the script forks the workers. Returns only in a recycled child.
+    pub fn run_worker_current(script: &std::path::Path) -> i32 {
+        let script_c = match CString::new(script.to_string_lossy().as_ref().to_owned()) {
+            Ok(c) => c,
+            Err(_) => return -1,
+        };
+        // SAFETY: uses the worker-bridge trampolines; the initial ctx is null —
+        // each CoW worker swaps in its own via `cow_bridge()` before serving.
+        unsafe {
+            askr_php::worker::askr_php_run_worker(
+                script_c.as_ptr(),
+                wait_trampoline,
+                reply_trampoline,
+                std::ptr::null_mut(),
+            )
+        }
+    }
+
+    /// CoW: install a fresh serving bridge for this forked worker and return a
+    /// `Php` handle for its server. The interpreter + booted app are inherited.
+    pub fn cow_bridge() -> Php {
+        let (tx, rx) = mpsc::channel::<Job>(1024);
+        let bridge = Box::into_raw(Box::new(WorkerBridge { rx, pending: None }));
+        // SAFETY: the shim uses this pointer as the worker ctx for wait/reply.
+        unsafe { askr_php::worker::askr_php_swap_worker_ctx(bridge as *mut c_void) };
+        Php { tx }
+    }
+
     /// Run one request through the interpreter.
     pub async fn handle(&self, req: Request) -> Result<Response, String> {
         let (reply, rx) = oneshot::channel();

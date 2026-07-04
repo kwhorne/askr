@@ -66,6 +66,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
 - [CLI reference](docs/CLI.md) — every command and flag
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
+- [CoW template](docs/COW.md) — boot once, fork workers for ~ms warm respawn (experimental)
 - [Admin dashboard](docs/ADMIN.md) — status/reload API and web UI
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
@@ -75,6 +76,7 @@ Everything lives in [`docs/`](docs/README.md):
 - Multi-core: one worker **process per core** on a shared listen socket
 - **Worker mode** (Octane-style) with per-request state reset — no bleed
 - **`--paranoid`** state-bleed detector: tells you if your app is worker-safe
+- **CoW template** (`--cow`): boot once, fork workers — ~ms warm respawn + shared memory
 - **Queue workers + scheduler** supervised in the same binary (no Horizon/cron)
 - **Shared cache** (`askr_cache_*` + Laravel driver): cache, atomic counters, rate limiting — no Redis
 - **Broadcasting**: live updates to browsers via SSE + `askr_broadcast()` — no Reverb/Pusher

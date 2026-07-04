@@ -129,6 +129,12 @@ function askr_reset_state($app): void
     }
 }
 
+// CoW mode (askr serve --cow): fork the workers from this booted template now.
+// No-op in every other mode.
+if (function_exists('askr_cow_ready')) {
+    askr_cow_ready();
+}
+
 // Serve until Askr shuts the worker down.
 $paranoid?->baseline();
 while (askr_handle_request($handler)) {
