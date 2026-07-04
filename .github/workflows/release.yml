@@ -26,7 +26,7 @@ jobs:
     steps:
       # For a tag push this is the tag; for manual dispatch it's the branch the
       # workflow was started from (so it always has the packaging script).
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref }}
 
