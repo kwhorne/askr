@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.1.0</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.2.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**

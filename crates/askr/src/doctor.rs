@@ -134,7 +134,7 @@ fn platform_check() {
 
 #[cfg(target_os = "linux")]
 fn kernel_at_least(release: &str, major: u32, minor: u32) -> bool {
-    let mut it = release.split(|c: char| c == '.' || c == '-');
+    let mut it = release.split(['.', '-']);
     let maj: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let min: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     (maj, min) >= (major, minor)
