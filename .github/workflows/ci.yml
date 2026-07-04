@@ -12,23 +12,23 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Reads the pinned toolchain + components from rust-toolchain.toml and
+      # caches the cargo registry/target keyed on the toolchain + Cargo.lock.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Cache cargo
+      # The slowest step is compiling PHP; cache the install keyed on the build
+      # script (which pins the PHP version). Skip the build on a cache hit.
+      - name: Cache libphp
+        id: libphp
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          path: vendor/php-build/install
+          key: libphp-minimal-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
 
       - name: Build embedded libphp (minimal profile)
+        if: steps.libphp.outputs.cache-hit != 'true'
         run: ./scripts/build-libphp.sh
 
       - name: rustfmt
@@ -48,18 +48,27 @@ jobs:
   libphp-laravel-profile:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Cache libphp (laravel)
+        id: libphp
+        uses: actions/cache@v4
+        with:
+          path: vendor/php-build/install
+          key: libphp-laravel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
 
       - name: Install PHP build dependencies
+        if: steps.libphp.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config \
             libssl-dev libxml2-dev libonig-dev libsqlite3-dev
 
       - name: Build libphp (laravel profile)
+        if: steps.libphp.outputs.cache-hit != 'true'
         run: PROFILE=laravel ./scripts/build-libphp.sh
 
       - name: Verify non-ZTS + shared object
         run: |
           test -f vendor/php-build/install/lib/libphp.so
-          ! grep -q 'define ZTS 1' vendor/php-build/php-*/main/php_config.h
+          ls vendor/php-build/install/lib/php/extensions/ | grep -q 'non-zts'

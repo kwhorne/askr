@@ -26,11 +26,12 @@ jobs:
     steps:
       # For a tag push this is the tag; for manual dispatch it's the branch the
       # workflow was started from (so it always has the packaging script).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Uses the pinned toolchain from rust-toolchain.toml.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Install build dependencies
         run: |

@@ -1,3 +1,6 @@
+# Pinned so CI is deterministic — a new Rust release can't turn `main` red under
+# `clippy -D warnings` without a code change. Bump this deliberately in its own
+# commit (and fix any new lints there).
 [toolchain]
-channel = "stable"
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]

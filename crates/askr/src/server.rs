@@ -21,11 +21,12 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::{Body, Frame, Incoming};
+use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
+use tokio::io::AsyncRead;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Notify};
 use tokio_rustls::TlsAcceptor;
@@ -33,8 +34,17 @@ use tokio_rustls::TlsAcceptor;
 use crate::cgi;
 use crate::php::Php;
 
-/// Response body: buffered (Full) or streaming (SSE), unified as a boxed body.
+/// Response body: buffered (Full) or streaming (SSE / files), unified as a box.
 type ResBody = BoxBody<Bytes, std::io::Error>;
+
+/// Max simultaneous connections per worker — a backstop against connection
+/// exhaustion (slowloris); combined with the handshake/header timeouts, idle
+/// connections can't pile up.
+const MAX_CONNECTIONS: usize = 8192;
+
+/// Bounded wait for a TLS handshake / a client to send request headers.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn full(bytes: Bytes) -> ResBody {
     Full::new(bytes).map_err(|never| match never {}).boxed()
@@ -89,6 +99,10 @@ impl SseHub {
     fn deliver(&self, channel: &str, data: &Bytes) {
         self.subs.lock().unwrap().retain(|s| {
             if s.channel == channel {
+                // Non-blocking: if a subscriber's 128-message buffer is full
+                // (a client that can't keep up), try_send fails and we drop that
+                // subscriber. This is intentional back-pressure — a slow client
+                // is disconnected rather than stalling the broadcast fan-out.
                 s.tx.try_send(data.clone()).is_ok()
             } else {
                 !s.tx.is_closed()
@@ -178,6 +192,12 @@ pub async fn run(
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, peer) = accepted?;
+                // Shed load past the connection cap (dropping closes the socket).
+                if rt.active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+                    tracing::warn!(%peer, "connection cap reached; dropping");
+                    drop(stream);
+                    continue;
+                }
                 let rt = rt.clone();
                 rt.active.fetch_add(1, Ordering::SeqCst);
                 tokio::task::spawn(async move {
@@ -208,9 +228,11 @@ pub async fn run(
 /// HTTP/2 (auto-negotiated) until the connection closes.
 async fn serve_conn(stream: tokio::net::TcpStream, rt: Arc<Runtime>, peer: SocketAddr) {
     if let Some(acceptor) = rt.tls.clone() {
-        match acceptor.accept(stream).await {
-            Ok(tls) => serve_io(TokioIo::new(tls), rt, peer).await,
-            Err(e) => tracing::debug!(error = %e, "TLS handshake failed"),
+        // Bound the handshake so a slow/malicious client can't hold a slot open.
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+            Ok(Ok(tls)) => serve_io(TokioIo::new(tls), rt, peer).await,
+            Ok(Err(e)) => tracing::debug!(error = %e, "TLS handshake failed"),
+            Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
         }
     } else {
         serve_io(TokioIo::new(stream), rt, peer).await;
@@ -222,10 +244,14 @@ where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     let service = service_fn(move |req| handle(req, rt.clone(), peer));
-    if let Err(e) = auto::Builder::new(TokioExecutor::new())
-        .serve_connection(io, service)
-        .await
-    {
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    // Bound how long a client may take to send request headers (slowloris).
+    // header_read_timeout needs a timer registered on the builder.
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
+    if let Err(e) = builder.serve_connection_with_upgrades(io, service).await {
         tracing::debug!(error = %e, "connection closed");
     }
 }
@@ -245,12 +271,15 @@ async fn handle(
         return Ok(sse_response(req.uri().query(), &rt));
     }
 
-    // try_files: serve an existing static file directly.
+    // try_files: serve an existing static file directly (async stat, no blocking
+    // syscall on the async path).
     let rel = sanitize(req.uri().path());
     if !rel.as_os_str().is_empty() {
         let candidate = config.docroot.join(&rel);
-        if candidate.is_file() {
-            return Ok(serve_static(&candidate).await);
+        if let Ok(meta) = tokio::fs::metadata(&candidate).await {
+            if meta.is_file() {
+                return Ok(serve_static(&candidate, &meta, req.method(), req.headers()).await);
+            }
         }
     }
 
@@ -368,15 +397,167 @@ fn sse_response(query: Option<&str>, rt: &Runtime) -> Response<ResBody> {
         .unwrap()
 }
 
-async fn serve_static(path: &Path) -> Response<ResBody> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(hyper::header::CONTENT_TYPE, mime_for(path))
-            .body(full(Bytes::from(bytes)))
-            .unwrap(),
-        Err(_) => text(StatusCode::NOT_FOUND, "askr: file not found"),
+/// A streaming file body — reads the file in 64 KB chunks so a large file never
+/// buffers the whole thing in RAM (and reports an exact size so hyper sets
+/// Content-Length and suppresses the body for HEAD).
+struct FileBody {
+    file: tokio::fs::File,
+    remaining: u64,
+}
+
+impl Body for FileBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        let this = self.get_mut();
+        if this.remaining == 0 {
+            return Poll::Ready(None);
+        }
+        let want = this.remaining.min(64 * 1024) as usize;
+        let mut buf = vec![0u8; want];
+        let mut rb = tokio::io::ReadBuf::new(&mut buf);
+        match Pin::new(&mut this.file).poll_read(cx, &mut rb) {
+            Poll::Ready(Ok(())) => {
+                let n = rb.filled().len();
+                if n == 0 {
+                    this.remaining = 0;
+                    return Poll::Ready(None);
+                }
+                this.remaining -= n as u64;
+                buf.truncate(n);
+                Poll::Ready(Some(Ok(Frame::data(Bytes::from(buf)))))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+            Poll::Pending => Poll::Pending,
+        }
     }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.remaining)
+    }
+}
+
+/// Serve a static file: streamed, with ETag + Cache-Control, conditional GET
+/// (304) and single-range (206) support.
+async fn serve_static(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    method: &Method,
+    headers: &hyper::HeaderMap,
+) -> Response<ResBody> {
+    let len = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let etag = format!("W/\"{len:x}-{mtime:x}\"");
+
+    // Hashed build assets can be cached forever; everything else briefly.
+    let cache_control = if path.components().any(|c| c.as_os_str() == "build") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=3600"
+    };
+
+    // Conditional GET.
+    if let Some(inm) = headers
+        .get(hyper::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if inm.split(',').any(|t| t.trim() == etag) {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(hyper::header::ETAG, &etag)
+                .header(hyper::header::CACHE_CONTROL, cache_control)
+                .body(full(Bytes::new()))
+                .unwrap();
+        }
+    }
+
+    let (start, end) = parse_range(headers, len);
+    let partial =
+        headers.contains_key(hyper::header::RANGE) && (start != 0 || end != len.saturating_sub(1));
+    let send_len = end + 1 - start;
+
+    let mut builder = Response::builder()
+        .header(hyper::header::CONTENT_TYPE, mime_for(path))
+        .header(hyper::header::ETAG, &etag)
+        .header(hyper::header::CACHE_CONTROL, cache_control)
+        .header(hyper::header::ACCEPT_RANGES, "bytes");
+    builder = if partial {
+        builder.status(StatusCode::PARTIAL_CONTENT).header(
+            hyper::header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{len}"),
+        )
+    } else {
+        builder.status(StatusCode::OK)
+    };
+
+    let _ = method; // hyper suppresses the body for HEAD (using FileBody's size_hint)
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(_) => return text(StatusCode::NOT_FOUND, "askr: file not found"),
+    };
+    if start > 0 {
+        use tokio::io::AsyncSeekExt;
+        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+            return text(StatusCode::INTERNAL_SERVER_ERROR, "askr: seek failed");
+        }
+    }
+    builder
+        .body(
+            FileBody {
+                file,
+                remaining: send_len,
+            }
+            .boxed(),
+        )
+        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
+}
+
+/// Parse a single HTTP Range header into an inclusive `(start, end)`. Falls back
+/// to the whole file `(0, len-1)` for a missing/invalid/multi-range request.
+fn parse_range(headers: &hyper::HeaderMap, len: u64) -> (u64, u64) {
+    let full = (0, len.saturating_sub(1));
+    if len == 0 {
+        return full;
+    }
+    let Some(spec) = headers
+        .get(hyper::header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+    else {
+        return full;
+    };
+    // Single range only.
+    let Some((s, e)) = spec.split(',').next().unwrap_or("").trim().split_once('-') else {
+        return full;
+    };
+    let (start, end) = match (s.trim(), e.trim()) {
+        ("", suffix) => match suffix.parse::<u64>() {
+            Ok(n) if n > 0 => (len.saturating_sub(n), len - 1),
+            _ => return full,
+        },
+        (a, "") => match a.parse::<u64>() {
+            Ok(start) => (start, len - 1),
+            _ => return full,
+        },
+        (a, b) => match (a.parse::<u64>(), b.parse::<u64>()) {
+            (Ok(start), Ok(end)) => (start, end.min(len - 1)),
+            _ => return full,
+        },
+    };
+    if start > end || start >= len {
+        return full;
+    }
+    (start, end)
 }
 
 fn text(status: StatusCode, msg: &str) -> Response<ResBody> {
