@@ -58,7 +58,23 @@ key = "/etc/askr/privkey.pem"
 
 [admin]
 listen = "127.0.0.1:9000"
+
+# Whole Laravel runtime in one process: queue workers + scheduler, no extra
+# systemd units or Horizon needed for basic setups.
+[queue]
+workers = 2
+script = "/opt/askr/examples/askr-queue.php"
+
+[scheduler]
+script = "/opt/askr/examples/askr-scheduler.php"
 ```
+
+The master supervises the queue workers and the scheduler alongside the web
+workers — they respawn on exit, drain on shutdown, and roll on reload. Queue
+workers run `queue:work` (with `--max-jobs`/`--max-time` self-recycling); the
+scheduler runs `schedule:run` on an interval, so no `* * * * *` crontab entry is
+needed. Both run entirely in-process (no separate `php artisan` invocation). The
+queue needs the app's queue connection configured as usual.
 
 ```bash
 askr config-check /etc/askr/askr.toml   # validate before enabling

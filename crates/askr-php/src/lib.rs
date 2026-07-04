@@ -16,6 +16,7 @@ extern "C" {
     fn askr_php_shutdown();
     fn askr_php_eval(code: *const c_char, out: *mut *mut c_char, out_len: *mut usize) -> c_int;
     fn askr_php_free(p: *mut c_char);
+    fn askr_php_run_script(script: *const c_char) -> c_int;
 
     #[allow(clippy::too_many_arguments)]
     fn askr_php_handle(
@@ -120,6 +121,16 @@ impl Interpreter {
             output,
             status: status as i32,
         })
+    }
+
+    /// Run a PHP file to completion like a CLI invocation (for queue/scheduler
+    /// sidecars). Blocks until the script returns; output goes to stdout.
+    /// Returns the script's exit status.
+    pub fn run_script(&mut self, path: &str) -> Result<i32, Error> {
+        let c = CString::new(path).map_err(|_| Error::NulByte)?;
+        // SAFETY: FFI into the shim on this thread; `c` outlives the call.
+        let rc = unsafe { askr_php_run_script(c.as_ptr()) };
+        Ok(rc as i32)
     }
 
     /// Report the embedded engine's `PHP_VERSION`.

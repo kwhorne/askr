@@ -59,6 +59,23 @@ Enabling TLS negotiates HTTP/2 or HTTP/1.1 via ALPN and sets `HTTPS=on` in
 | --- | --- | --- |
 | `listen` | string | Admin dashboard/API address (e.g. `127.0.0.1:9000`). Omit to disable. See [Admin](ADMIN.md). |
 
+### `[queue]`
+
+Run queue workers in the same binary, supervised alongside the web workers.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `workers` | int | Number of queue-worker processes (`0` = off). |
+| `script` | path | Queue runner script (e.g. `examples/askr-queue.php`). |
+
+### `[scheduler]`
+
+Run the scheduler (built-in cron) in the same binary.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `script` | path | Scheduler runner script (e.g. `examples/askr-scheduler.php`). Omit to disable. |
+
 ### Example
 
 ```toml

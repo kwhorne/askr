@@ -42,6 +42,9 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--tls-self-signed` | off | Generate a v3 self-signed cert on startup (dev/testing). Conflicts with `--tls-cert`. |
 | `--admin <ADDR>` | — | Admin dashboard/API listen address (e.g. `127.0.0.1:9000`). Off if unset. See [Admin](ADMIN.md). |
 | `--paranoid` | off | **Dev only.** Detect state bleed between requests in worker mode (reports app state that keeps growing). Expensive; use `--workers 1`. See [Worker mode](WORKER_MODE.md#is-my-app-worker-safe----paranoid). |
+| `--queue <N>` | `0` | Run N queue-worker processes alongside the web workers (requires `--queue-script`). Supervised and respawned. |
+| `--queue-script <FILE>` | — | Queue runner script (e.g. `examples/askr-queue.php`). |
+| `--scheduler-script <FILE>` | — | Run the scheduler (built-in cron) with this runner (e.g. `examples/askr-scheduler.php`). |
 | `--ini <LINES>` | `$ASKR_PHP_INI` | Extra php.ini lines (e.g. to load opcache). |
 
 Notes:

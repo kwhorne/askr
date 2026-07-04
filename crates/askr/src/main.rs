@@ -108,6 +108,19 @@ enum Command {
         /// (reports app state that keeps growing). Expensive — not for prod.
         #[arg(long)]
         paranoid: bool,
+
+        /// Run N queue-worker processes alongside the web workers (requires
+        /// --queue-script). Supervised and respawned like web workers.
+        #[arg(long, default_value = "0")]
+        queue: usize,
+
+        /// Queue runner script (e.g. examples/askr-queue.php).
+        #[arg(long)]
+        queue_script: Option<PathBuf>,
+
+        /// Run the scheduler with this runner script (e.g. examples/askr-scheduler.php).
+        #[arg(long)]
+        scheduler_script: Option<PathBuf>,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -150,15 +163,25 @@ fn main() -> anyhow::Result<()> {
             tls_self_signed,
             max_body_size,
             paranoid,
+            queue,
+            queue_script,
+            scheduler_script,
         } => {
             // The config file, when given, is the single source of truth.
-            let (config, workers, ini, admin_listen, paranoid) = if let Some(path) = config_file {
+            let (config, workers, ini, admin_listen, paranoid, sidecars) = if let Some(path) =
+                config_file
+            {
                 let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
                 if let Some(base) = &r.app_base {
                     // Exported for the worker script; children inherit it across fork.
                     std::env::set_var("ASKR_APP_BASE", base);
                 }
-                (r.config, r.workers, r.ini, r.admin_listen, r.paranoid)
+                let sc = Sidecars {
+                    queue: r.queue_workers,
+                    queue_script: r.queue_script,
+                    scheduler_script: r.scheduler_script,
+                };
+                (r.config, r.workers, r.ini, r.admin_listen, r.paranoid, sc)
             } else {
                 let max_body_size = parse_size(&max_body_size)?;
                 let docroot = resolve_root(root)?;
@@ -175,6 +198,12 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
                 }
                 let tls_on = tls_cert.is_some() || tls_self_signed;
+                if let Some(qs) = &queue_script {
+                    anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
+                }
+                if let Some(ss) = &scheduler_script {
+                    anyhow::ensure!(ss.is_file(), "scheduler script not found: {}", ss.display());
+                }
                 let cfg = Config {
                     docroot,
                     front_controller: front,
@@ -188,12 +217,18 @@ fn main() -> anyhow::Result<()> {
                     max_body_size,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
+                let sc = Sidecars {
+                    queue: if queue_script.is_some() { queue } else { 0 },
+                    queue_script,
+                    scheduler_script,
+                };
                 (
                     cfg,
                     w,
                     ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
                     admin,
                     paranoid,
+                    sc,
                 )
             };
 
@@ -206,13 +241,16 @@ fn main() -> anyhow::Result<()> {
             }
 
             let listener = bind_listener(config.listen)?;
-            // The supervisor is needed for recycling, the admin plane, or >1 worker.
-            let need_supervisor = workers > 1 || config.max_requests > 0 || admin_listen.is_some();
+            // The supervisor is needed for recycling, the admin plane, sidecars,
+            // or >1 worker.
+            let has_sidecars = sidecars.queue > 0 || sidecars.scheduler_script.is_some();
+            let need_supervisor =
+                workers > 1 || config.max_requests > 0 || admin_listen.is_some() || has_sidecars;
             if !need_supervisor {
                 tracing::info!(listen = %config.listen, workers = 1, "askr serving (single process)");
                 run_worker(listener, config, ini)
             } else {
-                supervise(listener, config, ini, workers, admin_listen)
+                supervise(listener, config, ini, workers, admin_listen, sidecars)
             }
         }
         Command::Doctor { ini } => {
@@ -324,14 +362,51 @@ pub fn trigger_reload() {
 /// Fork `workers` child processes, each running an independent worker on the
 /// shared inherited listener, then supervise them: forward termination signals
 /// and reap exits.
+/// Queue/scheduler sidecar processes supervised alongside the web workers.
+#[derive(Clone)]
+pub struct Sidecars {
+    pub queue: usize,
+    pub queue_script: Option<PathBuf>,
+    pub scheduler_script: Option<PathBuf>,
+}
+
+/// What a supervised slot runs.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Web,
+    Queue,
+    Scheduler,
+}
+
 fn supervise(
     listener: std::net::TcpListener,
     config: Config,
     ini: Option<String>,
     workers: usize,
     admin_listen: Option<SocketAddr>,
+    sidecars: Sidecars,
 ) -> anyhow::Result<()> {
-    let workers = workers.min(MAX_WORKERS);
+    let web = workers.max(1);
+    let queue = sidecars.queue;
+    let sched = if sidecars.scheduler_script.is_some() {
+        1
+    } else {
+        0
+    };
+    let total = (web + queue + sched).min(MAX_WORKERS);
+
+    // Slot layout: [0, web) web · [web, web+queue) queue · [web+queue] scheduler.
+    let kind_of = move |i: usize| -> Kind {
+        if i < web {
+            Kind::Web
+        } else if i < web + queue {
+            Kind::Queue
+        } else {
+            Kind::Scheduler
+        }
+    };
+
+    let workers = total;
     WORKER_COUNT.store(workers, Ordering::SeqCst);
     START_TIME.store(now_secs(), Ordering::SeqCst);
     let listen_fd: RawFd = listener.as_raw_fd();
@@ -352,24 +427,35 @@ fn supervise(
     // Fork one worker into slot `i`. In the child this never returns (it runs
     // the worker and exits); in the parent it records the pid.
     let spawn_slot = |i: usize| {
+        let kind = kind_of(i);
         // SAFETY: fork before any tokio runtime exists on this thread; the child
-        // builds its own runtime. Only async-signal-safe work runs pre-exec.
+        // builds its own. Only async-signal-safe work runs pre-exec.
         match unsafe { libc::fork() } {
             0 => {
                 // Child: the master coordinates lifecycle. Ignore SIGINT/SIGHUP
-                // (don't inherit the master's handlers); SIGTERM is left for the
-                // worker's tokio runtime to catch and drain gracefully.
+                // (don't inherit the master's handlers); SIGTERM stays default so
+                // the web worker's tokio / queue:work can catch it.
                 unsafe {
                     libc::signal(libc::SIGINT, libc::SIG_IGN);
                     libc::signal(libc::SIGHUP, libc::SIG_IGN);
                     libc::signal(libc::SIGTERM, libc::SIG_DFL);
                 }
-                let inherited = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
-                let code = match run_worker(inherited, config.clone(), ini.clone()) {
-                    Ok(()) => 0,
-                    Err(e) => {
-                        eprintln!("askr worker {i}: {e:#}");
-                        1
+                let code = match kind {
+                    Kind::Web => {
+                        let inherited = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
+                        match run_worker(inherited, config.clone(), ini.clone()) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                eprintln!("askr worker {i}: {e:#}");
+                                1
+                            }
+                        }
+                    }
+                    Kind::Queue => {
+                        worker::run_sidecar(sidecars.queue_script.clone().unwrap(), ini.clone())
+                    }
+                    Kind::Scheduler => {
+                        worker::run_sidecar(sidecars.scheduler_script.clone().unwrap(), ini.clone())
                     }
                 };
                 std::process::exit(code);
@@ -383,7 +469,12 @@ fn supervise(
             }
             pid => {
                 CHILDREN[i].store(pid, Ordering::SeqCst);
-                tracing::info!(pid, worker = i, "spawned worker");
+                let label = match kind {
+                    Kind::Web => "web",
+                    Kind::Queue => "queue",
+                    Kind::Scheduler => "scheduler",
+                };
+                tracing::info!(pid, slot = i, kind = label, "spawned");
             }
         }
     };

@@ -32,3 +32,12 @@ self_signed = false
 # Built-in dashboard + API (status, graceful reload). Bind to localhost and
 # reach it over SSH / a private network. Omit to disable.
 listen = "127.0.0.1:9000"
+
+# Run queue workers in the same binary, supervised alongside the web workers.
+# [queue]
+# workers = 2
+# script = "/opt/askr/examples/askr-queue.php"
+
+# Run the scheduler (built-in cron) in the same binary. Omit to disable.
+# [scheduler]
+# script = "/opt/askr/examples/askr-scheduler.php"

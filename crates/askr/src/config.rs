@@ -24,6 +24,10 @@ pub struct FileConfig {
     pub tls: TlsSection,
     #[serde(default)]
     pub admin: AdminSection,
+    #[serde(default)]
+    pub queue: QueueSection,
+    #[serde(default)]
+    pub scheduler: SchedulerSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +84,23 @@ pub struct AdminSection {
     pub listen: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueSection {
+    /// Number of queue-worker processes (runs the queue script). 0 = off.
+    #[serde(default)]
+    pub workers: usize,
+    /// Queue runner script (e.g. examples/askr-queue.php).
+    pub script: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerSection {
+    /// Scheduler runner script (e.g. examples/askr-scheduler.php). Off if unset.
+    pub script: Option<PathBuf>,
+}
+
 impl Default for ServerSection {
     fn default() -> Self {
         ServerSection {
@@ -112,6 +133,9 @@ pub struct Resolved {
     pub app_base: Option<PathBuf>,
     pub paranoid: bool,
     pub admin_listen: Option<SocketAddr>,
+    pub queue_workers: usize,
+    pub queue_script: Option<PathBuf>,
+    pub scheduler_script: Option<PathBuf>,
 }
 
 impl FileConfig {
@@ -191,6 +215,25 @@ impl FileConfig {
             None => None,
         };
 
+        // Queue / scheduler sidecars.
+        if self.queue.workers > 0 {
+            anyhow::ensure!(
+                self.queue.script.is_some(),
+                "queue.workers is set but queue.script is missing"
+            );
+        }
+        if let Some(s) = &self.queue.script {
+            anyhow::ensure!(s.is_file(), "queue.script not found: {}", s.display());
+        }
+        if let Some(s) = &self.scheduler.script {
+            anyhow::ensure!(s.is_file(), "scheduler.script not found: {}", s.display());
+        }
+        let queue_workers = if self.queue.script.is_some() {
+            self.queue.workers
+        } else {
+            0
+        };
+
         Ok(Resolved {
             config: Config {
                 docroot,
@@ -209,6 +252,9 @@ impl FileConfig {
             app_base: self.worker.app_base,
             paranoid: self.worker.paranoid,
             admin_listen,
+            queue_workers,
+            queue_script: self.queue.script,
+            scheduler_script: self.scheduler.script,
         })
     }
 }

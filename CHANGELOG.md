@@ -4,6 +4,13 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Whole Laravel runtime in one binary** — the master now supervises **queue
+  workers** (`--queue N --queue-script`, or `[queue]`) and the **scheduler**
+  (built-in cron; `--scheduler-script`, or `[scheduler]`) alongside the web
+  workers: forked as sidecar processes running `queue:work` / `schedule:run`
+  in-process, respawned on exit, drained on shutdown. No separate `php artisan`
+  processes, systemd units, or Horizon/crontab needed for basic setups.
+  `examples/askr-queue.php`, `examples/askr-scheduler.php`; `Interpreter::run_script`.
 - **State-bleed detector (`--paranoid`)** — dev-only worker-mode diagnostic that
   snapshots app state (static properties, `$GLOBALS`, Laravel container
   bindings/instances) after each request's reset and reports anything that keeps

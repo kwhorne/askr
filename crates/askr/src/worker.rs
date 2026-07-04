@@ -68,6 +68,23 @@ pub fn run_worker(
     })
 }
 
+/// Run a sidecar process: boot the interpreter and run a PHP script to
+/// completion (a queue worker loops forever; the scheduler ticks). Blocks.
+/// Returns the script's exit code. No listener, no HTTP.
+pub fn run_sidecar(script: std::path::PathBuf, ini: Option<String>) -> i32 {
+    if let Some(ini) = ini {
+        std::env::set_var("ASKR_PHP_INI", ini);
+    }
+    let mut php = match askr_php::Interpreter::new() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("askr sidecar: php init failed: {e}");
+            return 1;
+        }
+    };
+    php.run_script(&script.to_string_lossy()).unwrap_or(1)
+}
+
 /// Add a per-process jitter so workers recycle at different times.
 fn stagger(max: usize) -> usize {
     if max == 0 {

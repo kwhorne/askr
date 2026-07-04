@@ -96,11 +96,21 @@ static int g_worker_mode = 0;      /* 1 while inside the persistent worker loop 
 static char  *w_body;
 static size_t w_body_len;
 
+/* Script mode (artisan queue/scheduler sidecars): output goes straight to
+ * stdout instead of being captured, so a long-running command can't grow an
+ * ever-larger capture buffer. */
+static int g_script_mode = 0;
+
 /* ------------------------------------------------------------------ */
 /* SAPI callbacks                                                     */
 /* ------------------------------------------------------------------ */
 
 static size_t askr_ub_write(const char *str, size_t len) {
+    if (g_script_mode) {
+        size_t n = fwrite(str, 1, len, stdout);
+        fflush(stdout); /* sidecar output should reach logs promptly */
+        return n;
+    }
     if (buf_append(&g_req.out, str, len) != 0) {
         return 0;
     }
@@ -476,6 +486,44 @@ int askr_php_run_worker(const char *script, askr_wait_fn wait, askr_reply_fn rep
     php_request_shutdown((void *)0);
     askr_req_reset();
     return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* run a script to completion (artisan queue/scheduler sidecars)      */
+/* ------------------------------------------------------------------ */
+/*
+ * Execute a PHP file like a CLI invocation and block until it returns (queue
+ * workers loop forever; the scheduler ticks). Output goes straight to stdout
+ * (script mode). Returns the script's exit status.
+ */
+int askr_php_run_script(const char *script) {
+    SG(server_context) = &g_req;
+    SG(request_info).request_method = "GET";
+    SG(request_info).path_translated = (char *)script;
+    SG(request_info).request_uri = (char *)"";
+
+    if (php_request_startup() == FAILURE) {
+        return -1;
+    }
+    g_script_mode = 1;
+
+    int rc = 0;
+    zend_first_try {
+        zend_file_handle fh;
+        zend_stream_init_filename(&fh, script);
+        if (php_execute_script(&fh) == false) {
+            rc = 1;
+        }
+        zend_destroy_file_handle(&fh);
+    } zend_catch {
+        rc = 2;
+    } zend_end_try();
+
+    int exit_status = EG(exit_status);
+    g_script_mode = 0;
+    php_request_shutdown((void *)0);
+
+    return exit_status ? exit_status : rc;
 }
 
 /* ------------------------------------------------------------------ */
