@@ -76,6 +76,15 @@ Run the scheduler (built-in cron) in the same binary.
 | --- | --- | --- |
 | `script` | path | Scheduler runner script (e.g. `examples/askr-scheduler.php`). Omit to disable. |
 
+### `[cache]`
+
+Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See
+[Cache](CACHE.md).
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `slots` | int | Number of cache slots (`0` = disabled). Each slot is ~4.3 KB. |
+
 ### Example
 
 ```toml

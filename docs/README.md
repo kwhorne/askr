@@ -16,7 +16,8 @@ requests against it, eliminating per-request framework bootstrap.
 | [Configuration](CONFIGURATION.md) | The `askr.toml` reference, CLI flags, and environment variables. |
 | [CLI reference](CLI.md) | Every command and flag (`serve`, `doctor`, `config-check`). |
 | [Worker mode](WORKER_MODE.md) | Boot-once-serve-many, the Laravel worker script, per-request state reset, writing your own worker. |
-| [Admin dashboard](ADMIN.md) | The built-in status/reload API and web dashboard. |
+| [Shared cache](CACHE.md) | In-binary cache, atomic counters and rate limiting (no Redis); the Laravel driver. |
+| [Admin dashboard](ADMIN.md) | The built-in status/reload/metrics API and web dashboard. |
 | [Deployment](DEPLOYMENT.md) | Production: systemd, TLS, zero-downtime reload, recycling, scaling, hardening. |
 | [Ubuntu quickstart](UBUNTU.md) | End-to-end build + run on Ubuntu. |
 

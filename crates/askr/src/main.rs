@@ -5,6 +5,7 @@
 //!     (non-ZTS means one interpreter per process, so we scale by processes).
 
 mod admin;
+mod cache;
 mod cgi;
 mod config;
 mod doctor;
@@ -122,6 +123,11 @@ enum Command {
         /// Run the scheduler with this runner script (e.g. examples/askr-scheduler.php).
         #[arg(long)]
         scheduler_script: Option<PathBuf>,
+
+        /// Enable the shared cache with this many slots (0 = off; ~4.3 KB each).
+        /// Exposes askr_cache_* to PHP (cache, counters, locks — no Redis).
+        #[arg(long, default_value = "0")]
+        cache_slots: usize,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -167,71 +173,89 @@ fn main() -> anyhow::Result<()> {
             queue,
             queue_script,
             scheduler_script,
+            cache_slots,
         } => {
             // The config file, when given, is the single source of truth.
-            let (config, workers, ini, admin_listen, paranoid, sidecars) = if let Some(path) =
-                config_file
-            {
-                let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
-                if let Some(base) = &r.app_base {
-                    // Exported for the worker script; children inherit it across fork.
-                    std::env::set_var("ASKR_APP_BASE", base);
-                }
-                let sc = Sidecars {
-                    queue: r.queue_workers,
-                    queue_script: r.queue_script,
-                    scheduler_script: r.scheduler_script,
+            let (config, workers, ini, admin_listen, paranoid, sidecars, cache_slots) =
+                if let Some(path) = config_file {
+                    let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
+                    if let Some(base) = &r.app_base {
+                        // Exported for the worker script; children inherit it across fork.
+                        std::env::set_var("ASKR_APP_BASE", base);
+                    }
+                    let sc = Sidecars {
+                        queue: r.queue_workers,
+                        queue_script: r.queue_script,
+                        scheduler_script: r.scheduler_script,
+                    };
+                    (
+                        r.config,
+                        r.workers,
+                        r.ini,
+                        r.admin_listen,
+                        r.paranoid,
+                        sc,
+                        r.cache_slots,
+                    )
+                } else {
+                    let max_body_size = parse_size(&max_body_size)?;
+                    let docroot = resolve_root(root)?;
+                    if !docroot.join(&front).is_file() {
+                        anyhow::bail!(
+                            "front controller not found: {} (use --root / --front)",
+                            docroot.join(&front).display()
+                        );
+                    }
+                    if let Some(ws) = &worker_script {
+                        anyhow::ensure!(ws.is_file(), "worker script not found: {}", ws.display());
+                    }
+                    if let Some(c) = &tls_cert {
+                        anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
+                    }
+                    let tls_on = tls_cert.is_some() || tls_self_signed;
+                    if let Some(qs) = &queue_script {
+                        anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
+                    }
+                    if let Some(ss) = &scheduler_script {
+                        anyhow::ensure!(
+                            ss.is_file(),
+                            "scheduler script not found: {}",
+                            ss.display()
+                        );
+                    }
+                    let cfg = Config {
+                        docroot,
+                        front_controller: front,
+                        listen,
+                        https: https || tls_on,
+                        worker_script,
+                        max_requests,
+                        tls_cert,
+                        tls_key,
+                        tls_self_signed,
+                        max_body_size,
+                    };
+                    let w = workers.unwrap_or_else(default_workers).max(1);
+                    let sc = Sidecars {
+                        queue: if queue_script.is_some() { queue } else { 0 },
+                        queue_script,
+                        scheduler_script,
+                    };
+                    (
+                        cfg,
+                        w,
+                        ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
+                        admin,
+                        paranoid,
+                        sc,
+                        cache_slots,
+                    )
                 };
-                (r.config, r.workers, r.ini, r.admin_listen, r.paranoid, sc)
-            } else {
-                let max_body_size = parse_size(&max_body_size)?;
-                let docroot = resolve_root(root)?;
-                if !docroot.join(&front).is_file() {
-                    anyhow::bail!(
-                        "front controller not found: {} (use --root / --front)",
-                        docroot.join(&front).display()
-                    );
-                }
-                if let Some(ws) = &worker_script {
-                    anyhow::ensure!(ws.is_file(), "worker script not found: {}", ws.display());
-                }
-                if let Some(c) = &tls_cert {
-                    anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
-                }
-                let tls_on = tls_cert.is_some() || tls_self_signed;
-                if let Some(qs) = &queue_script {
-                    anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
-                }
-                if let Some(ss) = &scheduler_script {
-                    anyhow::ensure!(ss.is_file(), "scheduler script not found: {}", ss.display());
-                }
-                let cfg = Config {
-                    docroot,
-                    front_controller: front,
-                    listen,
-                    https: https || tls_on,
-                    worker_script,
-                    max_requests,
-                    tls_cert,
-                    tls_key,
-                    tls_self_signed,
-                    max_body_size,
-                };
-                let w = workers.unwrap_or_else(default_workers).max(1);
-                let sc = Sidecars {
-                    queue: if queue_script.is_some() { queue } else { 0 },
-                    queue_script,
-                    scheduler_script,
-                };
-                (
-                    cfg,
-                    w,
-                    ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
-                    admin,
-                    paranoid,
-                    sc,
-                )
-            };
+
+            // Map the shared cache before any fork so all workers share it.
+            if cache_slots > 0 {
+                cache::init(cache_slots);
+            }
 
             if paranoid {
                 std::env::set_var("ASKR_PARANOID", "1");

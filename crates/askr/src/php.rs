@@ -55,6 +55,7 @@ impl Php {
                         return;
                     }
                 };
+                crate::cache::register_bridge();
                 tracing::info!(version = %php.php_version(), "embedded PHP ready (per-request)");
 
                 while let Some(job) = rx.blocking_recv() {
@@ -91,6 +92,7 @@ impl Php {
                         return;
                     }
                 };
+                crate::cache::register_bridge();
                 tracing::info!("embedded PHP ready (worker mode), running worker script");
 
                 let mut bridge = WorkerBridge { rx, pending: None };

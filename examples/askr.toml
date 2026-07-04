@@ -41,3 +41,7 @@ listen = "127.0.0.1:9000"
 # Run the scheduler (built-in cron) in the same binary. Omit to disable.
 # [scheduler]
 # script = "/opt/askr/examples/askr-scheduler.php"
+
+# Shared-memory cache (askr_cache_* + the Laravel driver). 0 = off.
+# [cache]
+# slots = 16384   # ~4.3 KB each; 16384 ≈ 70 MB

@@ -318,6 +318,26 @@ pub mod worker {
     }
 }
 
+/// Shared-cache bridge (A #3). The shim registers `askr_cache_*` PHP functions
+/// whose C implementations call these callbacks; the server registers callbacks
+/// backed by its shared-memory cache. Raw FFI — the caller provides C-ABI
+/// trampolines.
+pub mod cache_bridge {
+    use std::ffi::{c_char, c_int, c_long};
+
+    pub type GetFn = extern "C" fn(*const c_char, usize, *mut *mut c_char, *mut usize) -> c_int;
+    pub type SetFn = extern "C" fn(*const c_char, usize, *const c_char, usize, c_long) -> c_int;
+    pub type DelFn = extern "C" fn(*const c_char, usize) -> c_int;
+    pub type IncrFn = extern "C" fn(*const c_char, usize, c_long, c_long) -> c_long;
+    pub type FlushFn = extern "C" fn();
+
+    extern "C" {
+        /// Register the cache callbacks with the shim. Call once per process,
+        /// after the engine has started.
+        pub fn askr_php_set_cache_bridge(g: GetFn, s: SetFn, d: DelFn, i: IncrFn, f: FlushFn);
+    }
+}
+
 /// Convenience: helper used by tests to read a C string (unused in normal flow).
 #[allow(dead_code)]
 unsafe fn cstr_to_string(p: *const c_char) -> String {

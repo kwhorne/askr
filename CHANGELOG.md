@@ -4,6 +4,15 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Shared-memory cache exposed to PHP** — a fixed-slot hash table in an
+  anonymous shared mmap (created before fork, shared by all workers) backs
+  `askr_cache_get/set/delete/increment/flush`: cache, **atomic counters** (rate
+  limiting) and locks in the Askr binary, no Redis for small/mid deployments.
+  Per-slot spinlock (stolen if a holder dies), lazy TTL, length-clamped reads
+  (memory-safe under races). Enable with `--cache-slots N` / `[cache] slots`.
+  Ships a Laravel cache `Store` (`examples/AskrCacheStore.php`). Verified
+  cross-process: set on one worker → get on others, 100/100 concurrent
+  increments exact, `Cache::remember` computed once and shared.
 - **In-process metrics + admin observability** — a shared-memory metrics region
   (mmap'd before fork, so all workers share the same atomic counters, no IPC)
   records throughput, latency (avg, slowest, histogram), status classes, and the

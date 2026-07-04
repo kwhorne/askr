@@ -45,6 +45,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--queue <N>` | `0` | Run N queue-worker processes alongside the web workers (requires `--queue-script`). Supervised and respawned. |
 | `--queue-script <FILE>` | — | Queue runner script (e.g. `examples/askr-queue.php`). |
 | `--scheduler-script <FILE>` | — | Run the scheduler (built-in cron) with this runner (e.g. `examples/askr-scheduler.php`). |
+| `--cache-slots <N>` | `0` | Enable the shared cache with N slots (`0` = off; ~4.3 KB each). Exposes `askr_cache_*` to PHP. See [Cache](CACHE.md). |
 | `--ini <LINES>` | `$ASKR_PHP_INI` | Extra php.ini lines (e.g. to load opcache). |
 
 Notes:

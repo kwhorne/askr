@@ -76,6 +76,7 @@ Everything lives in [`docs/`](docs/README.md):
 - **Worker mode** (Octane-style) with per-request state reset — no bleed
 - **`--paranoid`** state-bleed detector: tells you if your app is worker-safe
 - **Queue workers + scheduler** supervised in the same binary (no Horizon/cron)
+- **Shared cache** (`askr_cache_*` + Laravel driver): cache, atomic counters, rate limiting — no Redis
 - Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
 - **TLS** (rustls, ring — no OpenSSL) + **HTTP/2** (ALPN); `--tls-self-signed` for dev
 - Zero-downtime **rolling reload** on `SIGHUP`

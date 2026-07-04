@@ -28,6 +28,8 @@ pub struct FileConfig {
     pub queue: QueueSection,
     #[serde(default)]
     pub scheduler: SchedulerSection,
+    #[serde(default)]
+    pub cache: CacheSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +103,14 @@ pub struct SchedulerSection {
     pub script: Option<PathBuf>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheSection {
+    /// Shared cache slots (0 = disabled). Each slot is ~4.3 KB.
+    #[serde(default)]
+    pub slots: usize,
+}
+
 impl Default for ServerSection {
     fn default() -> Self {
         ServerSection {
@@ -136,6 +146,7 @@ pub struct Resolved {
     pub queue_workers: usize,
     pub queue_script: Option<PathBuf>,
     pub scheduler_script: Option<PathBuf>,
+    pub cache_slots: usize,
 }
 
 impl FileConfig {
@@ -255,6 +266,7 @@ impl FileConfig {
             queue_workers,
             queue_script: self.queue.script,
             scheduler_script: self.scheduler.script,
+            cache_slots: self.cache.slots,
         })
     }
 }
