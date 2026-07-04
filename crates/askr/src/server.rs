@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Incoming;
+use hyper::body::{Body as _, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -139,6 +139,7 @@ async fn handle(
     rt: Arc<Runtime>,
     peer: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    let t_start = Instant::now();
     let config = &rt.config;
     let port = config.listen.port();
 
@@ -194,13 +195,28 @@ async fn handle(
         port,
     );
 
-    let response = match rt.php.handle(request).await {
+    // Time PHP specifically (vs total) — the in-process split FPM can't see.
+    let php_start = Instant::now();
+    let php_result = rt.php.handle(request).await;
+    let php_us = php_start.elapsed().as_micros() as u64;
+
+    let response = match php_result {
         Ok(resp) => build_response(resp),
         Err(e) => {
             tracing::error!(error = %e, "php handling failed");
+            if let Some(m) = crate::metrics::Metrics::get() {
+                m.note_error();
+            }
             text(StatusCode::BAD_GATEWAY, &format!("askr: {e}"))
         }
     };
+
+    // Record metrics into the shared region.
+    if let Some(m) = crate::metrics::Metrics::get() {
+        let total_us = t_start.elapsed().as_micros() as u64;
+        let bytes = response.body().size_hint().exact().unwrap_or(0);
+        m.record(response.status().as_u16(), bytes, php_us, total_us);
+    }
 
     // Count the request; trigger a graceful recycle when we hit the cap.
     if rt.recycle_after > 0 {

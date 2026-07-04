@@ -29,7 +29,8 @@ Then open <http://127.0.0.1:9000/>.
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/` | HTML dashboard (auto-refreshing) with a reload button. |
-| `GET` | `/api/status` | Supervisor status as JSON. |
+| `GET` | `/api/status` | Supervisor status as JSON (incl. per-worker RSS). |
+| `GET` | `/api/metrics` | Traffic metrics as JSON (throughput, latency, PHP vs I/O). |
 | `POST` | `/api/reload` | Trigger a graceful rolling reload. |
 
 ### `GET /api/status`
@@ -56,7 +57,32 @@ Then open <http://127.0.0.1:9000/>.
 | `workers_configured` | Target worker count. |
 | `workers_alive` | Workers currently running. |
 | `respawns` | Total worker respawns (recycles + crashes + reloads). |
+| `rss_kb_total` | Total resident memory across workers (KB). |
+| `workers` | Per-worker `{pid, rss_kb}` (the leak signal — watch RSS vs recycling). |
 | `pids` | Live worker PIDs. |
+
+### `GET /api/metrics`
+
+Traffic metrics, aggregated across all workers via shared memory (no IPC). The
+standout is the **PHP vs I/O split** — because Askr runs PHP in-process, it can
+measure how much of each request is PHP execution vs TLS/I/O, which a
+FastCGI/proxy setup can't see cleanly.
+
+```json
+{
+  "requests": 201, "errors": 0, "bytes_out": 31940459,
+  "avg_total_ms": 72.01, "avg_php_ms": 71.98,
+  "php_pct": 99, "io_pct": 1,
+  "slowest_ms": 222.59,
+  "status": {"1xx":0,"2xx":200,"3xx":0,"4xx":1,"5xx":0},
+  "histogram": {"bounds_ms":[1,2,5,10,25,50,100,250,500,1000,2500,5000],
+                "counts":[0,0,0,3,25,53,79,41,0,0,0,0,0]}
+}
+```
+
+Counters are cumulative; the dashboard derives a live req/s from successive
+polls. The latency `histogram.counts` has one more entry than `bounds_ms` (the
+final `> last bound` overflow bucket).
 
 ### `POST /api/reload`
 
@@ -71,10 +97,11 @@ deploy.
 
 ## The dashboard
 
-`GET /` serves a single self-contained HTML page that polls `/api/status` every
-2 s and shows uptime, workers alive/configured, respawn count, worker PIDs, and a
-**Graceful reload** button. No build step, no assets — it's embedded in the
-binary.
+`GET /` serves a single self-contained HTML page that polls `/api/status` and
+`/api/metrics` every 2 s and shows uptime, workers alive/configured, respawns,
+per-worker memory, live throughput, average latency, the **PHP vs I/O** split, a
+latency histogram, status-code breakdown, and a **Graceful reload** button. No
+build step, no assets — it's embedded in the binary.
 
 ## Scripting
 
@@ -93,6 +120,6 @@ curl -fsS -X POST http://127.0.0.1:9000/api/reload
 ## Roadmap
 
 A future desktop **control center** (Grove-style, Tauri) can manage a *fleet* of
-Askr servers through this same API. Request-level metrics (req/s, p99) and an
-OpenTelemetry/Prometheus export are planned; today the status is
-supervisor-level.
+Askr servers through this same API. An OpenTelemetry/Prometheus export and
+per-route timing (PHP vs I/O split per route) build on the same shared-memory
+metrics.

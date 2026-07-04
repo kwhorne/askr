@@ -81,7 +81,8 @@ Everything lives in [`docs/`](docs/README.md):
 - Zero-downtime **rolling reload** on `SIGHUP`
 - Request hardening: body-size limit (`413`), HEAD, GET/POST
 - Typed **`askr.toml`** config + `config-check`
-- Built-in **admin dashboard + API** (status, graceful reload)
+- Built-in **admin dashboard + API** (status, graceful reload, live metrics)
+- **In-process metrics**: PHP-vs-I/O time split, latency histogram, per-worker RSS
 - `askr doctor` pre-flight checks
 - Memory-safe: all `unsafe` confined to the PHP FFI boundary
 

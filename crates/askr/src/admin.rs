@@ -76,6 +76,7 @@ async fn handle(
     let resp = match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => html(DASHBOARD),
         (&Method::GET, "/api/status") => json(status_json(&info)),
+        (&Method::GET, "/api/metrics") => json(metrics_json()),
         (&Method::POST, "/api/reload") => {
             crate::trigger_reload();
             json(r#"{"ok":true,"action":"reload"}"#.to_string())
@@ -90,6 +91,17 @@ async fn handle(
 
 fn status_json(info: &Info) -> String {
     let s = crate::status();
+    let mut rss_total = 0u64;
+    let workers = s
+        .pids
+        .iter()
+        .map(|&p| {
+            let rss = crate::metrics::rss_kb(p).unwrap_or(0);
+            rss_total += rss;
+            format!(r#"{{"pid":{p},"rss_kb":{rss}}}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let pids = s
         .pids
         .iter()
@@ -97,7 +109,7 @@ fn status_json(info: &Info) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"pids":[{pids}]}}"#,
+        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"workers":[{workers}],"pids":[{pids}]}}"#,
         ver = env!("CARGO_PKG_VERSION"),
         listen = info.server_listen,
         mode = info.mode,
@@ -105,6 +117,55 @@ fn status_json(info: &Info) -> String {
         wc = s.workers_configured,
         wa = s.workers_alive,
         rs = s.respawns,
+        rss = rss_total,
+    )
+}
+
+fn metrics_json() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(m) = crate::metrics::Metrics::get() else {
+        return "{}".to_string();
+    };
+    let req = m.requests.load(Relaxed);
+    let php = m.php_us.load(Relaxed);
+    let total = m.total_us.load(Relaxed);
+    let (avg_total_ms, avg_php_ms) = if req > 0 {
+        (
+            total as f64 / req as f64 / 1000.0,
+            php as f64 / req as f64 / 1000.0,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    let php_pct = php.saturating_mul(100).checked_div(total).unwrap_or(0);
+    let st: Vec<u64> = (0..5).map(|i| m.status[i].load(Relaxed)).collect();
+    let buckets = m.bucket_counts();
+    let bounds = crate::metrics::BUCKET_BOUNDS_MS;
+    let bounds_s = bounds
+        .iter()
+        .map(|b| b.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let counts_s = buckets
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"requests":{req},"errors":{err},"bytes_out":{bytes},"avg_total_ms":{att:.2},"avg_php_ms":{aph:.2},"php_pct":{php_pct},"io_pct":{io_pct},"slowest_ms":{slow:.2},"status":{{"1xx":{s1},"2xx":{s2},"3xx":{s3},"4xx":{s4},"5xx":{s5}}},"histogram":{{"bounds_ms":[{bounds_s}],"counts":[{counts_s}]}}}}"#,
+        req = req,
+        err = m.errors.load(Relaxed),
+        bytes = m.bytes_out.load(Relaxed),
+        att = avg_total_ms,
+        aph = avg_php_ms,
+        php_pct = php_pct,
+        io_pct = 100 - php_pct,
+        slow = m.slowest_us.load(Relaxed) as f64 / 1000.0,
+        s1 = st[0],
+        s2 = st[1],
+        s3 = st[2],
+        s4 = st[3],
+        s5 = st[4],
     )
 }
 
@@ -147,22 +208,59 @@ const DASHBOARD: &str = r#"<!DOCTYPE html>
     <tr><td>Uptime</td><td id="uptime">—</td></tr>
     <tr><td>Workers</td><td id="workers">—</td></tr>
     <tr><td>Respawns</td><td id="respawns">—</td></tr>
+    <tr><td>Memory (RSS)</td><td id="rss">—</td></tr>
     <tr><td>Worker PIDs</td><td id="pids">—</td></tr>
   </table>
+
+  <h2 style="font-size:1.1rem;margin-top:2rem">Traffic</h2>
+  <table>
+    <tr><td>Throughput</td><td id="rps">—</td></tr>
+    <tr><td>Requests</td><td id="requests">—</td></tr>
+    <tr><td>Avg latency</td><td id="avglat">—</td></tr>
+    <tr><td>PHP vs I/O</td><td id="split">—</td></tr>
+    <tr><td>Slowest</td><td id="slowest">—</td></tr>
+    <tr><td>Status</td><td id="status">—</td></tr>
+    <tr><td>Latency</td><td id="hist" style="font:12px/1.4 ui-monospace,monospace">—</td></tr>
+  </table>
+
   <button onclick="reload()">Graceful reload</button>
   <span id="msg"></span>
 <script>
+let last = null;
+function bar(pct){ pct=Math.max(0,Math.min(100,pct)); return '<span style="display:inline-block;height:.8em;width:'+pct+'%;background:#3a7afe;border-radius:2px"></span>'; }
 async function refresh() {
   try {
     const s = await (await fetch('/api/status')).json();
     ver.textContent = 'v' + s.version;
     listen.textContent = s.listen;
     mode.innerHTML = '<span class="pill">' + s.mode + '</span>';
-    const h = Math.floor(s.uptime_secs/3600), m = Math.floor(s.uptime_secs%3600/60), sec = s.uptime_secs%60;
-    uptime.textContent = h + 'h ' + m + 'm ' + sec + 's';
+    const h = Math.floor(s.uptime_secs/3600), mn = Math.floor(s.uptime_secs%3600/60), sec = s.uptime_secs%60;
+    uptime.textContent = h + 'h ' + mn + 'm ' + sec + 's';
     workers.textContent = s.workers_alive + ' / ' + s.workers_configured + ' alive';
     respawns.textContent = s.respawns;
+    rss.textContent = (s.rss_kb_total/1024).toFixed(0) + ' MB' +
+      (s.workers && s.workers.length ? '  (' + s.workers.map(w => (w.rss_kb/1024).toFixed(0)).join(', ') + ' MB)' : '');
     pids.textContent = s.pids.join(', ');
+
+    const m = await (await fetch('/api/metrics')).json();
+    const now = performance.now();
+    if (last && m.requests >= last.requests) {
+      const dr = m.requests - last.requests, dt = (now - last.t) / 1000;
+      rps.textContent = dt > 0 ? (dr/dt).toFixed(0) + ' req/s' : '—';
+    }
+    last = { requests: m.requests, t: now };
+    requests.textContent = m.requests + (m.errors ? '  (' + m.errors + ' errors)' : '');
+    avglat.textContent = (m.avg_total_ms||0).toFixed(1) + ' ms';
+    split.innerHTML = 'PHP ' + m.php_pct + '%  ' + bar(m.php_pct) + '  I/O ' + m.io_pct + '%';
+    slowest.textContent = (m.slowest_ms||0).toFixed(1) + ' ms';
+    const st = m.status || {};
+    status.textContent = ['2xx','3xx','4xx','5xx'].map(k => k+':'+(st[k]||0)).join('  ');
+    const b = m.histogram || {bounds_ms:[],counts:[]};
+    const max = Math.max(1, ...b.counts);
+    const labels = b.bounds_ms.map(x => '≤'+x+'ms').concat(['>'+b.bounds_ms[b.bounds_ms.length-1]+'ms']);
+    hist.innerHTML = b.counts.map((c,i) =>
+      labels[i].padStart(8) + ' ' + '█'.repeat(Math.round(c/max*24)) + ' ' + c
+    ).filter((_,i)=> b.counts[i]>0).join('<br>') || '(no traffic yet)';
   } catch (e) {}
 }
 async function reload() {

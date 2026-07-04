@@ -8,6 +8,7 @@ mod admin;
 mod cgi;
 mod config;
 mod doctor;
+mod metrics;
 mod php;
 mod server;
 mod tls;
@@ -239,6 +240,9 @@ fn main() -> anyhow::Result<()> {
                      Use --workers 1 for readable output."
                 );
             }
+
+            // Map shared metrics before any fork so all workers share them.
+            metrics::Metrics::init();
 
             let listener = bind_listener(config.listen)?;
             // The supervisor is needed for recycling, the admin plane, sidecars,

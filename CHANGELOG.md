@@ -4,6 +4,13 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **In-process metrics + admin observability** — a shared-memory metrics region
+  (mmap'd before fork, so all workers share the same atomic counters, no IPC)
+  records throughput, latency (avg, slowest, histogram), status classes, and the
+  **PHP-vs-I/O time split** that only an in-process server can measure. Exposed
+  at `GET /api/metrics`, with per-worker RSS added to `/api/status` (the leak
+  signal), and rendered live on the admin dashboard. Seeds the shared-memory
+  substrate for a future cross-process cache/broadcast.
 - **Whole Laravel runtime in one binary** — the master now supervises **queue
   workers** (`--queue N --queue-script`, or `[queue]`) and the **scheduler**
   (built-in cron; `--scheduler-script`, or `[scheduler]`) alongside the web
