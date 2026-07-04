@@ -4,6 +4,10 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Canary reload (`--canary`)** — a `SIGHUP` reload rolls one worker first and
+  health-checks it (alive, no error spike) for a few seconds before rolling the
+  rest; a broken deploy aborts the reload and takes down one worker instead of
+  the whole fleet. Reuses the shared metrics for the health signal.
 - **Broadcasting (SSE)** — push live updates to browsers with no external broker.
   `askr_broadcast($channel, $payload)` from PHP publishes into a shared-memory
   ring; each worker tails it and fans events out to the SSE connections it holds,

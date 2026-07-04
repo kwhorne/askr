@@ -80,7 +80,7 @@ Everything lives in [`docs/`](docs/README.md):
 - **Broadcasting**: live updates to browsers via SSE + `askr_broadcast()` — no Reverb/Pusher
 - Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
 - **TLS** (rustls, ring — no OpenSSL) + **HTTP/2** (ALPN); `--tls-self-signed` for dev
-- Zero-downtime **rolling reload** on `SIGHUP`
+- Zero-downtime **rolling reload** on `SIGHUP` — with optional **canary** (bad deploys hit one worker, not all)
 - Request hardening: body-size limit (`413`), HEAD, GET/POST
 - Typed **`askr.toml`** config + `config-check`
 - Built-in **admin dashboard + API** (status, graceful reload, live metrics)

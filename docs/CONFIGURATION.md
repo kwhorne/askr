@@ -93,6 +93,12 @@ Enable `askr_broadcast()` and the SSE endpoint. See [Broadcasting](BROADCAST.md)
 | --- | --- | --- |
 | `enabled` | bool | Turn on the broadcast ring + `GET /askr/events`. |
 
+### `[reload]`
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `canary` | bool | Canary reload: roll one worker and health-check it before rolling the rest. |
+
 ### Example
 
 ```toml

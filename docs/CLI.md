@@ -47,6 +47,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--scheduler-script <FILE>` | — | Run the scheduler (built-in cron) with this runner (e.g. `examples/askr-scheduler.php`). |
 | `--cache-slots <N>` | `0` | Enable the shared cache with N slots (`0` = off; ~4.3 KB each). Exposes `askr_cache_*` to PHP. See [Cache](CACHE.md). |
 | `--broadcast` | off | Enable `askr_broadcast()` + the SSE endpoint `GET /askr/events`. See [Broadcasting](BROADCAST.md). |
+| `--canary` | off | Canary reload: roll one worker and health-check it before the rest. See [Deployment](DEPLOYMENT.md#canary-reload-zero-bad-deploy). |
 | `--ini <LINES>` | `$ASKR_PHP_INI` | Extra php.ini lines (e.g. to load opcache). |
 
 Notes:

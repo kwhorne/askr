@@ -32,6 +32,8 @@ pub struct FileConfig {
     pub cache: CacheSection,
     #[serde(default)]
     pub broadcast: BroadcastSection,
+    #[serde(default)]
+    pub reload: ReloadSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +123,14 @@ pub struct BroadcastSection {
     pub enabled: bool,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadSection {
+    /// Canary reload: roll one worker and health-check it before the rest.
+    #[serde(default)]
+    pub canary: bool,
+}
+
 impl Default for ServerSection {
     fn default() -> Self {
         ServerSection {
@@ -158,6 +168,7 @@ pub struct Resolved {
     pub scheduler_script: Option<PathBuf>,
     pub cache_slots: usize,
     pub broadcast: bool,
+    pub canary_reload: bool,
 }
 
 impl FileConfig {
@@ -279,6 +290,7 @@ impl FileConfig {
             scheduler_script: self.scheduler.script,
             cache_slots: self.cache.slots,
             broadcast: self.broadcast.enabled,
+            canary_reload: self.reload.canary,
         })
     }
 }

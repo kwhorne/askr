@@ -98,6 +98,23 @@ to boot before rolling the next. With `opcache.validate_timestamps=0`, fresh
 workers recompile the new code — old workers keep serving the old code until
 they roll.
 
+### Canary reload (zero-bad-deploy)
+
+Add `--canary` (or `[reload] canary = true`) and a reload rolls **one** worker
+first, watches it for a few seconds, and only rolls the rest if it stays healthy
+(alive, no error spike). If the new code is broken, the reload **aborts** — one
+worker is affected instead of the whole fleet, and the master logs an alert:
+
+```
+INFO  canary healthy — rolling the rest        # good deploy → continues
+ERROR canary UNHEALTHY — aborting reload;       # bad deploy → stops
+      remaining workers keep old code
+```
+
+Health is judged from process liveness and the aggregate 5xx/error rate during
+the canary window, so it catches boot fatals and crashes. Fix the code and
+reload again to recover.
+
 ## TLS
 
 Askr terminates TLS itself (rustls, ring provider) with ALPN negotiating HTTP/2

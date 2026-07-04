@@ -134,6 +134,12 @@ enum Command {
         /// GET /askr/events?channel=NAME (live updates without Reverb/Pusher).
         #[arg(long)]
         broadcast: bool,
+
+        /// Canary reload: on SIGHUP, roll one worker and health-check it (a
+        /// short window with no error spike) before rolling the rest. A bad
+        /// deploy takes down one worker instead of all.
+        #[arg(long)]
+        canary: bool,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -181,6 +187,7 @@ fn main() -> anyhow::Result<()> {
             scheduler_script,
             cache_slots,
             broadcast,
+            canary,
         } => {
             // The config file, when given, is the single source of truth.
             let (config, workers, ini, admin_listen, paranoid, sidecars, cache_slots, broadcast) =
@@ -190,6 +197,7 @@ fn main() -> anyhow::Result<()> {
                         // Exported for the worker script; children inherit it across fork.
                         std::env::set_var("ASKR_APP_BASE", base);
                     }
+                    CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
                     let sc = Sidecars {
                         queue: r.queue_workers,
                         queue_script: r.queue_script,
@@ -220,6 +228,7 @@ fn main() -> anyhow::Result<()> {
                     if let Some(c) = &tls_cert {
                         anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
                     }
+                    CANARY_ENABLED.store(canary, Ordering::SeqCst);
                     let tls_on = tls_cert.is_some() || tls_self_signed;
                     if let Some(qs) = &queue_script {
                         anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
@@ -361,6 +370,24 @@ static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RELOAD_CURSOR: AtomicUsize = AtomicUsize::new(usize::MAX);
 static START_TIME: AtomicU64 = AtomicU64::new(0);
 static RESPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
+// Canary reload: roll one worker, then health-check before rolling the rest.
+static CANARY_ENABLED: AtomicBool = AtomicBool::new(false);
+static CANARY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CANARY_DEADLINE: AtomicU64 = AtomicU64::new(0);
+static CANARY_ERR_BASE: AtomicU64 = AtomicU64::new(0);
+const CANARY_WINDOW_SECS: u64 = 5;
+const CANARY_ERR_THRESHOLD: u64 = 3;
+
+/// Aggregate error signal (BAD_GATEWAY + app 5xx) for the canary check.
+fn error_count() -> u64 {
+    match crate::metrics::Metrics::get() {
+        Some(m) => {
+            use std::sync::atomic::Ordering::Relaxed;
+            m.errors.load(Relaxed) + m.status[4].load(Relaxed)
+        }
+        None => 0,
+    }
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -524,47 +551,72 @@ fn supervise(
     }
 
     install_signals();
-    tracing::info!(%config.listen, workers, max_requests = config.max_requests, "askr master supervising (SIGHUP = graceful reload)");
+    tracing::info!(
+        %config.listen,
+        workers,
+        max_requests = config.max_requests,
+        canary = CANARY_ENABLED.load(Ordering::SeqCst),
+        "askr master supervising (SIGHUP = graceful reload)"
+    );
 
-    // Reap exited workers. Respawn a replacement (recycling / crash resilience /
-    // rolling reload) unless we're shutting down. SIGTERM to a worker makes it
-    // drain gracefully; the master forwards SIGTERM on SIGINT/SIGTERM (shutdown)
-    // and on SIGHUP (reload, but keeps respawning fresh workers).
+    // Reap exited workers and respawn (recycling / crash resilience / rolling
+    // reload) unless shutting down. A non-blocking poll lets us also drive the
+    // canary health check on a timer.
     loop {
-        let mut status: libc::c_int = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
-        if pid == -1 {
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EINTR) => continue, // interrupted by a signal; retry
-                _ => break,                    // ECHILD: no children left
+        // Reap everything that has exited.
+        loop {
+            let mut status: libc::c_int = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid <= 0 {
+                break; // 0 = none exited yet, -1 = no children
             }
-        }
-        if pid <= 0 {
-            continue;
-        }
-        for (i, child) in CHILDREN.iter().enumerate().take(workers) {
-            if child.load(Ordering::SeqCst) == pid {
-                child.store(0, Ordering::SeqCst);
-                if SHUTDOWN.load(Ordering::SeqCst) {
-                    tracing::info!(pid, worker = i, "worker exited (shutdown)");
-                } else {
-                    tracing::info!(pid, worker = i, "worker exited; respawning");
-                    RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
-                    spawn_slot(i);
-                    // Rolling reload: give the fresh worker time to boot (so it's
-                    // accepting) before rolling the next one — keeps enough live
-                    // workers to serve throughout.
-                    if RELOAD_CURSOR.load(Ordering::SeqCst) < WORKER_COUNT.load(Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_millis(600));
-                        roll_next();
+            for (i, child) in CHILDREN.iter().enumerate().take(workers) {
+                if child.load(Ordering::SeqCst) == pid {
+                    child.store(0, Ordering::SeqCst);
+                    if SHUTDOWN.load(Ordering::SeqCst) {
+                        tracing::info!(pid, worker = i, "worker exited (shutdown)");
+                    } else {
+                        tracing::info!(pid, worker = i, "worker exited; respawning");
+                        RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
+                        spawn_slot(i);
+                        // Rolling reload: let the fresh worker boot before rolling
+                        // the next, so enough workers stay live throughout.
+                        if RELOAD_CURSOR.load(Ordering::SeqCst)
+                            < WORKER_COUNT.load(Ordering::SeqCst)
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(600));
+                            roll_next();
+                        }
                     }
                 }
             }
         }
+
+        // Canary gate: once the window elapses, decide whether to roll the rest.
+        if CANARY_ACTIVE.load(Ordering::SeqCst)
+            && now_secs() >= CANARY_DEADLINE.load(Ordering::SeqCst)
+        {
+            CANARY_ACTIVE.store(false, Ordering::SeqCst);
+            let new_errors = error_count().saturating_sub(CANARY_ERR_BASE.load(Ordering::SeqCst));
+            let alive = CHILDREN[0].load(Ordering::SeqCst) != 0;
+            if alive && new_errors <= CANARY_ERR_THRESHOLD {
+                tracing::info!(new_errors, "canary healthy — rolling the rest");
+                RELOAD_CURSOR.store(1, Ordering::SeqCst);
+                roll_next();
+            } else {
+                tracing::error!(
+                    new_errors,
+                    canary_alive = alive,
+                    "canary UNHEALTHY — aborting reload; remaining workers keep old code"
+                );
+            }
+        }
+
         if SHUTDOWN.load(Ordering::SeqCst) && CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0)
         {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     tracing::info!("askr master exiting");
     Ok(())
@@ -608,9 +660,23 @@ fn roll_next() {
 /// SIGHUP: graceful **rolling** reload. Restart workers one at a time (each
 /// drains, exits, and is respawned fresh — picking up new PHP code) so there's
 /// always a live worker accepting. No dropped connections.
+///
+/// With canary enabled, roll only the first worker, then health-check it (in the
+/// reaper) before rolling the rest — a bad deploy takes down one worker, not all.
 extern "C" fn on_reload(_sig: libc::c_int) {
-    RELOAD_CURSOR.store(0, Ordering::SeqCst);
-    roll_next();
+    if CANARY_ENABLED.load(Ordering::SeqCst) {
+        CANARY_ERR_BASE.store(error_count(), Ordering::SeqCst);
+        CANARY_DEADLINE.store(now_secs() + CANARY_WINDOW_SECS, Ordering::SeqCst);
+        CANARY_ACTIVE.store(true, Ordering::SeqCst);
+        // Roll only slot 0 (the canary); the reaper rolls the rest if healthy.
+        let pid = CHILDREN[0].load(Ordering::SeqCst);
+        if pid > 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    } else {
+        RELOAD_CURSOR.store(0, Ordering::SeqCst);
+        roll_next();
+    }
 }
 
 fn install_signals() {
