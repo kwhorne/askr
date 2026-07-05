@@ -51,6 +51,7 @@ fn main() {
             ("REMOTE_ADDR".into(), "127.0.0.1".into()),
             ("HTTPS".into(), "on".into()),
         ],
+        ..Default::default()
     };
 
     let mut php = askr_php::Interpreter::new().expect("php init");

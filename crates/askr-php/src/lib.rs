@@ -229,6 +229,29 @@ pub struct Request {
     /// The full `$_SERVER` map (CGI-style: REQUEST_METHOD, REQUEST_URI,
     /// SCRIPT_NAME, HTTP_* headers, DOCUMENT_ROOT, HTTPS, …).
     pub server_vars: Vec<(String, String)>,
+    /// Parsed `multipart/form-data` non-file fields (worker mode). When present,
+    /// these are the POST parameters (the raw body was consumed while streaming).
+    pub post_fields: Vec<(String, String)>,
+    /// Uploaded files streamed to temp paths (worker mode) — the `$_FILES` seam.
+    pub files: Vec<UploadedFile>,
+}
+
+/// One uploaded file: streamed to `tmp_path` by the server; the worker builds a
+/// Laravel `UploadedFile` (test mode) from this so `->store()`/`->move()` work.
+#[derive(Debug, Default, Clone)]
+pub struct UploadedFile {
+    /// The form field name (e.g. `avatar`, or `photos[]`).
+    pub field_name: String,
+    /// The client's original filename.
+    pub file_name: String,
+    /// The declared MIME type.
+    pub content_type: String,
+    /// Absolute path to the temp file the server wrote.
+    pub tmp_path: String,
+    /// Size in bytes.
+    pub size: usize,
+    /// PHP `UPLOAD_ERR_*` code (0 = OK, 1 = exceeds limit).
+    pub error: i32,
 }
 
 /// The HTTP response produced by the embedded interpreter.
@@ -315,6 +338,18 @@ pub mod worker {
         pub fn askr_req_add_header(name: *const c_char, value: *const c_char);
         /// Set the body of the current worker request.
         pub fn askr_req_set_body(ptr: *const c_char, len: usize);
+
+        /// Add a parsed multipart POST field to the current worker request.
+        pub fn askr_req_add_post(name: *const c_char, value: *const c_char);
+        /// Add an uploaded file (streamed to `tmp_path`) to the current request.
+        pub fn askr_req_add_file(
+            field: *const c_char,
+            file_name: *const c_char,
+            content_type: *const c_char,
+            tmp_path: *const c_char,
+            size: usize,
+            error: c_int,
+        );
 
         /// Point the worker bridge (used by askr_handle_request) at a new
         /// context — each forked CoW worker installs its own.
@@ -459,6 +494,7 @@ mod tests {
                 ("CONTENT_LENGTH".into(), "8".into()),
                 ("HTTP_X_CUSTOM".into(), "abc".into()),
             ],
+            ..Default::default()
         };
 
         let resp = php.handle(&req).unwrap();

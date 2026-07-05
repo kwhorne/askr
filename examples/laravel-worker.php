@@ -63,12 +63,34 @@ $handler = function (array $r) use ($app, $kernel): int {
         }
     }
 
+    // Multipart uploads: Askr streamed each file to a temp path and parsed the
+    // form fields. Rebuild them as Laravel UploadedFile instances in *test* mode
+    // so ->store()/->move() use rename() instead of move_uploaded_file() (the
+    // request didn't go through PHP's rfc1867 handler). This is the Octane model.
+    $post = $r['post'] ?? [];
+    $files = [];
+    foreach ($r['files'] ?? [] as $f) {
+        $uploaded = new Illuminate\Http\UploadedFile(
+            $f['tmp_name'],
+            $f['name'],
+            $f['type'] ?: null,
+            $f['error'] ?? 0,
+            true // test mode
+        );
+        $field = $f['field'];
+        if (str_ends_with($field, '[]')) {
+            $files[substr($field, 0, -2)][] = $uploaded;
+        } else {
+            $files[$field] = $uploaded;
+        }
+    }
+
     $request = Illuminate\Http\Request::create(
         $r['uri'],
         $r['method'],
-        $query,    // query/POST params
+        array_merge($query, $post), // query + parsed multipart fields
         $cookies,
-        [],        // files (TODO: multipart uploads)
+        $files,                     // $request->file('avatar') now works
         $server,
         $r['body']
     );

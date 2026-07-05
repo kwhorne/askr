@@ -2,6 +2,21 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.4.0 — 2026-07-05
+
+- **Multipart file uploads (worker mode)** — the last big thing blocking "run any
+  Laravel app". `multipart/form-data` is now **streamed**: each file part is
+  written straight to a temp file (constant memory regardless of size — a 32 MB
+  upload no longer costs 32 MB of RAM), and form fields are parsed to POST
+  params. Askr hands PHP the `$_FILES`-shaped metadata (name, type, tmp path,
+  size); `examples/laravel-worker.php` rebuilds them as Laravel `UploadedFile`s
+  in test mode so `$request->file('avatar')->store(...)` works (the Octane model).
+  Temp files are cleaned up after each request; the existing `--max-body-size`
+  limit is enforced on the stream (413). New request-contract fields + shim
+  setters (`askr_req_add_post`/`askr_req_add_file`).
+  - Verified: a 2 MB upload round-trips with a matching SHA-1, POST fields arrive,
+    the temp file is removed afterward, and an over-limit upload gets a 413.
+
 ## 0.3.2 — 2026-07-05
 
 - **io_uring groundwork** (Linux is where the runtime swap lands):

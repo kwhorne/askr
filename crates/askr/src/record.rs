@@ -90,6 +90,8 @@ pub fn load(json_path: &Path) -> anyhow::Result<Request> {
         cookie: env.cookie,
         body,
         server_vars: env.server_vars,
+        post_fields: Vec::new(),
+        files: Vec::new(),
     })
 }
 

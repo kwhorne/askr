@@ -17,6 +17,7 @@ mod rcache;
 mod record;
 mod server;
 mod tls;
+mod upload;
 mod worker;
 
 use std::net::SocketAddr;

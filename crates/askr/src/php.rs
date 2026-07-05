@@ -219,6 +219,28 @@ fn load_request(req: &Request) {
             }
         }
         askr_php::worker::askr_req_set_body(req.body.as_ptr() as *const c_char, req.body.len());
+        for (k, v) in &req.post_fields {
+            if let (Ok(kk), Ok(vv)) = (CString::new(k.as_str()), CString::new(v.as_str())) {
+                askr_php::worker::askr_req_add_post(kk.as_ptr(), vv.as_ptr());
+            }
+        }
+        for f in &req.files {
+            if let (Ok(field), Ok(name), Ok(ty), Ok(tmp)) = (
+                CString::new(f.field_name.as_str()),
+                CString::new(f.file_name.as_str()),
+                CString::new(f.content_type.as_str()),
+                CString::new(f.tmp_path.as_str()),
+            ) {
+                askr_php::worker::askr_req_add_file(
+                    field.as_ptr(),
+                    name.as_ptr(),
+                    ty.as_ptr(),
+                    tmp.as_ptr(),
+                    f.size,
+                    f.error,
+                );
+            }
+        }
     }
 }
 

@@ -54,6 +54,7 @@ fn main() {
         cookie: None,
         body: Vec::new(),
         server_vars,
+        ..Default::default()
     };
 
     let mut php = askr_php::Interpreter::new().expect("php init");

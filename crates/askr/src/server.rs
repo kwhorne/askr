@@ -373,57 +373,100 @@ async fn handle(
     let script_name = format!("/{}", config.front_controller.display());
 
     let (parts, body) = req.into_parts();
-
-    // Enforce a maximum request body size (protect against memory exhaustion).
-    // Reject early on a declared Content-Length, and cap the actual read so a
-    // chunked body can't exceed it either.
     let max = config.max_body_size;
-    if let Some(len) = parts
+
+    // multipart/form-data → stream files to temp paths (constant memory) and
+    // collect fields, instead of buffering the whole body in RAM (#uploads).
+    let multipart_boundary = parts
         .headers
-        .get(hyper::header::CONTENT_LENGTH)
+        .get(hyper::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        if len > max {
-            return Ok(text(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "askr: request body too large",
-            ));
+        .filter(|ct| ct.starts_with("multipart/form-data"))
+        .and_then(|ct| multer::parse_boundary(ct).ok());
+
+    let (request, upload_temp_paths) = if let Some(boundary) = multipart_boundary {
+        match crate::upload::parse(body.into_data_stream(), &boundary, max).await {
+            Ok(parsed) => {
+                let mut request = cgi::build_request(
+                    &parts,
+                    Vec::new(), // body consumed while streaming; PHP uses $_POST/$_FILES
+                    &config.docroot,
+                    &script,
+                    &script_name,
+                    peer,
+                    config.https,
+                    port,
+                );
+                request.post_fields = parsed.fields;
+                request.files = parsed.files;
+                (request, parsed.temp_paths)
+            }
+            Err(crate::upload::UploadError::TooLarge) => {
+                return Ok(text(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "askr: upload too large",
+                ));
+            }
+            Err(crate::upload::UploadError::Parse(e)) => {
+                return Ok(text(
+                    StatusCode::BAD_REQUEST,
+                    &format!("askr: bad upload: {e}"),
+                ));
+            }
         }
-    }
-    let body_bytes = match Limited::new(body, max).collect().await {
-        Ok(c) => c.to_bytes().to_vec(),
-        Err(_) => {
-            return Ok(text(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "askr: request body too large",
-            ));
+    } else {
+        // Enforce a maximum request body size (protect against memory
+        // exhaustion): reject early on a declared Content-Length, and cap the
+        // actual read so a chunked body can't exceed it either.
+        if let Some(len) = parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            if len > max {
+                return Ok(text(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "askr: request body too large",
+                ));
+            }
         }
+        let body_bytes = match Limited::new(body, max).collect().await {
+            Ok(c) => c.to_bytes().to_vec(),
+            Err(_) => {
+                return Ok(text(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "askr: request body too large",
+                ));
+            }
+        };
+
+        // Pusher HTTP trigger: POST /apps/{id}/events (what Laravel's broadcaster
+        // calls server-side). Publish into the ring; the WS tailer fans it out.
+        if rt.pusher_enabled && parts.method == Method::POST && pusher::is_trigger(parts.uri.path())
+        {
+            let out = pusher::trigger(&body_bytes);
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(full(Bytes::from(out)))
+                .unwrap();
+            finish(&rt, &response, t_start, 0);
+            return Ok(response);
+        }
+
+        let request = cgi::build_request(
+            &parts,
+            body_bytes,
+            &config.docroot,
+            &script,
+            &script_name,
+            peer,
+            config.https,
+            port,
+        );
+        (request, Vec::new())
     };
-
-    // Pusher HTTP trigger: POST /apps/{id}/events (what Laravel's broadcaster
-    // calls server-side). Publish into the ring; the WS tailer fans it out.
-    if rt.pusher_enabled && parts.method == Method::POST && pusher::is_trigger(parts.uri.path()) {
-        let out = pusher::trigger(&body_bytes);
-        let response = Response::builder()
-            .status(StatusCode::OK)
-            .header(hyper::header::CONTENT_TYPE, "application/json")
-            .body(full(Bytes::from(out)))
-            .unwrap();
-        finish(&rt, &response, t_start, 0);
-        return Ok(response);
-    }
-
-    let request = cgi::build_request(
-        &parts,
-        body_bytes,
-        &config.docroot,
-        &script,
-        &script_name,
-        peer,
-        config.https,
-        port,
-    );
 
     // Keep a copy of the request iff we may need to record it on a 5xx (#5).
     let record_copy = config.record_dir.as_ref().map(|_| request.clone());
@@ -465,6 +508,11 @@ async fn handle(
         if let Some(key) = &cache_key {
             rcache::end(key);
         }
+    }
+
+    // Clean up any uploaded temp files (the app may already have moved them).
+    for p in &upload_temp_paths {
+        let _ = tokio::fs::remove_file(p).await;
     }
 
     // Record a failing request so it can be replayed later (#5).

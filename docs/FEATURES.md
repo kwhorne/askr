@@ -134,3 +134,20 @@ Boots the interpreter once (opcache warm and shared), then forks a fresh process
 per test file: perfect isolation (no state bleed between files), parallelism, and
 no cold boot per file. Point `--runner` at `examples/askr-test.php` for
 PHPUnit/Pest, or omit it to run files directly. Exits non-zero if any file fails.
+
+## 8. File uploads that stream to disk (0.4.0)
+
+`multipart/form-data` is streamed, not buffered: each file part goes straight to
+a temp file, so a large upload costs **constant memory** (a 32 MB upload no
+longer holds 32 MB in RAM), and form fields are parsed to POST params. Askr hands
+PHP the `$_FILES`-shaped metadata and `examples/laravel-worker.php` rebuilds them
+as Laravel `UploadedFile`s in test mode — so uploads work in worker mode:
+
+```php
+$request->file('avatar')->store('avatars');   // just works
+$request->input('name');                       // multipart fields too
+```
+
+Temp files land under `$TMPDIR/askr-uploads` and are removed after each request.
+The `--max-body-size` limit is enforced on the stream (`413` above it); set PHP's
+`upload_max_filesize`/`post_max_size` via `[worker] ini` if your app checks them.

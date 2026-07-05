@@ -348,6 +348,24 @@ static char  *w_hnames[ASKR_MAX_HEADERS];
 static char  *w_hvalues[ASKR_MAX_HEADERS];
 static int    w_nheaders;
 
+/* Parsed multipart POST fields + uploaded files (worker mode). */
+#define ASKR_MAX_POST 256
+static char  *w_pnames[ASKR_MAX_POST];
+static char  *w_pvalues[ASKR_MAX_POST];
+static int    w_npost;
+
+#define ASKR_MAX_FILES 64
+typedef struct {
+    char  *field;
+    char  *name;
+    char  *type;
+    char  *tmp;
+    size_t size;
+    int    error;
+} w_file_t;
+static w_file_t w_files[ASKR_MAX_FILES];
+static int      w_nfiles;
+
 static char *dup_cstr(const char *s) {
     if (!s) return NULL;
     size_t n = strlen(s) + 1;
@@ -363,7 +381,35 @@ void askr_req_reset(void) {
     free(w_query);  w_query = NULL;
     for (int i = 0; i < w_nheaders; i++) { free(w_hnames[i]); free(w_hvalues[i]); }
     w_nheaders = 0;
+    for (int i = 0; i < w_npost; i++) { free(w_pnames[i]); free(w_pvalues[i]); }
+    w_npost = 0;
+    for (int i = 0; i < w_nfiles; i++) {
+        free(w_files[i].field); free(w_files[i].name);
+        free(w_files[i].type);  free(w_files[i].tmp);
+    }
+    w_nfiles = 0;
     free(w_body); w_body = NULL; w_body_len = 0;
+}
+
+void askr_req_add_post(const char *name, const char *value) {
+    if (w_npost < ASKR_MAX_POST) {
+        w_pnames[w_npost] = dup_cstr(name);
+        w_pvalues[w_npost] = dup_cstr(value);
+        w_npost++;
+    }
+}
+
+void askr_req_add_file(const char *field, const char *file_name, const char *content_type,
+                       const char *tmp_path, size_t size, int error) {
+    if (w_nfiles < ASKR_MAX_FILES) {
+        w_files[w_nfiles].field = dup_cstr(field);
+        w_files[w_nfiles].name = dup_cstr(file_name);
+        w_files[w_nfiles].type = dup_cstr(content_type);
+        w_files[w_nfiles].tmp = dup_cstr(tmp_path);
+        w_files[w_nfiles].size = size;
+        w_files[w_nfiles].error = error;
+        w_nfiles++;
+    }
 }
 
 void askr_req_set_meta(const char *method, const char *uri, const char *query) {
@@ -468,6 +514,30 @@ static PHP_FUNCTION(askr_handle_request) {
     }
     add_assoc_zval(&request, "headers", &headers);
     add_assoc_stringl(&request, "body", w_body ? w_body : "", w_body_len);
+
+    /* Parsed multipart POST fields → $request['post']. */
+    zval post;
+    array_init(&post);
+    for (int i = 0; i < w_npost; i++) {
+        add_assoc_string(&post, w_pnames[i], w_pvalues[i] ? w_pvalues[i] : "");
+    }
+    add_assoc_zval(&request, "post", &post);
+
+    /* Uploaded files (streamed to temp paths) → $request['files']. */
+    zval files;
+    array_init(&files);
+    for (int i = 0; i < w_nfiles; i++) {
+        zval f;
+        array_init(&f);
+        add_assoc_string(&f, "field", w_files[i].field ? w_files[i].field : "");
+        add_assoc_string(&f, "name", w_files[i].name ? w_files[i].name : "");
+        add_assoc_string(&f, "type", w_files[i].type ? w_files[i].type : "");
+        add_assoc_string(&f, "tmp_name", w_files[i].tmp ? w_files[i].tmp : "");
+        add_assoc_long(&f, "size", (zend_long)w_files[i].size);
+        add_assoc_long(&f, "error", w_files[i].error);
+        add_next_index_zval(&files, &f);
+    }
+    add_assoc_zval(&request, "files", &files);
 
     /* $handler($request) */
     zval retval, params[1];

@@ -104,6 +104,8 @@ pub fn build_request(
         cookie,
         body,
         server_vars,
+        post_fields: Vec::new(),
+        files: Vec::new(),
     }
 }
 
