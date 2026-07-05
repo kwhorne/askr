@@ -1,0 +1,38 @@
+# Askr config for a containerised Laravel app (mounted at /etc/askr/askr.toml).
+# One service = web + queue + scheduler + cache + broadcasting.
+
+[server]
+listen = "0.0.0.0:8000"          # map host 80/443 → 8000 (no root needed)
+root = "/var/www/app/public"
+workers = "auto"                 # cgroup-aware: reads the container CPU limit
+max_requests = 1000              # recycle workers periodically
+max_body_size = "32M"            # raise for large uploads (streamed to /tmp)
+access_log = "-"                 # JSON access log to stdout → `docker logs`
+
+[worker]
+# Boot the app once, serve many (the Octane model). The runner is bundled in the
+# image; opcache (validate_timestamps=0) is wired up by askr-run.sh.
+script = "/opt/askr/examples/laravel-worker.php"
+app_base = "/var/www/app"
+
+[admin]
+# Health check + Prometheus /metrics. Bind to localhost inside the container
+# (the Docker HEALTHCHECK hits 127.0.0.1:9000); reach it via a port-forward.
+listen = "127.0.0.1:9000"
+
+[cache]
+slots = 4096                     # kv cache (askr_cache_* + Laravel driver)
+response_slots = 256             # response cache + tag invalidation
+
+[queue]
+workers = 2                      # supervised queue workers (no separate service)
+script = "/opt/askr/examples/askr-queue.php"
+
+[scheduler]
+script = "/opt/askr/examples/askr-scheduler.php"   # built-in cron
+
+[broadcast]
+enabled = true                   # askr_broadcast() + SSE (+ --pusher for Echo)
+
+[reload]
+canary = true                    # safe rolling reload on SIGHUP

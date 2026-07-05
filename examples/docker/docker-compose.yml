@@ -1,0 +1,33 @@
+# One container is the whole environment: web workers, queue, scheduler, cache
+# and broadcasting — replacing app + nginx + redis + queue + cron.
+#
+#   docker compose up --build
+#
+# Provide your app config via a .env file (Laravel reads it), or set env vars
+# below. See README.md.
+
+services:
+  app:
+    build: .
+    image: my-laravel-app
+    ports:
+      - "80:8000" # host 80 → container 8000 (no root/setcap in the container)
+    # Immutable image: new code = new image = new container. Give Askr/Laravel
+    # exactly what must be writable.
+    read_only: true
+    tmpfs:
+      - /tmp # streamed multipart upload temp files
+      - /var/www/app/bootstrap/cache # Laravel's compiled config/route/package cache
+    volumes:
+      - storage:/var/www/app/storage # logs, file cache, sessions, compiled views
+    stop_grace_period: 30s # let the graceful drain finish (docker stop → SIGTERM)
+    restart: unless-stopped
+    # env_file: .env
+    environment:
+      APP_ENV: production
+      # Point Laravel's cache/session/broadcast at Askr (see README.md):
+      # CACHE_STORE: askr
+      # BROADCAST_CONNECTION: pusher   # with --pusher for Echo
+
+volumes:
+  storage:

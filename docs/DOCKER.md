@@ -22,6 +22,10 @@ It's built on **`ubuntu:24.04`** — deliberately, not Debian and not Alpine (se
 [below](#why-ubuntu-2404-and-not-alpine)). It contains only the server; you layer
 your app on top.
 
+> **Ready-made scaffold:** [`examples/docker/`](../examples/docker/) has a
+> drop-in `Dockerfile`, `askr.toml`, `docker-compose.yml` and `.dockerignore` —
+> copy them to your Laravel project root and `docker compose up --build`.
+
 ## Your app image
 
 ```dockerfile

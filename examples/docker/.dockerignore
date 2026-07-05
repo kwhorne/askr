@@ -1,0 +1,11 @@
+# Keep the build context small and never bake secrets or state into the image.
+.git
+/vendor
+/node_modules
+/.env
+/storage/logs/*
+/storage/framework/cache/*
+/storage/framework/sessions/*
+/storage/framework/views/*
+/tests
+*.tar.gz
