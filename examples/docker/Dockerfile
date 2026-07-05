@@ -12,7 +12,9 @@
 FROM composer:2 AS deps
 WORKDIR /app
 COPY composer.json composer.lock ./
-RUN composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress
+# --ignore-platform-reqs: the build PHP differs from Askr's runtime PHP, which
+# provides the extensions (intl/gd/curl/…). Askr's libphp is the source of truth.
+RUN composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress --ignore-platform-reqs
 COPY . .
 RUN composer dump-autoload --optimize --no-dev
 
@@ -26,7 +28,7 @@ RUN composer dump-autoload --optimize --no-dev
 # RUN npm run build
 
 # ---- 3. Askr runtime ----
-FROM ghcr.io/kwhorne/askr:0.4 AS runtime
+FROM ghcr.io/kwhorne/askr:0.5 AS runtime
 COPY --from=deps --chown=askr /app /var/www/app
 # COPY --from=assets --chown=askr /app/public/build /var/www/app/public/build
 COPY --chown=askr askr.toml /etc/askr/askr.toml

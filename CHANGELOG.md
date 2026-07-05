@@ -2,6 +2,23 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.5.0 — 2026-07-05
+
+- **Run any Laravel app, including Filament.** The laravel-profile `libphp` now
+  bundles the extensions heavier apps need: **intl** (Filament requires it),
+  **gd** (+ jpeg/freetype/webp) + **exif**, **curl**, **zip**, **zlib**, and
+  **pdo_mysql** (mysqlnd) / **pdo_pgsql** — on Linux, where the release tarballs
+  and Docker image are built. The macOS dev build keeps the core set (its
+  static-dependency build is for the test suite). `askr doctor` now reports a
+  RECOMMENDED extension set (intl/curl/gd/pdo_mysql/zip).
+  - Build deps added (CI + release + docs): `libicu-dev libcurl4-openssl-dev
+    libpng-dev libjpeg-dev libfreetype-dev libwebp-dev libzip-dev zlib1g-dev
+    libpq-dev`; matching runtime libs in the Docker image / release notes
+    (`libicu74 libcurl4 libpng16-16 libjpeg-turbo8 libfreetype6 libwebp7 libzip4
+    libpq5 zlib1g`).
+  - `examples/docker/` bumped to the `:0.5` base and uses
+    `composer install --ignore-platform-reqs` (build PHP ≠ Askr's runtime PHP).
+
 ## 0.4.2 — 2026-07-05
 
 - **Docker support** — an official multi-arch image on GHCR
