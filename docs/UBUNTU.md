@@ -36,7 +36,7 @@ Download the tarball for your architecture from the
 
 ```bash
 cd /tmp
-VER=v0.8.1
+VER=v0.8.2
 ARCH=$(uname -m)            # x86_64 or aarch64
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz
@@ -88,11 +88,8 @@ ls /opt/askr/examples/laravel-worker.php
 
 ## 4. Configure Askr
 
-Find the opcache path (the directory name encodes the PHP API version):
-
-```bash
-ls /opt/askr/lib/php/extensions/*/opcache.so
-```
+OPcache is built into libphp on PHP 8.5 (nothing to locate or load) — enable it
+in the INI (see below).
 
 Create `/etc/askr/askr.toml` (adjust the opcache path to match):
 
@@ -108,7 +105,7 @@ max_body_size = "32M"
 script = "/opt/askr/examples/laravel-worker.php"
 app_base = "/var/www/app"
 # Tuned opcache. Match the extensions/ directory name to your build.
-ini = "zend_extension=/opt/askr/lib/php/extensions/no-debug-non-zts-20240924/opcache.so\nopcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.memory_consumption=256\nopcache.interned_strings_buffer=32\nopcache.max_accelerated_files=20000\nopcache.jit=tracing\nopcache.jit_buffer_size=128M"
+ini = "opcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.memory_consumption=256\nopcache.interned_strings_buffer=32\nopcache.max_accelerated_files=20000\nopcache.jit=tracing\nopcache.jit_buffer_size=128M"
 
 [tls]
 cert = "/etc/askr/tls/fullchain.pem"

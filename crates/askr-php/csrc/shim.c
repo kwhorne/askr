@@ -184,7 +184,11 @@ int askr_php_startup(void) {
 #if defined(SIGPIPE) && defined(SIG_IGN)
     signal(SIGPIPE, SIG_IGN);
 #endif
+    /* Only when PHP was built with Zend signals (we build --disable-zend-signals
+     * so the host owns signals; ZEND_SIGNALS is then 0 and the symbol is absent). */
+#if defined(ZEND_SIGNALS) && ZEND_SIGNALS
     zend_signal_startup();
+#endif
 
     /* Wire our callbacks into the SAPI module before startup. */
     php_embed_module.ub_write = askr_ub_write;

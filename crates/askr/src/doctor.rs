@@ -8,26 +8,34 @@ use std::thread;
 
 use askr_php::Interpreter;
 
-/// Extensions a modern Laravel app requires.
+/// Extensions Laravel requires (its documented list, plus json/phar which
+/// Composer and the framework rely on). The Linux release/Docker image ships all
+/// of these; the minimal macOS dev build (test suite only) omits curl.
 const REQUIRED: &[&str] = &[
     "ctype",
+    "curl",
+    "dom",
+    "fileinfo",
     "filter",
     "hash",
     "json",
+    "libxml",
     "mbstring",
     "openssl",
+    "pcre",
     "pdo",
+    "phar",
     "session",
     "tokenizer",
-    "dom",
-    "fileinfo",
-    "phar",
+    "xml",
 ];
 
-/// Extensions many real apps need (Filament needs intl; gd for images; curl for
-/// the HTTP client; pdo_mysql/zip are common). Present in the Linux release/
-/// Docker image; the macOS dev build omits them. Not fatal.
-const RECOMMENDED: &[&str] = &["intl", "curl", "gd", "pdo_mysql", "zip"];
+/// PDO database drivers — an app needs at least one. We report which are present.
+const DB_DRIVERS: &[&str] = &["pdo_sqlite", "pdo_mysql", "pdo_pgsql"];
+
+/// Extensions many real apps need (Filament needs intl; gd for images; zip/exif
+/// are common). Present in the Linux release/Docker image. Not fatal.
+const RECOMMENDED: &[&str] = &["intl", "gd", "zip", "exif", "bcmath"];
 
 struct PhpInfo {
     version: String,
@@ -44,6 +52,23 @@ pub fn run(ini: Option<String>) -> bool {
         Ok(info) => {
             check(&mut ok, true, &format!("embedded PHP {}", info.version));
 
+            // PHP version: Laravel 13 needs >= 8.3; we recommend the latest (8.5).
+            match php_minor(&info.version) {
+                Some((maj, min)) if (maj, min) >= (8, 3) => {
+                    if (maj, min) >= (8, 5) {
+                        mark(true, "PHP >= 8.5 (latest, JIT improvements)");
+                    } else {
+                        mark(true, &format!("PHP {maj}.{min} (>= 8.3; 8.5 recommended)"));
+                    }
+                }
+                Some((maj, min)) => check(
+                    &mut ok,
+                    false,
+                    &format!("PHP {maj}.{min} is too old — Laravel 13 needs >= 8.3"),
+                ),
+                None => {}
+            }
+
             // non-ZTS is required.
             check(
                 &mut ok,
@@ -59,6 +84,32 @@ pub fn run(ini: Option<String>) -> bool {
                 let present = info.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext));
                 check(&mut ok, present, &format!("ext-{ext}"));
             }
+            // At least one PDO database driver.
+            let drivers: Vec<&str> = DB_DRIVERS
+                .iter()
+                .copied()
+                .filter(|d| info.extensions.iter().any(|e| e.eq_ignore_ascii_case(d)))
+                .collect();
+            check(
+                &mut ok,
+                !drivers.is_empty(),
+                &if drivers.is_empty() {
+                    "no PDO database driver (need pdo_sqlite / pdo_mysql / pdo_pgsql)".to_string()
+                } else {
+                    format!("database drivers: {}", drivers.join(", "))
+                },
+            );
+
+            // OpcCache is compiled into PHP 8.5; recommend enabling it for prod.
+            let opcache = info
+                .extensions
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case("Zend OPcache"));
+            mark(
+                opcache,
+                "Zend OPcache available (enable with opcache.enable=1 + JIT)",
+            );
+
             for ext in RECOMMENDED {
                 let present = info.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext));
                 mark(present, &format!("ext-{ext} (recommended)"));
@@ -87,6 +138,14 @@ pub fn run(ini: Option<String>) -> bool {
         println!("✗ critical checks failed — see above");
     }
     ok
+}
+
+/// Parse the leading `major.minor` from a PHP version string like `8.5.8`.
+fn php_minor(version: &str) -> Option<(u32, u32)> {
+    let mut it = version.split('.');
+    let maj = it.next()?.parse().ok()?;
+    let min = it.next()?.parse().ok()?;
+    Some((maj, min))
 }
 
 fn probe_php(ini: Option<String>) -> Result<PhpInfo, String> {

@@ -26,7 +26,8 @@ https = false                # force HTTPS in $_SERVER (behind a TLS terminator)
 # Omit this whole section to run the front controller fresh per request.
 script = "/opt/askr/examples/laravel-worker.php"
 app_base = "/var/www/app"    # exported as $ASKR_APP_BASE for the worker script
-ini = "zend_extension=/opt/askr/vendor/php-build/install/lib/php/extensions/no-debug-non-zts-20240924/opcache.so\nopcache.enable=1\nopcache.validate_timestamps=0"
+# PHP 8.5 has OPcache built into libphp — just switch it on (no zend_extension).
+ini = "opcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.jit=tracing\nopcache.jit_buffer_size=128M"
 # paranoid = true            # dev only: detect state bleed between requests (expensive)
 
 [tls]

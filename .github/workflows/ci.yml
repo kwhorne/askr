@@ -70,7 +70,9 @@ jobs:
         if: steps.libphp.outputs.cache-hit != 'true'
         run: PROFILE=laravel ./scripts/build-libphp.sh
 
-      - name: Verify non-ZTS + shared object
+      - name: Verify non-ZTS + shared object + built-in OPcache
         run: |
           test -f vendor/php-build/install/lib/libphp.so
-          ls vendor/php-build/install/lib/php/extensions/ | grep -q 'non-zts'
+          vendor/php-build/install/bin/php-config --version | grep -q '^8\.5'
+          # PHP 8.5 compiles OPcache into libphp (no opcache.so) — check the symbol.
+          nm -D vendor/php-build/install/lib/libphp.so | grep -qi 'accel_startup\|zend_accel'

@@ -2,6 +2,28 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.8.2 — 2026-07-05
+
+- **PHP 8.5** — upgraded the embedded engine from 8.4.11 to **8.5.8** (latest),
+  optimised for Laravel 13:
+  - **OPcache is now built into libphp** and auto-registers — no more
+    `opcache.so`/`zend_extension` line or API-version path to track. Enable with
+    `opcache.enable=1`; **JIT is on by default**. `askr-run.sh`, the sample
+    configs and the docs are updated accordingly.
+  - **All of Laravel's required extensions** verified present: ctype, curl, dom,
+    fileinfo, filter, hash, mbstring, openssl, pcre, pdo, session, tokenizer, xml
+    (+ json, libxml, phar), plus the database drivers pdo_sqlite/pdo_mysql/
+    pdo_pgsql and intl/gd/zip/exif/bcmath.
+  - `askr doctor` now checks the full Laravel-required set, a PHP-version floor
+    (>= 8.3 for Laravel 13; recommends 8.5), at least one PDO database driver,
+    and OPcache availability.
+  - **Fix:** PHP 8.5's `zend_signal` chained with Rust's (tokio/signal-hook)
+    SIGTERM handler in an infinite loop → stack overflow on shutdown. Build with
+    `--disable-zend-signals` (the host owns signals) and gate the shim's
+    `zend_signal_startup()` on `ZEND_SIGNALS`. Shutdown is clean again.
+  - Verified in a Linux container: fresh **Laravel 13.18.1** boots and serves
+    (per-request + worker mode + OPcache/JIT), 200/200 under load, clean shutdown.
+
 ## 0.8.1 — 2026-07-05
 
 - **`askr upgrade`** — self-update the release install in place. Resolves the

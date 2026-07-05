@@ -171,14 +171,15 @@ listen = "127.0.0.1:9000"
 
 ### opcache
 
-opcache is a `zend_extension` and must be loaded via the INI:
+PHP 8.5 compiles OPcache into libphp and auto-registers it, so there is **no
+`zend_extension` line** — just enable it (and JIT) in the INI:
 
 ```toml
 [worker]
-ini = "zend_extension=/…/opcache.so\nopcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0"
+ini = "opcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.jit=tracing\nopcache.jit_buffer_size=128M"
 ```
 
 `validate_timestamps=0` maximises throughput (no stat() per file); pair it with
-a `SIGHUP` reload on deploy so fresh workers recompile the new code. The
-`no-debug-non-zts-YYYYMMDD` directory name encodes PHP's API version — match it
-to your build (`askr doctor` and the build script print the path).
+a `SIGHUP` reload on deploy so fresh workers recompile the new code. `opcache.jit`
+enables the JIT (on by default in this build). `askr-run.sh` sets sensible
+defaults automatically.

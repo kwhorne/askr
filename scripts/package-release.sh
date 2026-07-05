@@ -32,12 +32,8 @@ cp "$ROOT/target/release/askr" "$DIST/askr"
 LIB="$(ls "$INSTALL"/lib/libphp.* | head -1)"
 cp "$LIB" "$DIST/lib/"
 
-# opcache zend_extension (keep the API-version directory name)
-if EXT="$(ls "$INSTALL"/lib/php/extensions/*/opcache.so 2>/dev/null | head -1)"; then
-    API="$(basename "$(dirname "$EXT")")"
-    mkdir -p "$DIST/lib/php/extensions/$API"
-    cp "$EXT" "$DIST/lib/php/extensions/$API/"
-fi
+# PHP 8.5 compiles OPcache statically into libphp (no opcache.so to bundle) and
+# auto-registers it — enabled at runtime via opcache.enable=1 (see askr-run.sh).
 
 # Relocate: make the loader find lib/ next to the binary.
 if [ "$OS" = "linux" ]; then
@@ -54,14 +50,15 @@ cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/CHANGELOG.md" "$DIST/"
 # Launcher: sets up opcache and runs the binary from anywhere.
 cat > "$DIST/askr-run.sh" <<'EOF'
 #!/usr/bin/env bash
-# Convenience launcher: enables opcache, then runs askr from this directory.
+# Convenience launcher: enables opcache (+ JIT), then runs askr from this dir.
+# PHP 8.5 has OPcache built into libphp, so we just switch it on via the INI.
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OPCACHE="$(ls "$HERE"/lib/php/extensions/*/opcache.so 2>/dev/null | head -1)"
-if [ -n "$OPCACHE" ] && [ -z "${ASKR_PHP_INI:-}" ]; then
-    export ASKR_PHP_INI="zend_extension=$OPCACHE
-opcache.enable=1
+if [ -z "${ASKR_PHP_INI:-}" ]; then
+    export ASKR_PHP_INI="opcache.enable=1
 opcache.enable_cli=1
-opcache.validate_timestamps=0"
+opcache.validate_timestamps=0
+opcache.jit=tracing
+opcache.jit_buffer_size=128M"
 fi
 exec "$HERE/askr" "$@"
 EOF

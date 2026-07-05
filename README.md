@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.8.1</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.8.2</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.8.1; ARCH=$(uname -m)
+VER=v0.8.2; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -77,10 +77,10 @@ Everything lives in [`docs/`](docs/README.md):
 - [Hardening / sandbox](docs/SANDBOX.md) — seccomp + Landlock (`--sandbox`)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.8.1)
+## What works today (0.8.2)
 
-- Embedded PHP (**non-ZTS**) running real Laravel 12/13 — no FastCGI, no FPM
-- **Full extension set** (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
+- Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
+- **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
 - **File uploads** stream to temp files (constant memory) with `$request->file()` in worker mode
 - **Response compression** (br/gzip by `Accept-Encoding`), **JSON access log**, and **Prometheus** `/metrics`
 - Multi-core: one worker **process per core** on a shared listen socket

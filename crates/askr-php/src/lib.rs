@@ -469,7 +469,7 @@ mod tests {
             .eval(r#"echo "hello from PHP " . PHP_VERSION;"#)
             .unwrap();
         assert!(hello.ok(), "status {}", hello.status);
-        assert!(hello.output.starts_with("hello from PHP 8.4"), "{hello:?}");
+        assert!(hello.output.starts_with("hello from PHP 8.5"), "{hello:?}");
 
         // 2. Real computation crosses the FFI boundary intact.
         let calc = php.eval("echo array_sum(range(1, 100));").unwrap();

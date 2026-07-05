@@ -11,7 +11,7 @@
  * isolated (no shared state between files).
  *
  * Usage:
- *   ASKR_PHP_INI="zend_extension=/path/opcache.so\nopcache.enable=1\nopcache.enable_cli=1" \
+ *   ASKR_PHP_INI="opcache.enable=1\nopcache.enable_cli=1" \
  *     askr test --root /path/to/app --runner examples/askr-test.php tests/Unit
  *
  * Exit code 0 = the file's tests passed; non-zero = failures (Askr aggregates).

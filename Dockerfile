@@ -6,14 +6,14 @@
 # recompile — we drop in the relocatable release package (binary + libphp with
 # rpath $ORIGIN/lib), so this build is just fetch + package.
 #
-#   docker build --build-arg ASKR_VERSION=0.8.1 -t askr .
+#   docker build --build-arg ASKR_VERSION=0.8.2 -t askr .
 #
 # Multi-arch: buildx sets TARGETARCH (amd64 / arm64); we fetch the matching
 # tarball. See docs/DOCKER.md for the app-image and compose examples.
 
 # ---- fetch the relocatable release tarball ----
 FROM ubuntu:24.04 AS fetch
-ARG ASKR_VERSION=0.8.1
+ARG ASKR_VERSION=0.8.2
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*

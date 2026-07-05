@@ -94,16 +94,16 @@ Booting a real Laravel app surfaces, in order, which extensions it needs. The
 
 On Ubuntu these come from the `-dev` packages via pkg-config. On macOS the
 script builds oniguruma/OpenSSL/libxml2 statically (the SDK's libxml2 is too old
-for PHP 8.4's `ext/dom`).
+for PHP 8.5's `ext/dom`).
 
 ## opcache
 
-opcache is built (as a `zend_extension`) but not auto-loaded. Enable it via the
-INI (see [Configuration](CONFIGURATION.md)):
+PHP 8.5 compiles OPcache statically into libphp and auto-registers it — there is
+no `opcache.so` and no `zend_extension` line. Just switch it on (and turn on JIT)
+via the INI (see [Configuration](CONFIGURATION.md)):
 
 ```bash
-OPCACHE=$(ls vendor/php-build/install/lib/php/extensions/*/opcache.so)
-export ASKR_PHP_INI=$'zend_extension='"$OPCACHE"$'\nopcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0'
+export ASKR_PHP_INI=$'opcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.jit=tracing\nopcache.jit_buffer_size=128M'
 ```
 
 Confirm your build with `askr doctor` (see [CLI](CLI.md)).

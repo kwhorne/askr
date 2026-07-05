@@ -26,7 +26,7 @@
 #   PROFILE=laravel ./scripts/build-libphp.sh
 set -euo pipefail
 
-PHP_VERSION="${PHP_VERSION:-8.4.11}"
+PHP_VERSION="${PHP_VERSION:-8.5.8}"
 PROFILE="${PROFILE:-minimal}"
 OS="$(uname -s)"
 
@@ -50,7 +50,7 @@ if [ "$PROFILE" = "laravel" ]; then
         --enable-mbstring --enable-tokenizer --enable-ctype --enable-filter
         --enable-fileinfo --enable-session --enable-phar --enable-pcntl
         --enable-posix --enable-pdo --with-pdo-sqlite --with-sqlite3
-        --enable-opcache --enable-bcmath --with-openssl --with-libxml
+        --enable-bcmath --with-openssl --with-libxml
         --enable-dom --enable-xml --enable-simplexml
         --enable-xmlwriter --enable-xmlreader
     )
@@ -127,12 +127,16 @@ fetch "https://www.php.net/distributions/php-$PHP_VERSION.tar.gz" "php-$PHP_VERS
 [ -d "$SRC" ] || tar xzf "php-$PHP_VERSION.tar.gz"
 cd "$SRC"
 
-echo ">> configure (embed shared, non-ZTS, profile=$PROFILE, os=$OS)"
+# --disable-zend-signals: the host (Askr) owns process signals. If PHP also
+# installs a SIGTERM handler it chains with Rust's (tokio/signal-hook) handler,
+# and on PHP 8.5 the two call each other forever → stack overflow at shutdown.
+echo ">> configure (embed shared, non-ZTS, no zend-signals, profile=$PROFILE, os=$OS)"
 make distclean >/dev/null 2>&1 || true
 ./configure \
     --prefix="$INSTALL" \
     --enable-embed=shared \
     --disable-all \
+    --disable-zend-signals \
     "${DEP_FLAGS[@]}" \
     --disable-cgi --disable-cli --disable-fpm --disable-phpdbg \
     --without-iconv
@@ -148,6 +152,6 @@ echo
 echo "libphp:     $LIB"
 echo "php-config: $INSTALL/bin/php-config"
 echo "ZTS:        $(grep -c 'define ZTS 1' "$SRC/main/php_config.h" || true) (0 = non-ZTS, good)"
-if [ "$PROFILE" = "laravel" ]; then
-    echo "opcache:    $INSTALL/lib/php/extensions/*/opcache.so (load via zend_extension=)"
-fi
+# PHP 8.5 compiles OPcache statically into libphp (no opcache.so) and
+# auto-registers it — enable at runtime with `opcache.enable=1`, no zend_extension.
+echo "opcache:    built into libphp (enable via opcache.enable=1; JIT on by default)"
