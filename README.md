@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.3.0</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.3.1</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.3.0; ARCH=$(uname -m)
+VER=v0.3.1; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -74,7 +74,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.3.0)
+## What works today (0.3.1)
 
 - Embedded PHP (**non-ZTS**) running real Laravel 12 — no FastCGI, no FPM
 - Multi-core: one worker **process per core** on a shared listen socket
@@ -120,7 +120,8 @@ Everything lives in [`docs/`](docs/README.md):
 | self-contained Linux releases (x86_64 + arm64) | ✅ |
 | **0.2.1** — static caching/streaming/Range, slowloris timeouts, pinned & cached CI | ✅ |
 | **0.3.0** — response cache + tag invalidation, coalescing, Pusher WS, `askr_defer`, CoW autoscaling, record/replay, fork test runner | ✅ |
-| **Next** — io_uring core (Linux), HTTP/3 (QUIC), Pusher private/presence auth, `$_FILES`, OTel, seccomp/Landlock | ⏳ |
+| **0.3.1** — Pusher private/presence auth (HMAC subscription verification) | ✅ |
+| **Next** — io_uring core (Linux), HTTP/3 (QUIC), `$_FILES`, OTel, seccomp/Landlock | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
 benchmark against FrankenPHP/FPM — both Linux-native work.

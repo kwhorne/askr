@@ -160,6 +160,9 @@ pub struct PusherSection {
     /// broadcast ring, which is auto-enabled.
     #[serde(default)]
     pub enabled: bool,
+    /// App secret for verifying private/presence subscription auth. Omit to
+    /// accept them without a signature (dev).
+    pub secret: Option<String>,
 }
 
 impl Default for ServerSection {
@@ -317,6 +320,7 @@ impl FileConfig {
                 max_body_size,
                 record_dir: self.record.dir,
                 pusher: self.pusher.enabled,
+                pusher_secret: self.pusher.secret,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

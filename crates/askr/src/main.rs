@@ -180,6 +180,12 @@ enum Command {
         /// Auto-enables broadcasting.
         #[arg(long)]
         pusher: bool,
+
+        /// Pusher app secret: when set, private/presence channel subscriptions
+        /// must carry a valid HMAC auth signature. Also read from
+        /// $ASKR_PUSHER_SECRET. Without it, such subscriptions are accepted (dev).
+        #[arg(long)]
+        pusher_secret: Option<String>,
     },
 
     /// Run tests by forking a fresh, warm process per test file (#5-style CoW).
@@ -266,6 +272,7 @@ fn main() -> anyhow::Result<()> {
             cow,
             record_errors,
             pusher,
+            pusher_secret,
         } => {
             // The config file, when given, is the single source of truth.
             #[allow(clippy::type_complexity)]
@@ -340,6 +347,8 @@ fn main() -> anyhow::Result<()> {
                     max_body_size,
                     record_dir: record_errors,
                     pusher,
+                    pusher_secret: pusher_secret
+                        .or_else(|| std::env::var("ASKR_PUSHER_SECRET").ok()),
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

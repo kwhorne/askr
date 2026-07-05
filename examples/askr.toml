@@ -61,6 +61,8 @@ listen = "127.0.0.1:9000"
 # drop-in Reverb for Laravel Echo. Auto-enables the broadcast ring.
 # [pusher]
 # enabled = true
+# secret = "your-app-secret"   # verify private/presence auth (match Laravel's
+#                              # PUSHER_APP_SECRET). Omit to accept them (dev).
 
 # Record failing (5xx) requests here so `askr replay <id>.json` can reproduce
 # them. Captures request bodies — treat this directory as sensitive.

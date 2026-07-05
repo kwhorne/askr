@@ -73,6 +73,9 @@ pub struct Config {
     pub record_dir: Option<PathBuf>,
     /// Pusher-compatible WebSocket + trigger endpoints (drop-in Reverb, #6).
     pub pusher: bool,
+    /// Pusher app secret — when set, private/presence subscriptions must carry a
+    /// valid HMAC auth signature. When unset, they're accepted (dev).
+    pub pusher_secret: Option<String>,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -293,7 +296,11 @@ async fn handle(
     {
         return Ok(match upgrade::upgrade(&mut req) {
             Ok((resp, fut)) => {
-                tokio::spawn(pusher::serve(fut, rt.pusher.clone()));
+                tokio::spawn(pusher::serve(
+                    fut,
+                    rt.pusher.clone(),
+                    config.pusher_secret.clone(),
+                ));
                 let (parts, _) = resp.into_parts();
                 Response::from_parts(parts, full(Bytes::new()))
             }

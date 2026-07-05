@@ -60,8 +60,30 @@ askr serve … --pusher          # auto-enables the broadcast ring
   worker reaches subscribers in all of them.
 - `askr_broadcast('channel', $json)` from PHP also reaches Pusher clients.
 
-Public channels work fully; `private-`/`presence-` subscriptions are accepted
-(auth-signature verification is a follow-up).
+**Private & presence channels** are verified against the app secret (0.3.1):
+
+```bash
+askr serve … --pusher --pusher-secret "$PUSHER_APP_SECRET"
+# or $ASKR_PUSHER_SECRET / [pusher] secret in askr.toml
+```
+
+A `private-`/`presence-` subscription must carry a valid `auth` token — the same
+`HMAC-SHA256(secret, "socket_id:channel[:channel_data]")` Laravel's
+`/broadcasting/auth` produces — or it's rejected with a `subscription_error`.
+Point Laravel's `pusher` driver at Askr (matching key/secret) and Echo just works:
+
+```php
+// config/broadcasting.php → connections.pusher
+'key'    => env('PUSHER_APP_KEY'),
+'secret' => env('PUSHER_APP_SECRET'),   // must match --pusher-secret
+'options' => [
+    'host'   => env('PUSHER_HOST', '127.0.0.1'),
+    'port'   => env('PUSHER_PORT', 443),
+    'scheme' => env('PUSHER_SCHEME', 'https'),
+],
+```
+
+Without a secret configured, private/presence subscriptions are accepted (dev).
 
 ## 4. `askr_defer()` — work after the response is sent
 

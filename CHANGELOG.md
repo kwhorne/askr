@@ -2,6 +2,16 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.3.1 — 2026-07-05
+
+- **Pusher private/presence auth** — `private-`/`presence-` subscriptions are now
+  verified against the app secret (`--pusher-secret` / `$ASKR_PUSHER_SECRET` /
+  `[pusher] secret`): a subscription must carry the same
+  `HMAC-SHA256(secret, "socket_id:channel[:channel_data]")` token Laravel's
+  `/broadcasting/auth` issues, or it's rejected with a `subscription_error`.
+  Without a secret configured they're still accepted (dev). Closes the honest gap
+  from 0.3.0; private channels are actually private now. Unit-tested end to end.
+
 ## 0.3.0 — 2026-07-05
 
 Seven features that fall out of Askr's architecture (shared-memory substrate +
