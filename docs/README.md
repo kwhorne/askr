@@ -17,6 +17,7 @@ requests against it, eliminating per-request framework bootstrap.
 | [CLI reference](CLI.md) | Every command and flag (`serve`, `doctor`, `config-check`). |
 | [Worker mode](WORKER_MODE.md) | Boot-once-serve-many, the Laravel worker script, per-request state reset, writing your own worker. |
 | [Power features](FEATURES.md) | Response cache + tag invalidation, coalescing, Pusher WS, `askr_defer`, CoW autoscaling, record/replay, fork test runner. |
+| [io_uring core (plan)](IO-URING.md) | The remaining efficiency step: a Linux io_uring I/O core behind the `Php::handle` seam, with the tokio path as fallback. |
 | [CoW template](COW.md) | Boot once, fork workers (copy-on-write) — ~ms warm respawn + shared memory (experimental). |
 | [Shared cache](CACHE.md) | In-binary cache, atomic counters and rate limiting (no Redis); the Laravel driver. |
 | [Broadcasting](BROADCAST.md) | Live updates to browsers via SSE + `askr_broadcast()` (no Reverb/Pusher). |

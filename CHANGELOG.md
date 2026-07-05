@@ -2,6 +2,17 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **io_uring groundwork** (Linux is where the runtime swap lands):
+  - `askr doctor` now *probes* io_uring via `io_uring_setup(2)` instead of only
+    guessing from the kernel version — a recent kernel can still have it disabled
+    (`kernel.io_uring_disabled`). Non-fatal: Askr falls back to the epoll/tokio path.
+  - `scripts/bench.sh` — a benchmark harness (auto-detects oha/wrk/hey/ab) for
+    comparing scenarios (tokio vs io_uring, and vs FrankenPHP / php-fpm).
+  - `docs/IO-URING.md` — the design & de-risking plan (seam, monoio/tokio-uring
+    tradeoffs, Linux+capability gating, phased rollout, benchmark methodology).
+
 ## 0.3.1 — 2026-07-05
 
 - **Pusher private/presence auth** — `private-`/`presence-` subscriptions are now

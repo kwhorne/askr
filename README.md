@@ -124,7 +124,9 @@ Everything lives in [`docs/`](docs/README.md):
 | **Next** — io_uring core (Linux), HTTP/3 (QUIC), `$_FILES`, OTel, seccomp/Landlock | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
-benchmark against FrankenPHP/FPM — both Linux-native work.
+benchmark against FrankenPHP/FPM — both Linux-native work. The plan is written up
+in [docs/IO-URING.md](docs/IO-URING.md), `askr doctor` probes io_uring support,
+and [`scripts/bench.sh`](scripts/bench.sh) is the measurement harness.
 
 ## Project layout
 

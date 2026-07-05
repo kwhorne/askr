@@ -130,6 +130,40 @@ fn platform_check() {
         let ok = kernel_at_least(&release, 5, 1);
         mark(ok, &format!("kernel {release} (io_uring needs ≥ 5.1)"));
     }
+
+    // Actually probe io_uring — a recent kernel can still have it disabled via
+    // `sysctl kernel.io_uring_disabled`. Not being available isn't fatal: Askr
+    // falls back to the epoll/tokio I/O path.
+    match probe_io_uring() {
+        Ok(()) => mark(true, "io_uring: available (probed io_uring_setup)"),
+        Err(reason) => mark(
+            true,
+            &format!("io_uring: unavailable ({reason}) — using the epoll/tokio path"),
+        ),
+    }
+}
+
+/// Probe io_uring by attempting `io_uring_setup(2)`; closes the ring on success.
+#[cfg(target_os = "linux")]
+fn probe_io_uring() -> Result<(), String> {
+    // A zeroed `struct io_uring_params` (120 bytes on all current ABIs).
+    let mut params = [0u8; 120];
+    // SAFETY: raw syscall with 1 SQ entry and a correctly-sized params buffer.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_io_uring_setup,
+            1 as libc::c_uint,
+            params.as_mut_ptr() as *mut libc::c_void,
+        )
+    };
+    if ret >= 0 {
+        unsafe { libc::close(ret as libc::c_int) };
+        Ok(())
+    } else {
+        let err = std::io::Error::last_os_error();
+        // ENOSYS = kernel too old; EPERM = disabled by sysctl/seccomp.
+        Err(err.to_string())
+    }
 }
 
 #[cfg(target_os = "linux")]
