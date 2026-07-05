@@ -1,0 +1,8 @@
+# The base image is packaged from the release tarball (downloaded in the
+# Dockerfile), not from the build context — keep the context tiny.
+target/
+vendor/
+.git/
+*.tar.gz
+docs/
+crates/

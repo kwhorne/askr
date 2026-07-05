@@ -2,6 +2,22 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.4.2 — 2026-07-05
+
+- **Docker support** — an official multi-arch image on GHCR
+  (`ghcr.io/kwhorne/askr`, `linux/amd64` + `linux/arm64`), packaged from the
+  relocatable release tarball on `ubuntu:24.04` (glibc match with CI; not Alpine
+  — see docs/DOCKER.md). One container is the whole environment: web workers,
+  queue, scheduler, cache and broadcasting in one process tree — replacing the
+  usual app+nginx+redis+queue+cron stack. Ships a `HEALTHCHECK` (admin API),
+  `STOPSIGNAL SIGTERM` (graceful drain), non-root, `EXPOSE 8000 9000`. New
+  `Dockerfile`, `.dockerignore`, `docker.yml` workflow, and `docs/DOCKER.md`
+  (compose, signals, read-only + tmpfs, TLS-behind-LB).
+- **cgroup-aware workers** — the default worker count now reads the container's
+  CPU limit (cgroup v2 `cpu.max`, v1 fallback) instead of the host core count, so
+  a `cpus: 2` container forks 2 workers, not `nproc`. Falls back to host cores
+  outside a limited cgroup.
+
 ## 0.4.1 — 2026-07-05
 
 Server-environment completeness: compression, logging, observability.

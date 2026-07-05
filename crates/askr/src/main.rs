@@ -507,10 +507,62 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Default worker count: the container's CPU limit (cgroup) when running in one,
+/// else the host's core count. Without this a `cpus: 2` container on a 64-core
+/// host would fork 64 workers (nproc reads the host, not the cgroup limit).
 fn default_workers() -> usize {
+    #[cfg(target_os = "linux")]
+    if let Some(n) = cgroup_cpu_limit() {
+        return n.max(1);
+    }
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+/// Read the effective CPU limit from cgroup v2 (`cpu.max`), falling back to
+/// cgroup v1 (`cpu.cfs_quota_us`/`cpu.cfs_period_us`). None if unlimited/absent.
+#[cfg(target_os = "linux")]
+fn cgroup_cpu_limit() -> Option<usize> {
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        if let Some(n) = cpu_limit_from_cgroup_v2(&s) {
+            return Some(n);
+        }
+    }
+    // cgroup v1.
+    let quota: f64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let period: f64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if quota > 0.0 && period > 0.0 {
+        Some((quota / period).ceil() as usize)
+    } else {
+        None
+    }
+}
+
+/// Parse a cgroup v2 `cpu.max` value (`"<quota> <period>"` or `"max <period>"`)
+/// into a whole-core limit (rounded up). None when unlimited.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn cpu_limit_from_cgroup_v2(cpu_max: &str) -> Option<usize> {
+    let mut it = cpu_max.split_whitespace();
+    let quota = it.next()?;
+    if quota == "max" {
+        return None;
+    }
+    let q: f64 = quota.parse().ok()?;
+    let p: f64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(100_000.0);
+    if q > 0.0 && p > 0.0 {
+        Some((q / p).ceil() as usize)
+    } else {
+        None
+    }
 }
 
 // --- multi-process supervisor --------------------------------------------
@@ -1239,7 +1291,17 @@ fn resolve_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_size;
+    use super::{cpu_limit_from_cgroup_v2, parse_size};
+
+    #[test]
+    fn cgroup_cpu_parsing() {
+        assert_eq!(cpu_limit_from_cgroup_v2("200000 100000"), Some(2));
+        assert_eq!(cpu_limit_from_cgroup_v2("150000 100000"), Some(2)); // 1.5 → ceil 2
+        assert_eq!(cpu_limit_from_cgroup_v2("50000 100000"), Some(1)); // 0.5 → ceil 1
+        assert_eq!(cpu_limit_from_cgroup_v2("max 100000"), None); // unlimited
+        assert_eq!(cpu_limit_from_cgroup_v2("100000"), Some(1)); // default period
+        assert_eq!(cpu_limit_from_cgroup_v2("garbage"), None);
+    }
 
     #[test]
     fn parses_sizes() {

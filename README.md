@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.4.1</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.4.2</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.4.1; ARCH=$(uname -m)
+VER=v0.4.2; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -67,6 +67,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
 - [CLI reference](docs/CLI.md) — every command and flag
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
+- [Docker](docs/DOCKER.md) — one container replaces app+nginx+redis+queue+cron (GHCR, multi-arch)
 - [Power features](docs/FEATURES.md) — response cache + tags, coalescing, Pusher WS, defer, autoscaling, record/replay, test runner
 - [Shared cache](docs/CACHE.md) — `askr_cache_*` + Laravel driver (no Redis)
 - [Broadcasting](docs/BROADCAST.md) — live updates via SSE (no Reverb/Pusher)
@@ -74,7 +75,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.4.1)
+## What works today (0.4.2)
 
 - Embedded PHP (**non-ZTS**) running real Laravel 12 — no FastCGI, no FPM
 - **File uploads** stream to temp files (constant memory) with `$request->file()` in worker mode
@@ -126,6 +127,7 @@ Everything lives in [`docs/`](docs/README.md):
 | **0.3.2** — io_uring groundwork: `doctor` probe, benchmark harness, design plan | ✅ |
 | **0.4.0** — multipart file uploads (streamed to temp files, `$_FILES` in worker mode) | ✅ |
 | **0.4.1** — response compression (br/gzip), JSON access log, Prometheus `/metrics`, KV cache eviction | ✅ |
+| **0.4.2** — Docker image (GHCR, multi-arch), cgroup-aware worker default | ✅ |
 | **Next** — io_uring core (Linux), HTTP/3 (QUIC), auto-TLS (ACME), OTel traces, session/queue on shared memory, seccomp/Landlock | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
