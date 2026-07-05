@@ -50,6 +50,21 @@ the admin plane (health + Prometheus `/metrics`) binds to `127.0.0.1:9000`.
 Raise `max_body_size` for large uploads — they're streamed to `/tmp` (a tmpfs),
 so memory stays flat regardless of file size.
 
+## Filament / front-end assets
+
+Askr's `libphp` (0.5.0+) bundles `intl`, `gd`, `curl`, `zip`, `pdo_mysql`/`pgsql`,
+so **Filament apps run**. Two app-side steps for a Filament build (not Askr
+issues — the same on any server):
+
+- **Build the Vite assets** so the panel's theme is present. Uncomment the
+  `assets` stage in the `Dockerfile` (`npm ci && npm run build`). If npm hits a
+  peer-dependency conflict, use `npm install --legacy-peer-deps`.
+- **Don't ship a stale package cache.** `composer install --no-dev` drops dev
+  providers; if a committed `bootstrap/cache/packages.php` still references one
+  you'll get a "Class … not found" 500. The compose file mounts
+  `bootstrap/cache` as tmpfs (regenerated at boot) so this can't happen; if you
+  run without it, `rm -f bootstrap/cache/*.php` in the build.
+
 ## The `.env` / secrets
 
 `.env` is intentionally **not** copied into the image. Provide it at runtime:

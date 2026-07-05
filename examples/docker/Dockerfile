@@ -19,7 +19,9 @@ COPY . .
 RUN composer dump-autoload --optimize --no-dev
 
 # ---- 2. (optional) front-end assets ----
-# Uncomment to build Vite assets; then uncomment the COPY in the runtime stage.
+# Uncomment to build Vite assets (required for Filament's theme); then uncomment
+# the COPY in the runtime stage. If npm hits a peer-dependency conflict, swap
+# `npm ci` for `npm install --legacy-peer-deps`.
 # FROM node:22-slim AS assets
 # WORKDIR /app
 # COPY package.json package-lock.json ./
