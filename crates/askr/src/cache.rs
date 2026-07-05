@@ -28,6 +28,7 @@ struct Entry {
     state: u32,      // 0 = empty, 1 = occupied
     hash: u64,
     expires_at: u64, // unix secs; 0 = never
+    written_at: u64, // unix millis at last write (for oldest-first eviction)
     key_len: u32,
     val_len: u32,
     key: [u8; KEY_MAX],
@@ -41,6 +42,13 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -151,6 +159,7 @@ unsafe fn write_entry(e: *mut Entry, key: &[u8], val: &[u8], h: u64, expires: u6
     ptr::write(ptr::addr_of_mut!((*e).state), 1);
     ptr::write(ptr::addr_of_mut!((*e).hash), h);
     ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
+    ptr::write(ptr::addr_of_mut!((*e).written_at), now_ms());
     ptr::write(ptr::addr_of_mut!((*e).key_len), key.len() as u32);
     ptr::write(ptr::addr_of_mut!((*e).val_len), val.len() as u32);
     ptr::copy_nonoverlapping(
@@ -208,9 +217,16 @@ pub fn set(key: &[u8], val: &[u8], ttl: u64) -> bool {
         return false;
     }
     let h = hash_key(key);
-    let expires = if ttl > 0 { now_secs() + ttl } else { 0 };
+    let now = now_secs();
+    let expires = if ttl > 0 { now + ttl } else { 0 };
+    // While probing for a free/matching slot, remember the best eviction victim:
+    // prefer an already-expired slot, else the oldest-written one.
+    let mut victim = (h as usize) % slots;
+    let mut oldest = u64::MAX;
+    let mut expired_victim: Option<usize> = None;
     for i in 0..PROBE {
-        let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
+        let idx = (h as usize).wrapping_add(i) % slots;
+        let e = unsafe { p.add(idx) };
         let _g = Slot::lock(e);
         unsafe {
             let state = r_u32(ptr::addr_of!((*e).state));
@@ -218,12 +234,24 @@ pub fn set(key: &[u8], val: &[u8], ttl: u64) -> bool {
                 write_entry(e, key, val, h, expires);
                 return true;
             }
+            if expired(e, now) && expired_victim.is_none() {
+                expired_victim = Some(idx);
+            }
+            let wa = r_u64(ptr::addr_of!((*e).written_at));
+            if wa < oldest {
+                oldest = wa;
+                victim = idx;
+            }
         }
     }
-    // Probe window full: evict the primary slot.
-    let e = unsafe { p.add((h as usize) % slots) };
+    // Probe window full: evict the expired slot if any, else the oldest.
+    let target = expired_victim.unwrap_or(victim);
+    let e = unsafe { p.add(target) };
     let _g = Slot::lock(e);
     unsafe { write_entry(e, key, val, h, expires) };
+    if let Some(m) = crate::metrics::Metrics::get() {
+        m.cache_evictions.fetch_add(1, Ordering::Relaxed);
+    }
     true
 }
 

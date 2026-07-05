@@ -10,9 +10,9 @@
 //! the process and the supervisor respawns a fresh worker. No dropped requests.
 
 use std::convert::Infallible;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use std::io::Write;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,7 +64,11 @@ fn open_access_log(path: Option<&Path>) -> Option<Mutex<Box<dyn std::io::Write +
     if path.as_os_str() == "-" {
         return Some(Mutex::new(Box::new(std::io::stdout())));
     }
-    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         Ok(f) => Some(Mutex::new(Box::new(f))),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "access log: open failed; disabled");
@@ -335,7 +339,14 @@ where
             let resp = handle(req, rt.clone(), peer).await;
             if let Ok(r) = &resp {
                 let bytes = r.body().size_hint().exact().unwrap_or(0);
-                rt.log_access(&method, &path, r.status().as_u16(), bytes, start.elapsed(), peer);
+                rt.log_access(
+                    &method,
+                    &path,
+                    r.status().as_u16(),
+                    bytes,
+                    start.elapsed(),
+                    peer,
+                );
             }
             resp
         }

@@ -33,6 +33,8 @@ pub struct Metrics {
     /// Requests currently executing in PHP across all workers — the queueing
     /// signal the CoW autoscaler reads to add/harvest workers.
     pub inflight: AtomicU64,
+    /// KV cache entries evicted under pressure (probe window full).
+    pub cache_evictions: AtomicU64,
 }
 
 static METRICS_PTR: AtomicPtr<Metrics> = AtomicPtr::new(ptr::null_mut());

@@ -78,6 +78,7 @@ async fn handle(
         (&Method::GET, "/") => html(DASHBOARD),
         (&Method::GET, "/api/status") => json(status_json(&info)),
         (&Method::GET, "/api/metrics") => json(metrics_json()),
+        (&Method::GET, "/metrics") => prometheus(),
         (&Method::GET, "/api/errors") => json(errors_json(&info)),
         (&Method::POST, "/api/reload") => {
             crate::trigger_reload();
@@ -185,6 +186,144 @@ fn errors_json(info: &Info) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(r#"{{"enabled":true,"errors":[{items}]}}"#)
+}
+
+fn push_counter(s: &mut String, name: &str, help: &str, val: &str) {
+    use std::fmt::Write;
+    let _ = write!(
+        s,
+        "# HELP {name} {help}\n# TYPE {name} counter\n{name} {val}\n"
+    );
+}
+
+/// Prometheus text-format exposition of the shared metrics (`GET /metrics`).
+fn prometheus() -> Response<Full<Bytes>> {
+    use std::fmt::Write;
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut s = String::new();
+    let Some(m) = crate::metrics::Metrics::get() else {
+        return text_plain(s);
+    };
+
+    push_counter(
+        &mut s,
+        "askr_requests_total",
+        "Total HTTP requests served.",
+        &m.requests.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_errors_total",
+        "Requests that failed at the server layer.",
+        &m.errors.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_bytes_out_total",
+        "Response bytes sent.",
+        &m.bytes_out.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_php_seconds_total",
+        "Cumulative time spent in PHP.",
+        &format!("{:.6}", m.php_us.load(Relaxed) as f64 / 1e6),
+    );
+    push_counter(
+        &mut s,
+        "askr_request_seconds_total",
+        "Cumulative total request time.",
+        &format!("{:.6}", m.total_us.load(Relaxed) as f64 / 1e6),
+    );
+    push_counter(
+        &mut s,
+        "askr_cache_evictions_total",
+        "KV cache entries evicted under pressure.",
+        &m.cache_evictions.load(Relaxed).to_string(),
+    );
+
+    // Response status classes.
+    let _ = write!(
+        s,
+        "# HELP askr_responses_total Responses by status class.\n# TYPE askr_responses_total counter\n"
+    );
+    for (i, class) in ["1xx", "2xx", "3xx", "4xx", "5xx"].iter().enumerate() {
+        let _ = writeln!(
+            s,
+            "askr_responses_total{{class=\"{class}\"}} {}",
+            m.status[i].load(Relaxed)
+        );
+    }
+
+    // Response cache.
+    let (hits, misses, coalesced) = crate::rcache::stats();
+    push_counter(
+        &mut s,
+        "askr_cache_hits_total",
+        "Response cache hits.",
+        &hits.to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_cache_misses_total",
+        "Response cache misses.",
+        &misses.to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_cache_coalesced_total",
+        "Requests served by coalescing onto a leader.",
+        &coalesced.to_string(),
+    );
+
+    // Gauges.
+    let _ = write!(
+        s,
+        "# HELP askr_inflight Requests currently executing in PHP.\n# TYPE askr_inflight gauge\naskr_inflight {}\n",
+        m.inflight.load(Relaxed)
+    );
+    let st = crate::status();
+    let _ = write!(
+        s,
+        "# HELP askr_workers_alive Live worker processes.\n# TYPE askr_workers_alive gauge\naskr_workers_alive {}\n",
+        st.workers_alive
+    );
+
+    // Latency histogram (cumulative buckets, seconds).
+    let buckets = m.bucket_counts();
+    let bounds = crate::metrics::BUCKET_BOUNDS_MS;
+    let _ = write!(
+        s,
+        "# HELP askr_request_duration_seconds Request latency.\n# TYPE askr_request_duration_seconds histogram\n"
+    );
+    let mut cum = 0u64;
+    for (i, &bound) in bounds.iter().enumerate() {
+        cum += buckets[i];
+        let _ = writeln!(
+            s,
+            "askr_request_duration_seconds_bucket{{le=\"{:.3}\"}} {cum}",
+            bound as f64 / 1000.0
+        );
+    }
+    cum += buckets[bounds.len()]; // overflow bucket
+    let _ = write!(
+        s,
+        "askr_request_duration_seconds_bucket{{le=\"+Inf\"}} {cum}\naskr_request_duration_seconds_count {cum}\naskr_request_duration_seconds_sum {:.6}\n",
+        m.total_us.load(Relaxed) as f64 / 1e6
+    );
+
+    text_plain(s)
+}
+
+fn text_plain(body: String) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            hyper::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
 }
 
 fn json(body: String) -> Response<Full<Bytes>> {
