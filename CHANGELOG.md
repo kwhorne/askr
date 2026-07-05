@@ -2,6 +2,22 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.7.0 — 2026-07-05
+
+- **Automatic TLS (ACME / Let's Encrypt)** — the last piece of "single binary, no
+  proxy". `--acme --acme-domain example.com --acme-email you@example.com` obtains
+  a certificate over **HTTP-01** and renews it automatically. Prefork-safe: the
+  **master** answers challenges on `--acme-http` (default `0.0.0.0:80`) and
+  obtains the cert *before* forking; workers only serve HTTPS from the cache, and
+  a background renewal thread rolls them with zero downtime when the cert renews.
+  `--acme-staging` for Let's Encrypt staging; `--acme-directory`/`--acme-ca-root`
+  for a private CA / Pebble. See docs/AUTOTLS.md.
+  - Uses `instant-acme`; a process-wide ring `CryptoProvider` is pinned (instant-
+    acme brings aws-lc-rs alongside our ring stack).
+  - Verified end to end against **Pebble**: account → order → finalize →
+    certificate issued (by "Pebble Intermediate CA"), and Askr serves HTTPS with
+    it; the HTTP-01 challenge server is unit-tested.
+
 ## 0.6.1 — 2026-07-05
 
 - **Shared-memory job queue** — the last common Redis use. A fixed-slot job table

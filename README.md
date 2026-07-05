@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.6.1</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.7.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.6.1; ARCH=$(uname -m)
+VER=v0.7.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -73,9 +73,10 @@ Everything lives in [`docs/`](docs/README.md):
 - [Broadcasting](docs/BROADCAST.md) — live updates via SSE (no Reverb/Pusher)
 - [CoW template](docs/COW.md) — boot once, fork workers for ~ms warm respawn (experimental)
 - [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
+- [Auto-TLS (ACME)](docs/AUTOTLS.md) — obtain + renew Let's Encrypt certs (`--acme`)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.6.1)
+## What works today (0.7.0)
 
 - Embedded PHP (**non-ZTS**) running real Laravel 12/13 — no FastCGI, no FPM
 - **Full extension set** (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -100,7 +101,7 @@ Everything lives in [`docs/`](docs/README.md):
 - **Shared cache** (`askr_cache_*` + Laravel driver): cache, counters, atomic **locks** (`Cache::lock`) and **sessions** (large region) — no Redis
 - **Broadcasting**: live updates to browsers via SSE + `askr_broadcast()` — no Reverb/Pusher
 - Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
-- **TLS** (rustls, ring — no OpenSSL) + **HTTP/2** (ALPN); `--tls-self-signed` for dev
+- **TLS** (rustls, ring) + **HTTP/2** (ALPN); `--tls-self-signed` for dev, or **auto-TLS via ACME/Let's Encrypt** (`--acme`)
 - Zero-downtime **rolling reload** on `SIGHUP` — with optional **canary** (bad deploys hit one worker, not all)
 - Request hardening: body-size limit (`413`), HEAD, GET/POST
 - Typed **`askr.toml`** config + `config-check`
@@ -134,7 +135,8 @@ Everything lives in [`docs/`](docs/README.md):
 | **0.5.2** — supervised external sidecars (Inertia SSR: `node bootstrap/ssr/ssr.mjs`) | ✅ |
 | **0.6.0** — cache size classes (64 KB values), atomic `add`/`Cache::lock`, sessions — Redis-free | ✅ |
 | **0.6.1** — shared-memory job queue (`askr_queue_*` + AskrQueue driver): delayed jobs, retries | ✅ |
-| **Next** — io_uring core (Linux), HTTP/3 (QUIC), auto-TLS (ACME), OTel traces, seccomp/Landlock | ⏳ |
+| **0.7.0** — auto-TLS via ACME/Let's Encrypt (`--acme`, HTTP-01) — single binary, no proxy | ✅ |
+| **Next** — io_uring core (Linux), HTTP/3 (QUIC), OTel traces, seccomp/Landlock | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
 benchmark against FrankenPHP/FPM — both Linux-native work. The plan is written up

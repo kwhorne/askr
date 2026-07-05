@@ -4,6 +4,7 @@
 //! A3: scale across cores with SO_REUSEPORT + one forked worker process per core
 //!     (non-ZTS means one interpreter per process, so we scale by processes).
 
+mod acme;
 mod admin;
 mod broadcast;
 mod cache;
@@ -194,6 +195,41 @@ enum Command {
         #[arg(long)]
         record_errors: Option<PathBuf>,
 
+        /// Auto-TLS via ACME (Let's Encrypt): obtain + renew a certificate over
+        /// HTTP-01. The master answers challenges on --acme-http (default
+        /// 0.0.0.0:80) before forking; workers serve HTTPS from the cache. Set
+        /// --listen to the HTTPS port (e.g. 0.0.0.0:443).
+        #[arg(long)]
+        acme: bool,
+
+        /// Domain(s) to obtain a certificate for (repeatable). Required with --acme.
+        #[arg(long)]
+        acme_domain: Vec<String>,
+
+        /// Contact email for the ACME account.
+        #[arg(long)]
+        acme_email: Option<String>,
+
+        /// Directory to cache the ACME account + cert (cert.pem/key.pem).
+        #[arg(long, default_value = "/var/lib/askr/acme")]
+        acme_dir: PathBuf,
+
+        /// Use the Let's Encrypt staging environment (higher rate limits, untrusted).
+        #[arg(long)]
+        acme_staging: bool,
+
+        /// Custom ACME directory URL (e.g. a Pebble test server).
+        #[arg(long)]
+        acme_directory: Option<String>,
+
+        /// Address to answer HTTP-01 challenges on.
+        #[arg(long, default_value = "0.0.0.0:80")]
+        acme_http: SocketAddr,
+
+        /// Trust this CA root PEM for the ACME directory (for Pebble/testing).
+        #[arg(long)]
+        acme_ca_root: Option<PathBuf>,
+
         /// Enable a Pusher-compatible WebSocket endpoint (/app/{key}) and HTTP
         /// trigger (/apps/{id}/events) — a drop-in Reverb for Laravel Echo.
         /// Auto-enables broadcasting.
@@ -259,6 +295,10 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
+    // instant-acme pulls in aws-lc-rs while our TLS uses ring, so rustls can no
+    // longer auto-select a provider — pin ring process-wide (matches our stack).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -298,6 +338,14 @@ fn main() -> anyhow::Result<()> {
             canary,
             cow,
             record_errors,
+            acme,
+            acme_domain,
+            acme_email,
+            acme_dir,
+            acme_staging,
+            acme_directory,
+            acme_http,
+            acme_ca_root,
             pusher,
             pusher_secret,
             access_log,
@@ -435,14 +483,68 @@ fn main() -> anyhow::Result<()> {
             // Map shared metrics before any fork so all workers share them.
             metrics::Metrics::init();
 
+            // Auto-TLS via ACME: obtain the cert in the master (HTTP-01 on
+            // --acme-http) before forking; workers serve HTTPS from the cache.
+            let mut config = config;
+            if acme {
+                anyhow::ensure!(!acme_domain.is_empty(), "--acme requires --acme-domain");
+                let email = acme_email
+                    .clone()
+                    .unwrap_or_else(|| format!("admin@{}", acme_domain[0]));
+                let directory_url = acme_directory.clone().unwrap_or_else(|| {
+                    if acme_staging {
+                        instant_acme::LetsEncrypt::Staging.url().to_string()
+                    } else {
+                        instant_acme::LetsEncrypt::Production.url().to_string()
+                    }
+                });
+                let acfg = acme::AcmeConfig {
+                    domains: acme_domain.clone(),
+                    email,
+                    cache_dir: acme_dir.clone(),
+                    directory_url,
+                    challenge_addr: acme_http,
+                    ca_root: acme_ca_root.clone(),
+                    renew_after_days: 60,
+                };
+                if acme::needs_renewal(&acme_dir) {
+                    acme::obtain_blocking(&acfg)?;
+                } else {
+                    tracing::info!("acme: cached certificate still valid");
+                }
+                config.tls_cert = Some(acme::cert_path(&acme_dir));
+                config.tls_key = Some(acme::key_path(&acme_dir));
+                config.tls_self_signed = false;
+                config.https = true;
+                // Renew before expiry in a background thread, then roll workers.
+                let renew = acfg.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+                    if acme::needs_renewal(&renew.cache_dir) {
+                        match acme::obtain_blocking(&renew) {
+                            Ok(()) => {
+                                tracing::info!("acme: renewed; rolling workers");
+                                trigger_reload();
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %format!("{e:#}"), "acme: renewal failed")
+                            }
+                        }
+                    }
+                });
+            }
+
             let listener = bind_listener(config.listen)?;
             // The supervisor is needed for recycling, the admin plane, sidecars,
-            // or >1 worker.
+            // ACME renewal (rolling reload), or >1 worker.
             let has_sidecars = sidecars.queue > 0
                 || sidecars.scheduler_script.is_some()
                 || !sidecars.commands.is_empty();
-            let need_supervisor =
-                workers > 1 || config.max_requests > 0 || admin_listen.is_some() || has_sidecars;
+            let need_supervisor = workers > 1
+                || config.max_requests > 0
+                || admin_listen.is_some()
+                || has_sidecars
+                || acme;
             if cow {
                 anyhow::ensure!(
                     config.worker_script.is_some(),

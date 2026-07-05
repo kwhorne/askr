@@ -30,7 +30,7 @@ RUN composer dump-autoload --optimize --no-dev
 # RUN npm run build
 
 # ---- 3. Askr runtime ----
-FROM ghcr.io/kwhorne/askr:0.6 AS runtime
+FROM ghcr.io/kwhorne/askr:0.7 AS runtime
 COPY --from=deps --chown=askr /app /var/www/app
 # COPY --from=assets --chown=askr /app/public/build /var/www/app/public/build
 COPY --chown=askr askr.toml /etc/askr/askr.toml
