@@ -34,6 +34,8 @@ pub struct FileConfig {
     pub broadcast: BroadcastSection,
     #[serde(default)]
     pub reload: ReloadSection,
+    #[serde(default)]
+    pub record: RecordSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +142,13 @@ pub struct ReloadSection {
     /// Canary reload: roll one worker and health-check it before the rest.
     #[serde(default)]
     pub canary: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordSection {
+    /// Record failing (5xx) requests into this directory for `askr replay`.
+    pub dir: Option<PathBuf>,
 }
 
 impl Default for ServerSection {
@@ -295,6 +304,7 @@ impl FileConfig {
                 tls_key: self.tls.key,
                 tls_self_signed,
                 max_body_size,
+                record_dir: self.record.dir,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

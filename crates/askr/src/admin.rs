@@ -27,6 +27,7 @@ use tokio::net::TcpListener;
 pub struct Info {
     pub server_listen: SocketAddr,
     pub mode: &'static str,
+    pub record_dir: Option<std::path::PathBuf>,
 }
 
 /// Start the admin server on its own thread. Never blocks the caller.
@@ -77,6 +78,7 @@ async fn handle(
         (&Method::GET, "/") => html(DASHBOARD),
         (&Method::GET, "/api/status") => json(status_json(&info)),
         (&Method::GET, "/api/metrics") => json(metrics_json()),
+        (&Method::GET, "/api/errors") => json(errors_json(&info)),
         (&Method::POST, "/api/reload") => {
             crate::trigger_reload();
             json(r#"{"ok":true,"action":"reload"}"#.to_string())
@@ -172,6 +174,19 @@ fn metrics_json() -> String {
     )
 }
 
+fn errors_json(info: &Info) -> String {
+    let Some(dir) = &info.record_dir else {
+        return r#"{"enabled":false,"errors":[]}"#.to_string();
+    };
+    let items = crate::record::list(dir)
+        .into_iter()
+        .take(20)
+        .map(|(id, status)| format!(r#"{{"id":"{id}","status":{status}}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"enabled":true,"errors":[{items}]}}"#)
+}
+
 fn json(body: String) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::OK)
@@ -227,6 +242,9 @@ const DASHBOARD: &str = r#"<!DOCTYPE html>
     <tr><td>Latency</td><td id="hist" style="font:12px/1.4 ui-monospace,monospace">—</td></tr>
   </table>
 
+  <h2 style="font-size:1.1rem;margin-top:2rem">Recorded failures <small style="color:#888;font-weight:400">— <code>askr replay &lt;id&gt;.json</code></small></h2>
+  <div id="errors" style="font:13px/1.6 ui-monospace,monospace;color:#888">—</div>
+
   <button onclick="reload()">Graceful reload</button>
   <span id="msg"></span>
 <script>
@@ -267,6 +285,11 @@ async function refresh() {
     hist.innerHTML = b.counts.map((c,i) =>
       labels[i].padStart(8) + ' ' + '█'.repeat(Math.round(c/max*24)) + ' ' + c
     ).filter((_,i)=> b.counts[i]>0).join('<br>') || '(no traffic yet)';
+
+    const er = await (await fetch('/api/errors')).json();
+    if (!er.enabled) { errors.textContent = 'disabled (start with --record-errors <dir>)'; }
+    else if (!er.errors.length) { errors.textContent = 'none recorded 🎉'; }
+    else { errors.innerHTML = er.errors.map(e => 'HTTP ' + e.status + '  ' + e.id + '.json').join('<br>'); }
   } catch (e) {}
 }
 async function reload() {

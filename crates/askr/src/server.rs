@@ -66,6 +66,8 @@ pub struct Config {
     pub tls_key: Option<PathBuf>,
     pub tls_self_signed: bool,
     pub max_body_size: usize,
+    /// Directory to record failing (5xx) requests into, for `askr replay` (#5).
+    pub record_dir: Option<PathBuf>,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -373,6 +375,9 @@ async fn handle(
         port,
     );
 
+    // Keep a copy of the request iff we may need to record it on a 5xx (#5).
+    let record_copy = config.record_dir.as_ref().map(|_| request.clone());
+
     // Time PHP specifically (vs total) — the in-process split FPM can't see.
     // Track the in-flight (busy) gauge so the CoW autoscaler can size the pool.
     let php_start = Instant::now();
@@ -409,6 +414,13 @@ async fn handle(
     if coalesce_leader {
         if let Some(key) = &cache_key {
             rcache::end(key);
+        }
+    }
+
+    // Record a failing request so it can be replayed later (#5).
+    if response.status().as_u16() >= 500 {
+        if let (Some(dir), Some(req)) = (&config.record_dir, &record_copy) {
+            crate::record::record_failure(dir, req, response.status().as_u16());
         }
     }
 

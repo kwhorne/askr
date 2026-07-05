@@ -13,6 +13,7 @@ mod doctor;
 mod metrics;
 mod php;
 mod rcache;
+mod record;
 mod server;
 mod tls;
 mod worker;
@@ -166,6 +167,21 @@ enum Command {
         /// --worker-script; the admin plane is unavailable in this mode.
         #[arg(long)]
         cow: bool,
+
+        /// Record failing (5xx) requests into this directory so they can be
+        /// replayed with `askr replay <id.json>`. Captures request bodies —
+        /// treat the directory as sensitive.
+        #[arg(long)]
+        record_errors: Option<PathBuf>,
+    },
+
+    /// Replay a recorded failing request against a fresh interpreter (#5).
+    Replay {
+        /// Path to a recorded `<id>.json` (see `serve --record-errors`).
+        file: PathBuf,
+        /// Extra php.ini lines (e.g. to load opcache).
+        #[arg(long)]
+        ini: Option<String>,
     },
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
@@ -218,6 +234,7 @@ fn main() -> anyhow::Result<()> {
             broadcast,
             canary,
             cow,
+            record_errors,
         } => {
             // The config file, when given, is the single source of truth.
             #[allow(clippy::type_complexity)]
@@ -294,6 +311,7 @@ fn main() -> anyhow::Result<()> {
                         tls_key,
                         tls_self_signed,
                         max_body_size,
+                        record_dir: record_errors,
                     };
                     let w = workers.unwrap_or_else(default_workers).max(1);
                     let wmin = workers_min.unwrap_or(w).max(1);
@@ -372,6 +390,25 @@ fn main() -> anyhow::Result<()> {
             } else {
                 std::process::exit(1);
             }
+        }
+        Command::Replay { file, ini } => {
+            if let Some(ini) = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()) {
+                std::env::set_var("ASKR_PHP_INI", ini);
+            }
+            let req = record::load(&file)?;
+            eprintln!("↻ replaying {} → {}", file.display(), req.method);
+            let mut php =
+                askr_php::Interpreter::new().map_err(|e| anyhow::anyhow!("php init: {e}"))?;
+            let resp = php
+                .handle(&req)
+                .map_err(|e| anyhow::anyhow!("replay failed: {e}"))?;
+            println!("HTTP {}", resp.status);
+            for (k, v) in &resp.headers {
+                println!("{k}: {v}");
+            }
+            println!();
+            print!("{}", String::from_utf8_lossy(&resp.body));
+            Ok(())
         }
         Command::ConfigCheck { file } => {
             let raw = config::FileConfig::load(&file)?;
@@ -554,6 +591,7 @@ fn supervise(
             } else {
                 "per-request"
             },
+            record_dir: config.record_dir.clone(),
         };
         admin::spawn(addr, info);
     }
