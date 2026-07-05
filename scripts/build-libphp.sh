@@ -10,13 +10,18 @@
 #   PROFILE=laravel            everything a real Laravel 12/13 app needs.
 #
 # Platforms:
-#   Linux (production target): uses system dev libraries via pkg-config
-#     (openssl, libxml2, oniguruma, sqlite). Install them first:
+#   Linux (production target): uses system dev libraries via pkg-config. The
+#     laravel profile also builds intl/gd/curl/zip/pdo_mysql/pdo_pgsql so heavier
+#     apps (e.g. Filament) run. Install the dev libs first:
 #       sudo apt-get install -y build-essential pkg-config \
-#         libssl-dev libxml2-dev libonig-dev libsqlite3-dev
+#         libssl-dev libxml2-dev libonig-dev libsqlite3-dev \
+#         libicu-dev libcurl4-openssl-dev libpng-dev libjpeg-dev \
+#         libfreetype-dev libwebp-dev libzip-dev zlib1g-dev libpq-dev
 #     Produces  vendor/php-build/install/lib/libphp.so
 #   macOS (dev): builds oniguruma/OpenSSL/libxml2 from source as static libs
-#     (no brew / pkg-config needed). Produces …/libphp.dylib
+#     (no brew / pkg-config needed). Produces …/libphp.dylib. The extra Linux
+#     extensions (intl/gd/curl/…) are omitted here — the dev build is for the
+#     test suite; Filament-class apps run on the Linux release/Docker image.
 #
 #   PROFILE=laravel ./scripts/build-libphp.sh
 set -euo pipefail
@@ -90,15 +95,31 @@ if [ "$OS" = "Darwin" ] && [ "$PROFILE" = "laravel" ]; then
 elif [ "$PROFILE" = "laravel" ]; then
     # Linux: rely on system dev libs via pkg-config. Verify they're present.
     command -v pkg-config >/dev/null || { echo "ERROR: pkg-config not found. Install: sudo apt-get install -y pkg-config"; exit 1; }
+    APT_HINT="sudo apt-get install -y build-essential pkg-config \\
+      libssl-dev libxml2-dev libonig-dev libsqlite3-dev \\
+      libicu-dev libcurl4-openssl-dev libpng-dev libjpeg-dev \\
+      libfreetype-dev libwebp-dev libzip-dev zlib1g-dev libpq-dev"
     missing=""
-    for pc in openssl libxml-2.0 oniguruma sqlite3; do
+    for pc in openssl libxml-2.0 oniguruma sqlite3 icu-uc libcurl libpng freetype2 libwebp libzip; do
         pkg-config --exists "$pc" || missing="$missing $pc"
     done
     if [ -n "$missing" ]; then
         echo "ERROR: missing dev libraries for:$missing"
-        echo "Install: sudo apt-get install -y build-essential pkg-config libssl-dev libxml2-dev libonig-dev libsqlite3-dev"
+        echo "Install: $APT_HINT"
         exit 1
     fi
+    # Heavier extensions for full-featured apps (Filament needs intl; gd for
+    # images; curl for the HTTP client; pdo_mysql/pgsql for real databases).
+    # mysqlnd is bundled (no external lib).
+    DEP_FLAGS+=(
+        --enable-intl
+        --with-curl
+        --enable-gd --with-jpeg --with-freetype --with-webp
+        --enable-exif
+        --with-zip
+        --with-zlib
+        --with-pdo-mysql=mysqlnd --with-pdo-pgsql
+    )
 fi
 
 # --- PHP ------------------------------------------------------------------

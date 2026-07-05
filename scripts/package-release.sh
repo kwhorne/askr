@@ -81,7 +81,9 @@ Contents:
 Runtime dependencies (Linux): the embedded PHP links a few system libraries.
 On Ubuntu they're normally already present; if not:
 
-  sudo apt-get install -y libssl3 libxml2 libonig5 libsqlite3-0
+  sudo apt-get install -y libssl3 libxml2 libonig5 libsqlite3-0 \\
+    libicu74 libcurl4 libpng16-16 libjpeg-turbo8 libfreetype6 libwebp7 \\
+    libzip4 libpq5 zlib1g
 
 Quick start:
 

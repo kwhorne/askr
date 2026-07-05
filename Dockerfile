@@ -37,10 +37,14 @@ LABEL org.opencontainers.image.source="https://github.com/kwhorne/askr"
 LABEL org.opencontainers.image.description="Askr — the whole PHP application server (embedded PHP, no FPM/nginx) in one container."
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Exactly the four runtime deps from the release (openssl/libxml2/oniguruma/
-# sqlite), plus curl for the healthcheck and CA certs for outbound TLS.
+# Runtime libraries the laravel-profile libphp links (openssl/libxml2/oniguruma/
+# sqlite + icu/curl/gd stack/zip/pgsql), plus curl for the healthcheck and CA
+# certs for outbound TLS.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libssl3 libxml2 libonig5 libsqlite3-0 ca-certificates curl \
+      libssl3 libxml2 libonig5 libsqlite3-0 \
+      libicu74 libcurl4 libpng16-16 libjpeg-turbo8 libfreetype6 libwebp7 \
+      libzip4 libpq5 zlib1g \
+      ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /opt/askr /opt/askr

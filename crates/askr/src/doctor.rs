@@ -24,6 +24,11 @@ const REQUIRED: &[&str] = &[
     "phar",
 ];
 
+/// Extensions many real apps need (Filament needs intl; gd for images; curl for
+/// the HTTP client; pdo_mysql/zip are common). Present in the Linux release/
+/// Docker image; the macOS dev build omits them. Not fatal.
+const RECOMMENDED: &[&str] = &["intl", "curl", "gd", "pdo_mysql", "zip"];
+
 struct PhpInfo {
     version: String,
     zts: bool,
@@ -53,6 +58,10 @@ pub fn run(ini: Option<String>) -> bool {
             for ext in REQUIRED {
                 let present = info.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext));
                 check(&mut ok, present, &format!("ext-{ext}"));
+            }
+            for ext in RECOMMENDED {
+                let present = info.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext));
+                mark(present, &format!("ext-{ext} (recommended)"));
             }
 
             let loaded = info.extensions.len();
