@@ -2,7 +2,7 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.3.2 — 2026-07-05
 
 - **io_uring groundwork** (Linux is where the runtime swap lands):
   - `askr doctor` now *probes* io_uring via `io_uring_setup(2)` instead of only
