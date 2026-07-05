@@ -911,7 +911,9 @@ async fn serve_static(
     let (start, end) = parse_range(headers, len);
     let partial =
         headers.contains_key(hyper::header::RANGE) && (start != 0 || end != len.saturating_sub(1));
-    let send_len = end + 1 - start;
+    // For an empty file end==0 and start==0, so end+1-start would be 1 — send 0.
+    // (Empty static assets are common: a Vite CSS-only entry emits an empty .js.)
+    let send_len = if len == 0 { 0 } else { end + 1 - start };
 
     let mut builder = Response::builder()
         .header(hyper::header::CONTENT_TYPE, mime_for(path))

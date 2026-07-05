@@ -2,6 +2,15 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.5.1 — 2026-07-05
+
+- **Fix: empty static files.** A 0-byte static asset was served with
+  `Content-Length: 1` and a truncated (empty) body, so the browser saw a broken
+  response — which breaks a `<script type="module">` load. This is common with a
+  Vite **CSS-only entry** (`resources/js/app.js` is empty, so its built `.js` is
+  0 bytes). Empty files are now served correctly (`Content-Length: 0`). Found
+  while running a real Livewire Flux app in a container.
+
 ## 0.5.0 — 2026-07-05
 
 - **Run any Laravel app, including Filament.** The laravel-profile `libphp` now
