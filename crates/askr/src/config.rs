@@ -121,6 +121,10 @@ pub struct QueueSection {
     pub workers: usize,
     /// Queue runner script (e.g. examples/askr-queue.php).
     pub script: Option<PathBuf>,
+    /// Shared-memory job queue slots (0 = off; 32 KB each). Enables askr_queue_*
+    /// and the Redis-free AskrQueue driver.
+    #[serde(default)]
+    pub slots: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -220,6 +224,7 @@ pub struct Resolved {
     pub admin_listen: Option<SocketAddr>,
     pub queue_workers: usize,
     pub queue_script: Option<PathBuf>,
+    pub queue_slots: usize,
     pub scheduler_script: Option<PathBuf>,
     pub sidecars: Vec<String>,
     pub cache_slots: usize,
@@ -355,6 +360,7 @@ impl FileConfig {
             admin_listen,
             queue_workers,
             queue_script: self.queue.script,
+            queue_slots: self.queue.slots,
             scheduler_script: self.scheduler.script,
             sidecars: self.sidecar.into_iter().map(|s| s.command).collect(),
             cache_slots: self.cache.slots,

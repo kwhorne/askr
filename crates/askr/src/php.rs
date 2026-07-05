@@ -56,6 +56,7 @@ impl Php {
                     }
                 };
                 crate::cache::register_bridge();
+                crate::squeue::register_bridge();
                 crate::broadcast::register_bridge();
                 tracing::info!(version = %php.php_version(), "embedded PHP ready (per-request)");
 
@@ -94,6 +95,7 @@ impl Php {
                     }
                 };
                 crate::cache::register_bridge();
+                crate::squeue::register_bridge();
                 crate::broadcast::register_bridge();
                 tracing::info!("embedded PHP ready (worker mode), running worker script");
 

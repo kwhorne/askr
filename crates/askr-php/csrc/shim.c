@@ -695,6 +695,109 @@ static PHP_FUNCTION(askr_cache_forget_tag) {
 }
 
 /* ------------------------------------------------------------------ */
+/* queue bridge (askr_queue_*)                                        */
+/* ------------------------------------------------------------------ */
+
+typedef long (*askr_queue_push_fn)(const char *q, size_t qlen, const char *payload, size_t plen, long delay);
+typedef int  (*askr_queue_pop_fn)(const char *q, size_t qlen, long visibility,
+                                  long *out_id, int *out_attempts, char **out_payload, size_t *out_len);
+typedef int  (*askr_queue_delete_fn)(long id);
+typedef int  (*askr_queue_release_fn)(long id, long delay);
+typedef long (*askr_queue_size_fn)(const char *q, size_t qlen);
+
+static askr_queue_push_fn    g_queue_push = NULL;
+static askr_queue_pop_fn     g_queue_pop = NULL;
+static askr_queue_delete_fn  g_queue_delete = NULL;
+static askr_queue_release_fn g_queue_release = NULL;
+static askr_queue_size_fn    g_queue_size = NULL;
+
+void askr_php_set_queue_bridge(askr_queue_push_fn push, askr_queue_pop_fn pop,
+                               askr_queue_delete_fn del, askr_queue_release_fn rel,
+                               askr_queue_size_fn size) {
+    g_queue_push = push;
+    g_queue_pop = pop;
+    g_queue_delete = del;
+    g_queue_release = rel;
+    g_queue_size = size;
+}
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_queue_push, 0, 0, 2)
+    ZEND_ARG_INFO(0, queue)
+    ZEND_ARG_INFO(0, payload)
+    ZEND_ARG_INFO(0, delay)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_queue_push) {
+    char *q, *payload; size_t qlen, plen; zend_long delay = 0;
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STRING(q, qlen)
+        Z_PARAM_STRING(payload, plen)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(delay)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG(g_queue_push ? g_queue_push(q, qlen, payload, plen, (long)delay) : 0);
+}
+
+/* array|null askr_queue_pop(string $queue, int $visibility = 60) */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_queue_pop, 0, 0, 1)
+    ZEND_ARG_INFO(0, queue)
+    ZEND_ARG_INFO(0, visibility)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_queue_pop) {
+    char *q; size_t qlen; zend_long visibility = 60;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STRING(q, qlen)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(visibility)
+    ZEND_PARSE_PARAMETERS_END();
+    long id = 0; int attempts = 0; char *payload = NULL; size_t plen = 0;
+    if (g_queue_pop && g_queue_pop(q, qlen, (long)visibility, &id, &attempts, &payload, &plen)) {
+        array_init(return_value);
+        add_assoc_long(return_value, "id", id);
+        add_assoc_long(return_value, "attempts", attempts);
+        add_assoc_stringl(return_value, "payload", payload ? payload : "", plen);
+        free(payload);
+    } else {
+        RETURN_NULL();
+    }
+}
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_queue_delete, 0, 0, 1)
+    ZEND_ARG_INFO(0, id)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_queue_delete) {
+    zend_long id;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(g_queue_delete ? g_queue_delete((long)id) : 0);
+}
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_queue_release, 0, 0, 1)
+    ZEND_ARG_INFO(0, id)
+    ZEND_ARG_INFO(0, delay)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_queue_release) {
+    zend_long id, delay = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(id)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(delay)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(g_queue_release ? g_queue_release((long)id, (long)delay) : 0);
+}
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_queue_size, 0, 0, 1)
+    ZEND_ARG_INFO(0, queue)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_queue_size) {
+    char *q; size_t qlen;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(q, qlen)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG(g_queue_size ? g_queue_size(q, qlen) : 0);
+}
+
+/* ------------------------------------------------------------------ */
 /* broadcast bridge (askr_broadcast)                                  */
 /* ------------------------------------------------------------------ */
 
@@ -760,6 +863,11 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_cache_increment, arginfo_askr_cache_increment)
     ZEND_FE(askr_cache_flush, arginfo_askr_cache_flush)
     ZEND_FE(askr_cache_forget_tag, arginfo_askr_cache_forget_tag)
+    ZEND_FE(askr_queue_push, arginfo_askr_queue_push)
+    ZEND_FE(askr_queue_pop, arginfo_askr_queue_pop)
+    ZEND_FE(askr_queue_delete, arginfo_askr_queue_delete)
+    ZEND_FE(askr_queue_release, arginfo_askr_queue_release)
+    ZEND_FE(askr_queue_size, arginfo_askr_queue_size)
     ZEND_FE(askr_broadcast, arginfo_askr_broadcast)
     ZEND_FE(askr_cow_ready, arginfo_askr_cow_ready)
     ZEND_FE_END

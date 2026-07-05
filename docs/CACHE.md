@@ -112,7 +112,7 @@ behind `Cache::add()` and `Cache::lock()`. The store implements Laravel's
 | atomic locks | `askr_cache_add` + `Cache::lock()` |
 | sessions | large region + `SESSION_STORE=askr` |
 | pub/sub | broadcast ring + Pusher WS (see [BROADCAST](BROADCAST.md)) |
-| queues | still the DB driver (fine for small/mid); or Redis |
+| queues | `askr_queue_*` + `AskrQueue` driver (shared-memory, delayed + retries) |
 
 ## Semantics & limits
 

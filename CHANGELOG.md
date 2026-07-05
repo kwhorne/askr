@@ -2,6 +2,20 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.6.1 — 2026-07-05
+
+- **Shared-memory job queue** — the last common Redis use. A fixed-slot job table
+  in shared memory (`--queue-slots N` / `[queue] slots`) backs new `askr_queue_*`
+  builtins: `push`(delayed), `pop`(reserve with a visibility timeout), `delete`
+  (ack), `release`(retry), `size`. Delayed jobs, attempt counting, per-queue
+  isolation, and reclaim of jobs whose reserving worker died. `examples/AskrQueue.php`
+  is a Laravel queue driver on top; the existing `--queue`/`--queue-script`
+  sidecar runs the workers. On a single box, Redis is now replaceable for cache,
+  counters, locks, sessions, pub/sub **and queues**.
+  - Verified: push/size, FIFO pop by availability, reserve (second pop skips the
+    reserved job), release→retry with incremented attempts, delayed jobs not
+    popped early, queue isolation. Unit-tested + exercised over HTTP.
+
 ## 0.6.0 — 2026-07-05
 
 - **Redis-free sessions, locks and bigger cache values.** The shared cache now

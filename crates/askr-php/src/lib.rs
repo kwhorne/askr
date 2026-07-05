@@ -401,6 +401,37 @@ pub mod cache_bridge {
     }
 }
 
+/// Queue bridge. `askr_queue_*` in PHP call these callbacks, backed by the
+/// shared-memory job queue. Raw FFI — the caller provides C-ABI trampolines.
+pub mod queue_bridge {
+    use std::ffi::{c_char, c_int, c_long};
+
+    pub type PushFn = extern "C" fn(*const c_char, usize, *const c_char, usize, c_long) -> c_long;
+    #[allow(clippy::type_complexity)]
+    pub type PopFn = extern "C" fn(
+        *const c_char,
+        usize,
+        c_long,
+        *mut c_long,
+        *mut c_int,
+        *mut *mut c_char,
+        *mut usize,
+    ) -> c_int;
+    pub type DeleteFn = extern "C" fn(c_long) -> c_int;
+    pub type ReleaseFn = extern "C" fn(c_long, c_long) -> c_int;
+    pub type SizeFn = extern "C" fn(*const c_char, usize) -> c_long;
+
+    extern "C" {
+        pub fn askr_php_set_queue_bridge(
+            push: PushFn,
+            pop: PopFn,
+            del: DeleteFn,
+            rel: ReleaseFn,
+            size: SizeFn,
+        );
+    }
+}
+
 /// Broadcast bridge (A #4). `askr_broadcast($channel, $payload)` in PHP calls
 /// this callback, which publishes into the shared broadcast ring.
 pub mod broadcast_bridge {

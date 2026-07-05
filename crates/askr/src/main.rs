@@ -17,6 +17,7 @@ mod pusher;
 mod rcache;
 mod record;
 mod server;
+mod squeue;
 mod tls;
 mod upload;
 mod worker;
@@ -137,6 +138,11 @@ enum Command {
         /// Queue runner script (e.g. examples/askr-queue.php).
         #[arg(long)]
         queue_script: Option<PathBuf>,
+
+        /// Enable the shared-memory job queue with this many slots (0 = off;
+        /// 32 KB each). Exposes askr_queue_* — Redis-free queues via AskrQueue.
+        #[arg(long, default_value = "0")]
+        queue_slots: usize,
 
         /// Run the scheduler with this runner script (e.g. examples/askr-scheduler.php).
         #[arg(long)]
@@ -282,6 +288,7 @@ fn main() -> anyhow::Result<()> {
             paranoid,
             queue,
             queue_script,
+            queue_slots,
             scheduler_script,
             sidecar,
             cache_slots,
@@ -317,6 +324,7 @@ fn main() -> anyhow::Result<()> {
                 CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
                 WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
                 WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
+                QUEUE_CAP.store(r.queue_slots, Ordering::SeqCst);
                 let sc = Sidecars {
                     queue: r.queue_workers,
                     queue_script: r.queue_script,
@@ -380,6 +388,7 @@ fn main() -> anyhow::Result<()> {
                 let wmax = workers_max.unwrap_or(w).max(wmin);
                 WORKERS_MIN.store(wmin, Ordering::SeqCst);
                 WORKERS_MAX.store(wmax, Ordering::SeqCst);
+                QUEUE_CAP.store(queue_slots, Ordering::SeqCst);
                 let sc = Sidecars {
                     queue: if queue_script.is_some() { queue } else { 0 },
                     queue_script,
@@ -409,6 +418,10 @@ fn main() -> anyhow::Result<()> {
             }
             if broadcast || config.pusher {
                 broadcast::init(); // the Pusher endpoints ride the broadcast ring
+            }
+            let queue_slots = QUEUE_CAP.load(Ordering::SeqCst);
+            if queue_slots > 0 {
+                squeue::init(queue_slots);
             }
 
             if paranoid {
@@ -599,6 +612,8 @@ static RESPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
 static WORKERS_MIN: AtomicUsize = AtomicUsize::new(1);
 static WORKERS_MAX: AtomicUsize = AtomicUsize::new(1);
 static DESIRED: AtomicUsize = AtomicUsize::new(0);
+// Shared-memory job queue slot count (mapped before fork if > 0).
+static QUEUE_CAP: AtomicUsize = AtomicUsize::new(0);
 // Canary reload: roll one worker, then health-check before rolling the rest.
 static CANARY_ENABLED: AtomicBool = AtomicBool::new(false);
 static CANARY_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -904,6 +919,7 @@ fn run_cow(
     // the fork in cow_ready is safe).
     let _interp = askr_php::Interpreter::new().map_err(|e| anyhow::anyhow!("php init: {e}"))?;
     crate::cache::register_bridge();
+    crate::squeue::register_bridge();
     crate::broadcast::register_bridge();
 
     let recycle_after = config.max_requests;

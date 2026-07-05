@@ -42,6 +42,7 @@ listen = "127.0.0.1:9000"
 # [queue]
 # workers = 2
 # script = "/opt/askr/examples/askr-queue.php"
+# slots = 4096   # shared-memory job queue (32 KB each) → Redis-free queues
 
 # Run the scheduler (built-in cron) in the same binary. Omit to disable.
 # [scheduler]
