@@ -44,7 +44,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /opt/askr /opt/askr
-RUN useradd -r -u 1000 -m -d /home/askr askr \
+# System user (auto UID). ubuntu:24.04 already reserves UID 1000 for `ubuntu`, so
+# we don't force one.
+RUN useradd -r -m -d /home/askr askr \
     && mkdir -p /etc/askr /var/www/app \
     && chown -R askr:askr /var/www/app
 
