@@ -71,6 +71,18 @@ enum Command {
         #[arg(long)]
         workers: Option<usize>,
 
+        /// CoW autoscaling floor: minimum web workers to keep alive.
+        /// Defaults to --workers.
+        #[arg(long)]
+        workers_min: Option<usize>,
+
+        /// CoW autoscaling ceiling: maximum web workers to scale up to under
+        /// load. When greater than --workers-min, the CoW template adds and
+        /// harvests workers based on live queue depth — the ~ms warm respawn
+        /// makes process autoscaling practical (impossible with ~300ms cold boot).
+        #[arg(long)]
+        workers_max: Option<usize>,
+
         /// Mark requests as HTTPS in $_SERVER (when behind a TLS terminator).
         #[arg(long)]
         https: bool,
@@ -187,6 +199,8 @@ fn main() -> anyhow::Result<()> {
             front,
             listen,
             workers,
+            workers_min,
+            workers_max,
             https,
             ini,
             worker_script,
@@ -224,6 +238,8 @@ fn main() -> anyhow::Result<()> {
                         std::env::set_var("ASKR_APP_BASE", base);
                     }
                     CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
+                    WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
+                    WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
                     let sc = Sidecars {
                         queue: r.queue_workers,
                         queue_script: r.queue_script,
@@ -280,6 +296,10 @@ fn main() -> anyhow::Result<()> {
                         max_body_size,
                     };
                     let w = workers.unwrap_or_else(default_workers).max(1);
+                    let wmin = workers_min.unwrap_or(w).max(1);
+                    let wmax = workers_max.unwrap_or(w).max(wmin);
+                    WORKERS_MIN.store(wmin, Ordering::SeqCst);
+                    WORKERS_MAX.store(wmax, Ordering::SeqCst);
                     let sc = Sidecars {
                         queue: if queue_script.is_some() { queue } else { 0 },
                         queue_script,
@@ -334,8 +354,10 @@ fn main() -> anyhow::Result<()> {
                 if admin_listen.is_some() || has_sidecars {
                     tracing::warn!("--cow: admin plane and sidecars are unavailable in CoW mode");
                 }
-                tracing::info!(listen = %config.listen, workers, "askr serving (CoW template)");
-                run_cow(listener, config, ini, workers)
+                let wmin = WORKERS_MIN.load(Ordering::SeqCst).clamp(1, MAX_WORKERS);
+                let wmax = WORKERS_MAX.load(Ordering::SeqCst).clamp(wmin, MAX_WORKERS);
+                tracing::info!(listen = %config.listen, workers_min = wmin, workers_max = wmax, "askr serving (CoW template)");
+                run_cow(listener, config, ini, wmin, wmax)
             } else if !need_supervisor {
                 tracing::info!(listen = %config.listen, workers = 1, "askr serving (single process)");
                 run_worker(listener, config, ini)
@@ -411,6 +433,10 @@ static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RELOAD_CURSOR: AtomicUsize = AtomicUsize::new(usize::MAX);
 static START_TIME: AtomicU64 = AtomicU64::new(0);
 static RESPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
+// CoW autoscaling bounds + the current desired web-worker count.
+static WORKERS_MIN: AtomicUsize = AtomicUsize::new(1);
+static WORKERS_MAX: AtomicUsize = AtomicUsize::new(1);
+static DESIRED: AtomicUsize = AtomicUsize::new(0);
 // Canary reload: roll one worker, then health-check before rolling the rest.
 static CANARY_ENABLED: AtomicBool = AtomicBool::new(false);
 static CANARY_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -670,7 +696,8 @@ use std::ffi::{c_int, c_void};
 struct CowCtx {
     config: Config,
     listener_fd: RawFd,
-    workers: usize,
+    min: usize,
+    max: usize,
     recycle_after: usize,
 }
 
@@ -681,7 +708,8 @@ fn run_cow(
     listener: std::net::TcpListener,
     config: Config,
     ini: Option<String>,
-    workers: usize,
+    min: usize,
+    max: usize,
 ) -> anyhow::Result<()> {
     let listener_fd = listener.as_raw_fd();
     std::mem::forget(listener); // keep the fd open for forked workers
@@ -703,13 +731,14 @@ fn run_cow(
     let ctx = Box::into_raw(Box::new(CowCtx {
         config,
         listener_fd,
-        workers,
+        min,
+        max,
         recycle_after,
     }));
     // SAFETY: ctx lives for the process; the shim calls cow_ready_trampoline.
     unsafe { askr_php::cow_bridge::askr_php_set_cow(cow_ready_trampoline, ctx as *mut c_void) };
 
-    tracing::info!(workers, "askr CoW: booting the app once in the template…");
+    tracing::info!(min, max, "askr CoW: booting the app once in the template…");
     // Runs the worker script: it boots the app and calls askr_cow_ready(), which
     // forks the workers. The template never returns here; a recycled child does.
     let _ = crate::php::Php::run_worker_current(&script);
@@ -721,13 +750,19 @@ fn run_cow(
 /// worker's `while (askr_handle_request())` loop serves the warm app.
 extern "C" fn cow_ready_trampoline(ctx: *mut c_void) -> c_int {
     let cc: &CowCtx = unsafe { &*(ctx as *const CowCtx) };
-    WORKER_COUNT.store(cc.workers, Ordering::SeqCst);
+    WORKER_COUNT.store(cc.max, Ordering::SeqCst);
+    DESIRED.store(cc.min, Ordering::SeqCst);
     START_TIME.store(now_secs(), Ordering::SeqCst);
+    let autoscale = cc.max > cc.min;
 
     let mut signals_installed = false;
+    let mut tick: u32 = 0;
+    let mut idle_ticks: u32 = 0;
     loop {
-        // Fork any missing worker slots (never while shutting down).
-        for (i, child) in CHILDREN.iter().enumerate().take(cc.workers) {
+        let desired = DESIRED.load(Ordering::SeqCst);
+        // Fork any missing worker slots below `desired` (never while shutting
+        // down). Slots at index >= desired are left empty — that's how we harvest.
+        for (i, child) in CHILDREN.iter().enumerate().take(desired) {
             if !SHUTDOWN.load(Ordering::SeqCst) && child.load(Ordering::SeqCst) == 0 {
                 match unsafe { libc::fork() } {
                     0 => {
@@ -760,26 +795,67 @@ extern "C" fn cow_ready_trampoline(ctx: *mut c_void) -> c_int {
                 );
             }
             signals_installed = true;
-            tracing::info!(workers = cc.workers, "askr CoW template supervising");
+            tracing::info!(
+                min = cc.min,
+                max = cc.max,
+                autoscale,
+                "askr CoW template supervising"
+            );
         }
-        // Reap and refork.
+        // Reap and (if the slot is still within `desired`) refork warm.
         let mut status: libc::c_int = 0;
         let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
         if pid > 0 {
-            for (i, c) in CHILDREN.iter().enumerate().take(cc.workers) {
+            for (i, c) in CHILDREN.iter().enumerate().take(cc.max) {
                 if c.load(Ordering::SeqCst) == pid {
                     c.store(0, Ordering::SeqCst);
                     if !SHUTDOWN.load(Ordering::SeqCst) {
                         RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
-                        tracing::info!(pid, worker = i, "cow worker exited; reforking (warm)");
+                        tracing::info!(pid, worker = i, "cow worker exited");
                     }
                 }
             }
         }
+
+        // Autoscale on the shared queue-depth signal (~ every second).
+        tick = tick.wrapping_add(1);
+        if autoscale && !SHUTDOWN.load(Ordering::SeqCst) && tick % 20 == 0 {
+            let alive = CHILDREN
+                .iter()
+                .take(cc.max)
+                .filter(|c| c.load(Ordering::SeqCst) > 0)
+                .count();
+            let busy = crate::metrics::Metrics::get()
+                .map(|m| m.inflight.load(Ordering::Relaxed))
+                .unwrap_or(0) as usize;
+            let d = DESIRED.load(Ordering::SeqCst);
+            if busy >= alive && d < cc.max {
+                // All workers busy and requests queueing — add one (warm, ~ms).
+                DESIRED.store(d + 1, Ordering::SeqCst);
+                idle_ticks = 0;
+                tracing::info!(busy, alive, desired = d + 1, "cow autoscale up");
+            } else if d > cc.min && busy + 1 < d {
+                // Sustained idle — harvest the top worker back down toward min.
+                idle_ticks += 1;
+                if idle_ticks >= 4 {
+                    let nd = d - 1;
+                    DESIRED.store(nd, Ordering::SeqCst);
+                    idle_ticks = 0;
+                    let pid = CHILDREN[nd].load(Ordering::SeqCst);
+                    if pid > 0 {
+                        unsafe { libc::kill(pid, libc::SIGTERM) };
+                    }
+                    tracing::info!(busy, alive, desired = nd, "cow autoscale down (harvest)");
+                }
+            } else {
+                idle_ticks = 0;
+            }
+        }
+
         if SHUTDOWN.load(Ordering::SeqCst)
             && CHILDREN
                 .iter()
-                .take(cc.workers)
+                .take(cc.max)
                 .all(|c| c.load(Ordering::SeqCst) == 0)
         {
             tracing::info!("askr CoW template exiting");

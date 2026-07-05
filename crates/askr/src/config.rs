@@ -49,6 +49,13 @@ pub struct ServerSection {
     /// Worker processes: a number, or "auto" (= CPU cores).
     #[serde(default = "default_workers")]
     pub workers: String,
+    /// CoW autoscaling floor (minimum web workers). Defaults to `workers`.
+    #[serde(default)]
+    pub workers_min: Option<usize>,
+    /// CoW autoscaling ceiling. When greater than `workers_min`, the CoW
+    /// template scales the pool on live queue depth. Defaults to `workers`.
+    #[serde(default)]
+    pub workers_max: Option<usize>,
     /// Recycle each worker after this many requests (0 = never).
     #[serde(default)]
     pub max_requests: usize,
@@ -142,6 +149,8 @@ impl Default for ServerSection {
             root: PathBuf::from("public"),
             front: default_front(),
             workers: default_workers(),
+            workers_min: None,
+            workers_max: None,
             max_requests: 0,
             max_body_size: default_body(),
             https: false,
@@ -163,6 +172,8 @@ fn default_body() -> String {
 pub struct Resolved {
     pub config: Config,
     pub workers: usize,
+    pub workers_min: usize,
+    pub workers_max: usize,
     pub ini: Option<String>,
     pub app_base: Option<PathBuf>,
     pub paranoid: bool,
@@ -286,6 +297,12 @@ impl FileConfig {
                 max_body_size,
             },
             workers,
+            workers_min: self.server.workers_min.unwrap_or(workers).max(1),
+            workers_max: self
+                .server
+                .workers_max
+                .unwrap_or(workers)
+                .max(self.server.workers_min.unwrap_or(workers).max(1)),
             ini: self.worker.ini,
             app_base: self.worker.app_base,
             paranoid: self.worker.paranoid,

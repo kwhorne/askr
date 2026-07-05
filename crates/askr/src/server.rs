@@ -374,8 +374,15 @@ async fn handle(
     );
 
     // Time PHP specifically (vs total) — the in-process split FPM can't see.
+    // Track the in-flight (busy) gauge so the CoW autoscaler can size the pool.
     let php_start = Instant::now();
+    if let Some(m) = crate::metrics::Metrics::get() {
+        m.inflight.fetch_add(1, Ordering::Relaxed);
+    }
     let php_result = rt.php.handle(request).await;
+    if let Some(m) = crate::metrics::Metrics::get() {
+        m.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
     let php_us = php_start.elapsed().as_micros() as u64;
 
     let response = match php_result {

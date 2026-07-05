@@ -30,6 +30,9 @@ pub struct Metrics {
     pub buckets: [AtomicU64; NBUCKETS],
     pub slowest_us: AtomicU64,
     pub errors: AtomicU64,
+    /// Requests currently executing in PHP across all workers — the queueing
+    /// signal the CoW autoscaler reads to add/harvest workers.
+    pub inflight: AtomicU64,
 }
 
 static METRICS_PTR: AtomicPtr<Metrics> = AtomicPtr::new(ptr::null_mut());
