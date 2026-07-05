@@ -47,6 +47,9 @@ const MAX_CONNECTIONS: usize = 8192;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a coalesced follower waits for the leader before running PHP itself.
+const COALESCE_WAIT: Duration = Duration::from_secs(5);
+
 fn full(bytes: Bytes) -> ResBody {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
@@ -291,11 +294,39 @@ async fn handle(
         && matches!(*req.method(), Method::GET | Method::HEAD)
         && !req.headers().contains_key(hyper::header::COOKIE);
     let cache_key = cacheable.then(|| response_cache_key(&req));
+    // #2 request coalescing: when a cacheable key misses, exactly one request
+    // (the leader) runs PHP; the rest wait for it to populate the cache.
+    let mut coalesce_leader = false;
     if let Some(key) = &cache_key {
         if let Some(c) = rcache::get(key) {
             let response = cached_response(c);
             finish(&rt, &response, t_start, 0);
             return Ok(response);
+        }
+        match rcache::begin(key) {
+            rcache::Lead::Leader => coalesce_leader = true,
+            rcache::Lead::Follower => {
+                // Wait (fail-open) for the leader to fill the cache.
+                let deadline = Instant::now() + COALESCE_WAIT;
+                let mut served = None;
+                while Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    if let Some(c) = rcache::peek(key) {
+                        served = Some(c);
+                        break;
+                    }
+                    if !rcache::is_inflight(key) {
+                        break; // leader finished without caching → run PHP ourselves
+                    }
+                }
+                if let Some(c) = served {
+                    rcache::note_coalesced();
+                    let response = cached_response(c);
+                    finish(&rt, &response, t_start, 0);
+                    return Ok(response);
+                }
+                // fall through: run PHP uncoalesced (leader didn't cache / timed out)
+            }
         }
     }
 
@@ -365,6 +396,14 @@ async fn handle(
             text(StatusCode::BAD_GATEWAY, &format!("askr: {e}"))
         }
     };
+
+    // Release any followers waiting on this key (the cache is now populated, or
+    // this response wasn't cacheable and they should run PHP themselves).
+    if coalesce_leader {
+        if let Some(key) = &cache_key {
+            rcache::end(key);
+        }
+    }
 
     finish(&rt, &response, t_start, php_us);
     Ok(response)

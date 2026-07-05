@@ -51,11 +51,40 @@ struct TagGen {
     gen: AtomicU64,
 }
 
+/// One in-flight (being-computed) key, for request coalescing (#2).
+#[repr(C)]
+struct Inflight {
+    key_hash: AtomicU64, // 0 = free
+    deadline: AtomicU64, // unix secs; a stale leader is reclaimed after this
+}
+
+const INFLIGHT_SLOTS: usize = 4096;
+/// Safety cap: a leader that crashes releases its slot after this many seconds.
+const COALESCE_TTL: u64 = 30;
+
+/// Hit/miss/coalesced counters — in shared memory so the master's admin thread
+/// sees the totals across all worker processes.
+#[repr(C)]
+struct Counters {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    coalesced: AtomicU64,
+}
+
 static RCACHE_PTR: AtomicPtr<Entry> = AtomicPtr::new(ptr::null_mut());
 static RCACHE_SLOTS: AtomicUsize = AtomicUsize::new(0);
 static TAGS_PTR: AtomicPtr<TagGen> = AtomicPtr::new(ptr::null_mut());
-static HITS: AtomicU64 = AtomicU64::new(0);
-static MISSES: AtomicU64 = AtomicU64::new(0);
+static INFLIGHT_PTR: AtomicPtr<Inflight> = AtomicPtr::new(ptr::null_mut());
+static COUNTERS_PTR: AtomicPtr<Counters> = AtomicPtr::new(ptr::null_mut());
+
+fn counters() -> Option<&'static Counters> {
+    let p = COUNTERS_PTR.load(Ordering::SeqCst);
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { &*p })
+    }
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -98,14 +127,23 @@ pub fn init(slots: usize) {
     let slots = slots.max(16);
     let esize = slots * std::mem::size_of::<Entry>();
     let tsize = TAG_SLOTS * std::mem::size_of::<TagGen>();
+    let isize_ = INFLIGHT_SLOTS * std::mem::size_of::<Inflight>();
     let ep = mmap_shared(esize);
     let tp = mmap_shared(tsize);
-    if ep == libc::MAP_FAILED || tp == libc::MAP_FAILED {
+    let ip = mmap_shared(isize_);
+    let cp = mmap_shared(std::mem::size_of::<Counters>());
+    if ep == libc::MAP_FAILED
+        || tp == libc::MAP_FAILED
+        || ip == libc::MAP_FAILED
+        || cp == libc::MAP_FAILED
+    {
         tracing::warn!("response cache: mmap failed; disabled");
         return;
     }
     RCACHE_SLOTS.store(slots, Ordering::SeqCst);
     TAGS_PTR.store(tp as *mut TagGen, Ordering::SeqCst);
+    INFLIGHT_PTR.store(ip as *mut Inflight, Ordering::SeqCst);
+    COUNTERS_PTR.store(cp as *mut Counters, Ordering::SeqCst);
     RCACHE_PTR.store(ep as *mut Entry, Ordering::SeqCst);
     tracing::info!(
         slots,
@@ -127,9 +165,90 @@ fn base() -> Option<(*mut Entry, usize)> {
     }
 }
 
-/// Hit/miss counters for the admin dashboard.
-pub fn stats() -> (u64, u64) {
-    (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed))
+/// Hit / miss / coalesced counters for the admin dashboard.
+pub fn stats() -> (u64, u64, u64) {
+    match counters() {
+        Some(c) => (
+            c.hits.load(Ordering::Relaxed),
+            c.misses.load(Ordering::Relaxed),
+            c.coalesced.load(Ordering::Relaxed),
+        ),
+        None => (0, 0, 0),
+    }
+}
+
+// --- request coalescing (singleflight, #2) --------------------------------
+
+/// The outcome of claiming a key for computation.
+pub enum Lead {
+    /// This caller should run PHP and (if cacheable) populate the cache.
+    Leader,
+    /// Another caller is already computing this key; wait for the result.
+    Follower,
+}
+
+/// Claim a key for computation. All-but-one concurrent callers for the same key
+/// become `Follower`s. Fail-open: on a hash collision or disabled cache we
+/// return `Leader`, so at worst coalescing just doesn't apply.
+pub fn begin(key: &[u8]) -> Lead {
+    let p = INFLIGHT_PTR.load(Ordering::SeqCst);
+    if p.is_null() {
+        return Lead::Leader;
+    }
+    let h = hash_bytes(key);
+    let now = now_secs();
+    // Single primary slot per key hash, so the herd converges on one leader.
+    let s = unsafe { &*p.add((h as usize) % INFLIGHT_SLOTS) };
+    let kh = s.key_hash.load(Ordering::Acquire);
+    if kh == h && s.deadline.load(Ordering::Acquire) > now {
+        return Lead::Follower;
+    }
+    if kh == 0 || s.deadline.load(Ordering::Acquire) <= now {
+        if s.key_hash
+            .compare_exchange(kh, h, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            s.deadline.store(now + COALESCE_TTL, Ordering::Release);
+            return Lead::Leader;
+        }
+        // Lost the race — someone else claimed it.
+        if s.key_hash.load(Ordering::Acquire) == h {
+            return Lead::Follower;
+        }
+    }
+    Lead::Leader // slot busy with a different key (collision) → don't coalesce
+}
+
+/// Is a key still being computed by a leader?
+pub fn is_inflight(key: &[u8]) -> bool {
+    let p = INFLIGHT_PTR.load(Ordering::SeqCst);
+    if p.is_null() {
+        return false;
+    }
+    let h = hash_bytes(key);
+    let s = unsafe { &*p.add((h as usize) % INFLIGHT_SLOTS) };
+    s.key_hash.load(Ordering::Acquire) == h && s.deadline.load(Ordering::Acquire) > now_secs()
+}
+
+/// Release a key a leader finished computing, waking any followers.
+pub fn end(key: &[u8]) {
+    let p = INFLIGHT_PTR.load(Ordering::SeqCst);
+    if p.is_null() {
+        return;
+    }
+    let h = hash_bytes(key);
+    let s = unsafe { &*p.add((h as usize) % INFLIGHT_SLOTS) };
+    if s.key_hash.load(Ordering::Acquire) == h {
+        s.deadline.store(0, Ordering::Release);
+        s.key_hash.store(0, Ordering::Release);
+    }
+}
+
+/// Count a request that was served by waiting on a coalesced leader.
+pub fn note_coalesced() {
+    if let Some(c) = counters() {
+        c.coalesced.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 // --- tag generations ------------------------------------------------------
@@ -219,8 +338,22 @@ pub struct Cached {
     pub body: Vec<u8>,
 }
 
-/// Look up a cached response. Returns None on miss/expired/tag-invalidated.
+/// Look up a cached response and record a hit/miss. Use [`peek`] for the
+/// coalescing poll loop so repeated polls don't inflate the miss counter.
 pub fn get(key: &[u8]) -> Option<Cached> {
+    let hit = peek(key);
+    if let Some(c) = counters() {
+        if hit.is_some() {
+            c.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            c.misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    hit
+}
+
+/// Look up a cached response without touching the hit/miss counters.
+pub fn peek(key: &[u8]) -> Option<Cached> {
     let (p, slots) = base()?;
     let h = hash_bytes(key);
     let now = now_secs();
@@ -270,11 +403,6 @@ pub fn get(key: &[u8]) -> Option<Cached> {
             });
             break;
         }
-    }
-    if hit.is_some() {
-        HITS.fetch_add(1, Ordering::Relaxed);
-    } else {
-        MISSES.fetch_add(1, Ordering::Relaxed);
     }
     hit
 }
