@@ -21,6 +21,7 @@ mod sandbox;
 mod server;
 mod squeue;
 mod tls;
+mod upgrade;
 mod upload;
 mod worker;
 
@@ -304,6 +305,19 @@ enum Command {
     ConfigCheck {
         /// Path to askr.toml.
         file: PathBuf,
+    },
+
+    /// Update Askr to the latest release in place (self-upgrade).
+    Upgrade {
+        /// Only report whether a newer release is available; don't install.
+        #[arg(long)]
+        check: bool,
+        /// Install a specific version instead of the latest (e.g. 0.8.0) — also for rollback.
+        #[arg(long)]
+        version: Option<String>,
+        /// Restart the service afterwards (`systemctl restart askr`).
+        #[arg(long)]
+        restart: bool,
     },
 }
 
@@ -656,6 +670,15 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Upgrade {
+            check,
+            version,
+            restart,
+        } => upgrade::run(upgrade::Options {
+            check,
+            version,
+            restart,
+        }),
     }
 }
 

@@ -13,8 +13,8 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:0.8        # latest 0.4.x
-ghcr.io/kwhorne/askr:0.8.2      # exact
+ghcr.io/kwhorne/askr:0.8        # latest 0.8.x
+ghcr.io/kwhorne/askr:0.8.1      # exact
 ghcr.io/kwhorne/askr:latest
 ```
 

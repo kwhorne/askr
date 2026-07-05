@@ -5,8 +5,8 @@ askr <command> [options]
 ```
 
 Commands: [`serve`](#askr-serve), [`test`](#askr-test), [`replay`](#askr-replay),
-[`doctor`](#askr-doctor), [`config-check`](#askr-config-check). Run
-`askr <command> --help` for the built-in help.
+[`doctor`](#askr-doctor), [`config-check`](#askr-config-check),
+[`upgrade`](#askr-upgrade). Run `askr <command> --help` for the built-in help.
 
 Global: `-V`/`--version`, `-h`/`--help`. Logging verbosity is `RUST_LOG` (e.g.
 `RUST_LOG=askr=debug`); default `askr=info`.
@@ -133,3 +133,27 @@ critical failure.
 
 `askr config-check askr.toml` — validate a config file and print the resolved
 settings without starting the server.
+
+## `askr upgrade`
+
+Self-update the release install in place. Downloads the matching Linux tarball
+from GitHub, verifies its `sha256`, and swaps the whole prefix (binary + bundled
+libphp) atomically — the previous version is kept at `<prefix>/../askr.old` for
+rollback. Does **not** restart the running server unless you pass `--restart`.
+
+```bash
+askr upgrade --check              # is a newer release available?
+sudo askr upgrade                 # install the latest (then restart manually)
+sudo askr upgrade --restart       # install + systemctl restart askr
+sudo askr upgrade --version 0.8.0 # pin a version (also to roll back)
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--check` | Report whether a newer release exists; install nothing. |
+| `--version <X.Y.Z>` | Install a specific version instead of the latest (rollback). |
+| `--restart` | Run `systemctl restart askr` after a successful swap. |
+
+Needs write access to the install directory (run with `sudo` for `/opt/askr`).
+Refuses to run **inside a container** — upgrade those by pulling a new
+`ghcr.io/kwhorne/askr` tag. Linux release only; elsewhere build from source.

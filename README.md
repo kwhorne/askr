@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.8.0</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.8.1</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.8.0; ARCH=$(uname -m)
+VER=v0.8.1; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -77,7 +77,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Hardening / sandbox](docs/SANDBOX.md) — seccomp + Landlock (`--sandbox`)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.8.0)
+## What works today (0.8.1)
 
 - Embedded PHP (**non-ZTS**) running real Laravel 12/13 — no FastCGI, no FPM
 - **Full extension set** (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -108,7 +108,7 @@ Everything lives in [`docs/`](docs/README.md):
 - Typed **`askr.toml`** config + `config-check`
 - Built-in **admin dashboard + API** (status, graceful reload, live metrics)
 - **In-process metrics**: PHP-vs-I/O time split, latency histogram, per-worker RSS
-- `askr doctor` pre-flight checks
+- `askr doctor` pre-flight checks, and **`askr upgrade`** (verified self-update: sha256 + atomic swap)
 - **Hardening** (`--sandbox`, Linux): seccomp no-exec + Landlock write-restriction
 - Memory-safe: all `unsafe` confined to the PHP FFI boundary
 

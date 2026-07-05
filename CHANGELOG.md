@@ -2,6 +2,20 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.8.1 — 2026-07-05
+
+- **`askr upgrade`** — self-update the release install in place. Resolves the
+  latest GitHub release (or `--version X.Y.Z` to pin / roll back), downloads the
+  matching Linux tarball, verifies its `sha256`, and swaps the whole prefix
+  (binary + bundled libphp) atomically — the previous version is kept at
+  `<prefix>/../askr.old`. `--check` for a dry-run; `--restart` runs `systemctl
+  restart askr` after (default just prints the hint). Refuses inside containers
+  (pull a new image tag) and when the prefix isn't writable (use sudo). Zero new
+  dependencies (curl + sha2 + tar). Verified end-to-end on Linux. See
+  docs/CLI.md#askr-upgrade.
+- Docs: `--acme`-based TLS in the Ubuntu guide (was certbot), `/var/lib/askr` in
+  the hardened unit's `ReadWritePaths`, and an "Upgrading Askr itself" section.
+
 ## 0.8.0 — 2026-07-05
 
 - **Hardening / sandbox (Linux)** — `--sandbox` shrinks the blast radius of a

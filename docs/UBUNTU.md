@@ -36,7 +36,7 @@ Download the tarball for your architecture from the
 
 ```bash
 cd /tmp
-VER=v0.8.0
+VER=v0.8.1
 ARCH=$(uname -m)            # x86_64 or aarch64
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz
@@ -137,26 +137,26 @@ Validate it:
 
 ## 5. TLS certificate
 
-Askr terminates TLS itself. Get a certificate with Let's Encrypt using the
-**webroot** method — Askr serves the ACME challenge files as static files from
-`public/`, so you don't need to stop it:
+Askr terminates TLS itself and can obtain **and renew** a Let's Encrypt
+certificate on its own — no certbot, no proxy. Add the ACME flags to `ExecStart`
+(the master answers HTTP-01 challenges on port 80 before forking; a renewal
+thread rolls workers when the cert nears expiry). See [Auto-TLS](AUTOTLS.md):
 
-```bash
-sudo apt-get install -y certbot
-sudo certbot certonly --webroot -w /var/www/app/public \
-  -d example.com -d www.example.com \
-  --deploy-hook "systemctl reload askr"
-sudo ln -sf /etc/letsencrypt/live/example.com/fullchain.pem /etc/askr/tls/fullchain.pem
-sudo ln -sf /etc/letsencrypt/live/example.com/privkey.pem  /etc/askr/tls/privkey.pem
-sudo chown -R askr:askr /etc/askr/tls
+```
+ExecStart=/opt/askr/askr serve --config /etc/askr/askr.toml \
+  --acme --acme-domain example.com --acme-email you@example.com \
+  --acme-http 0.0.0.0:80
 ```
 
-The `--deploy-hook` reloads Askr on renewal so it picks up the new cert (a reload
-re-forks workers, which reload the cert files). For local testing use
-`--tls-self-signed` instead of `[tls]`.
+Bind `--listen` to the HTTPS port (`0.0.0.0:443`) in `askr.toml`, and grant the
+service the low-port capability (see the unit below). For local testing use
+`--tls-self-signed`.
 
-*Behind a load balancer that terminates TLS?* Drop `[tls]`, set `https = true`
-under `[server]`, and listen on a plain port (e.g. `0.0.0.0:8080`).
+*Prefer to manage certs yourself?* Point `[tls] cert`/`key` at your PEM files and
+reload Askr (`systemctl reload askr`) after each renewal.
+
+*Behind a load balancer that terminates TLS?* Drop TLS entirely, set
+`https = true` under `[server]`, and listen on a plain port (e.g. `0.0.0.0:8080`).
 
 ## 6. systemd service (hardened)
 
@@ -191,7 +191,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/www/app/storage /var/www/app/bootstrap/cache
+ReadWritePaths=/var/www/app/storage /var/www/app/bootstrap/cache /var/lib/askr
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
@@ -251,7 +251,20 @@ With `[reload] canary = true`, a broken deploy takes down **one** worker instead
 of the whole fleet, and the reload aborts — check `journalctl -u askr` for
 `canary UNHEALTHY`. Fix and reload again.
 
-### Health checks & metrics
+### Upgrading Askr itself
+
+Askr can update its own release in place — it downloads the matching Linux
+tarball, verifies the `sha256`, and swaps `/opt/askr` atomically (keeping the old
+version at `/opt/askr/../askr.old` for rollback):
+
+```bash
+sudo /opt/askr/askr upgrade --check      # is a newer release out?
+sudo /opt/askr/askr upgrade --restart    # install it + restart the service
+```
+
+Without `--restart` it only swaps the files; the running server keeps the old
+libphp until you `sudo systemctl restart askr`. Pin or roll back with
+`--version X.Y.Z`. See [CLI](CLI.md#askr-upgrade).
 
 ```bash
 curl -s http://127.0.0.1:9000/api/status     # workers alive, RSS, uptime
