@@ -741,11 +741,14 @@ int askr_php_run_script(const char *script) {
         rc = 2;
     } zend_end_try();
 
+    /* exit()/die() unwind via a bailout (rc == 2) with the real code in
+     * EG(exit_status): exit(0) => 0, exit(1) => 1, a fatal => 255. So the exit
+     * status is authoritative; rc only matters when the script never ran. */
     int exit_status = EG(exit_status);
     g_script_mode = 0;
     php_request_shutdown((void *)0);
 
-    return exit_status ? exit_status : rc;
+    return rc < 0 ? rc : exit_status;
 }
 
 /* ------------------------------------------------------------------ */

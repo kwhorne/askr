@@ -182,6 +182,29 @@ enum Command {
         pusher: bool,
     },
 
+    /// Run tests by forking a fresh, warm process per test file (#5-style CoW).
+    /// Boots the interpreter once (opcache warm, shared); each file runs in its
+    /// own process for perfect isolation, in parallel. Point --runner at
+    /// examples/askr-test.php for PHPUnit/Pest, or omit it to run files directly.
+    Test {
+        /// Test files or directories (directories are scanned for *Test.php).
+        /// Defaults to ./tests.
+        paths: Vec<PathBuf>,
+        /// Application base (exported as $ASKR_APP_BASE). Defaults to cwd.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Runner script invoked per file with $ASKR_TEST_FILE set (e.g.
+        /// examples/askr-test.php). Omit to execute each file directly.
+        #[arg(long)]
+        runner: Option<PathBuf>,
+        /// Max test files to run concurrently. Defaults to CPU cores.
+        #[arg(long)]
+        parallel: Option<usize>,
+        /// Extra php.ini lines (e.g. to load opcache — recommended).
+        #[arg(long)]
+        ini: Option<String>,
+    },
+
     /// Replay a recorded failing request against a fresh interpreter (#5).
     Replay {
         /// Path to a recorded `<id>.json` (see `serve --record-errors`).
@@ -400,6 +423,13 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::Test {
+            paths,
+            root,
+            runner,
+            parallel,
+            ini,
+        } => run_test(paths, root, runner, parallel, ini),
         Command::Replay { file, ini } => {
             if let Some(ini) = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()) {
                 std::env::set_var("ASKR_PHP_INI", ini);
@@ -1038,6 +1068,138 @@ fn parse_size(s: &str) -> anyhow::Result<usize> {
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid size: {s:?} (use e.g. 16M, 512K, 2G)"))?;
     Ok(n * mult)
+}
+
+/// Fork-based test runner (#7). Boots the interpreter once (opcache warm and
+/// shared across children via CoW), then forks a fresh process per test file —
+/// perfect isolation (no state bleed between files) with parallelism, and no
+/// cold boot per file. Reuses the single-threaded-fork discipline from CoW.
+fn run_test(
+    paths: Vec<PathBuf>,
+    root: Option<PathBuf>,
+    runner: Option<PathBuf>,
+    parallel: Option<usize>,
+    ini: Option<String>,
+) -> anyhow::Result<()> {
+    let base = match root {
+        Some(r) => std::fs::canonicalize(&r)?,
+        None => std::env::current_dir()?,
+    };
+    std::env::set_var("ASKR_APP_BASE", &base);
+    if let Some(ini) = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()) {
+        std::env::set_var("ASKR_PHP_INI", ini);
+    }
+
+    // Collect test files: expand directories to their *Test.php.
+    let roots = if paths.is_empty() {
+        vec![base.join("tests")]
+    } else {
+        paths
+    };
+    let mut files = Vec::new();
+    for p in roots {
+        if p.is_dir() {
+            collect_tests(&p, &mut files);
+        } else if p.is_file() {
+            files.push(p);
+        }
+    }
+    files.sort();
+    anyhow::ensure!(!files.is_empty(), "no test files found");
+    if let Some(r) = &runner {
+        anyhow::ensure!(r.is_file(), "runner not found: {}", r.display());
+    }
+
+    let jobs = parallel.unwrap_or_else(default_workers).max(1);
+    tracing::info!(
+        files = files.len(),
+        parallel = jobs,
+        "askr test: booting interpreter once, forking a warm process per file"
+    );
+
+    // Boot the interpreter (template) and warm opcache with the autoloader so
+    // forked children inherit compiled bytecode via shared memory.
+    let mut php = askr_php::Interpreter::new().map_err(|e| anyhow::anyhow!("php init: {e}"))?;
+    let autoload = base.join("vendor/autoload.php");
+    if autoload.is_file() {
+        let _ = php.eval(&format!("require '{}';", autoload.display()));
+    }
+
+    let started = std::time::Instant::now();
+    let mut running: Vec<(i32, PathBuf)> = Vec::new();
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+
+    // Reap one child, printing its outcome.
+    let reap_one = |running: &mut Vec<(i32, PathBuf)>, passed: &mut usize, failed: &mut usize| {
+        let mut status: libc::c_int = 0;
+        let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if pid > 0 {
+            let code = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else {
+                1
+            };
+            if let Some(idx) = running.iter().position(|(p, _)| *p == pid) {
+                let (_, file) = running.remove(idx);
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
+                if code == 0 {
+                    *passed += 1;
+                    println!("  ✓ {name}");
+                } else {
+                    *failed += 1;
+                    println!("  ✗ {name} (exit {code})");
+                }
+            }
+        }
+    };
+
+    for file in &files {
+        if running.len() >= jobs {
+            reap_one(&mut running, &mut passed, &mut failed);
+        }
+        let script = runner.clone().unwrap_or_else(|| file.clone());
+        // SAFETY: single-threaded fork (no tokio here); the child runs one script
+        // against the inherited warm interpreter and exits.
+        match unsafe { libc::fork() } {
+            0 => {
+                std::env::set_var("ASKR_TEST_FILE", file);
+                let code = php.run_script(&script.to_string_lossy()).unwrap_or(1);
+                std::process::exit(code);
+            }
+            -1 => anyhow::bail!("fork failed: {}", std::io::Error::last_os_error()),
+            pid => running.push((pid, file.clone())),
+        }
+    }
+    while !running.is_empty() {
+        reap_one(&mut running, &mut passed, &mut failed);
+    }
+
+    let elapsed = started.elapsed();
+    println!(
+        "\n{} file(s): {passed} passed, {failed} failed in {:.2}s",
+        files.len(),
+        elapsed.as_secs_f64()
+    );
+    if failed > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Recursively collect `*Test.php` files under `dir`.
+fn collect_tests(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_tests(&p, out);
+        } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("Test.php")) {
+            out.push(p);
+        }
+    }
 }
 
 fn resolve_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
