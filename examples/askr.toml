@@ -70,6 +70,12 @@ listen = "127.0.0.1:9000"
 # [record]
 # dir = "/var/lib/askr/errors"
 
+# Supervised external commands, run alongside the workers (respawned if they
+# die). E.g. Inertia SSR — a node server Inertia talks to for server-side render.
+# Needs node in the app image + a built SSR bundle (npm run build with SSR).
+# [[sidecar]]
+# command = "node bootstrap/ssr/ssr.mjs"
+
 # Canary reload: roll one worker and health-check it before the rest.
 # [reload]
 # canary = true

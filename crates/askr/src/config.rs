@@ -38,6 +38,16 @@ pub struct FileConfig {
     pub record: RecordSection,
     #[serde(default)]
     pub pusher: PusherSection,
+    /// Arbitrary supervised external commands: `[[sidecar]] command = "…"`.
+    #[serde(default)]
+    pub sidecar: Vec<SidecarSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SidecarSpec {
+    /// The command to run (via `sh -c`), e.g. "node bootstrap/ssr/ssr.mjs".
+    pub command: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +217,7 @@ pub struct Resolved {
     pub queue_workers: usize,
     pub queue_script: Option<PathBuf>,
     pub scheduler_script: Option<PathBuf>,
+    pub sidecars: Vec<String>,
     pub cache_slots: usize,
     pub response_cache_slots: usize,
     pub broadcast: bool,
@@ -340,6 +351,7 @@ impl FileConfig {
             queue_workers,
             queue_script: self.queue.script,
             scheduler_script: self.scheduler.script,
+            sidecars: self.sidecar.into_iter().map(|s| s.command).collect(),
             cache_slots: self.cache.slots,
             response_cache_slots: self.cache.response_slots,
             broadcast: self.broadcast.enabled,

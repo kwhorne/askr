@@ -142,6 +142,12 @@ enum Command {
         #[arg(long)]
         scheduler_script: Option<PathBuf>,
 
+        /// Supervise an arbitrary external command alongside the workers
+        /// (repeatable). Run via `sh -c` in the app base; respawned if it dies.
+        /// E.g. `--sidecar "node bootstrap/ssr/ssr.mjs"` for Inertia SSR.
+        #[arg(long)]
+        sidecar: Vec<String>,
+
         /// Enable the shared cache with this many slots (0 = off; ~4.3 KB each).
         /// Exposes askr_cache_* to PHP (cache, counters, locks — no Redis).
         #[arg(long, default_value = "0")]
@@ -272,6 +278,7 @@ fn main() -> anyhow::Result<()> {
             queue,
             queue_script,
             scheduler_script,
+            sidecar,
             cache_slots,
             response_cache,
             broadcast,
@@ -307,6 +314,7 @@ fn main() -> anyhow::Result<()> {
                     queue: r.queue_workers,
                     queue_script: r.queue_script,
                     scheduler_script: r.scheduler_script,
+                    commands: r.sidecars,
                 };
                 (
                     r.config,
@@ -368,6 +376,7 @@ fn main() -> anyhow::Result<()> {
                     queue: if queue_script.is_some() { queue } else { 0 },
                     queue_script,
                     scheduler_script,
+                    commands: sidecar,
                 };
                 (
                     cfg,
@@ -407,7 +416,9 @@ fn main() -> anyhow::Result<()> {
             let listener = bind_listener(config.listen)?;
             // The supervisor is needed for recycling, the admin plane, sidecars,
             // or >1 worker.
-            let has_sidecars = sidecars.queue > 0 || sidecars.scheduler_script.is_some();
+            let has_sidecars = sidecars.queue > 0
+                || sidecars.scheduler_script.is_some()
+                || !sidecars.commands.is_empty();
             let need_supervisor =
                 workers > 1 || config.max_requests > 0 || admin_listen.is_some() || has_sidecars;
             if cow {
@@ -644,6 +655,10 @@ pub struct Sidecars {
     pub queue: usize,
     pub queue_script: Option<PathBuf>,
     pub scheduler_script: Option<PathBuf>,
+    /// Arbitrary external commands supervised alongside the workers (e.g. an
+    /// Inertia SSR node server: `node bootstrap/ssr/ssr.mjs`). Run via `sh -c`
+    /// in $ASKR_APP_BASE; respawned if they die.
+    pub commands: Vec<String>,
 }
 
 /// What a supervised slot runs.
@@ -652,6 +667,7 @@ enum Kind {
     Web,
     Queue,
     Scheduler,
+    Command,
 }
 
 fn supervise(
@@ -669,16 +685,19 @@ fn supervise(
     } else {
         0
     };
-    let total = (web + queue + sched).min(MAX_WORKERS);
+    let ncmds = sidecars.commands.len();
+    let total = (web + queue + sched + ncmds).min(MAX_WORKERS);
 
-    // Slot layout: [0, web) web · [web, web+queue) queue · [web+queue] scheduler.
+    // Slot layout: [web) web · [queue) queue · [scheduler] · [commands…].
     let kind_of = move |i: usize| -> Kind {
         if i < web {
             Kind::Web
         } else if i < web + queue {
             Kind::Queue
-        } else {
+        } else if i < web + queue + sched {
             Kind::Scheduler
+        } else {
+            Kind::Command
         }
     };
 
@@ -734,6 +753,13 @@ fn supervise(
                     Kind::Scheduler => {
                         worker::run_sidecar(sidecars.scheduler_script.clone().unwrap(), ini.clone())
                     }
+                    Kind::Command => {
+                        let idx = i - (web + queue + sched);
+                        match sidecars.commands.get(idx) {
+                            Some(cmd) => worker::run_command(cmd),
+                            None => 1,
+                        }
+                    }
                 };
                 std::process::exit(code);
             }
@@ -750,6 +776,7 @@ fn supervise(
                     Kind::Web => "web",
                     Kind::Queue => "queue",
                     Kind::Scheduler => "scheduler",
+                    Kind::Command => "sidecar",
                 };
                 tracing::info!(pid, slot = i, kind = label, "spawned");
             }

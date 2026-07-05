@@ -92,6 +92,22 @@ pub fn run_sidecar(script: std::path::PathBuf, ini: Option<String>) -> i32 {
     php.run_script(&script.to_string_lossy()).unwrap_or(1)
 }
 
+/// Run a supervised external command (e.g. an Inertia SSR node server,
+/// `node bootstrap/ssr/ssr.mjs`). Execs it via `sh -c` in `$ASKR_APP_BASE`,
+/// replacing this forked child so signals (SIGTERM) reach the command directly.
+/// Returns only if exec fails.
+pub fn run_command(cmd: &str) -> i32 {
+    use std::os::unix::process::CommandExt;
+    let mut c = std::process::Command::new("sh");
+    c.arg("-c").arg(cmd);
+    if let Ok(base) = std::env::var("ASKR_APP_BASE") {
+        c.current_dir(base);
+    }
+    let err = c.exec(); // replaces the process on success
+    eprintln!("askr sidecar: exec failed for {cmd:?}: {err}");
+    127
+}
+
 /// Add a per-process jitter so workers recycle at different times.
 fn stagger(max: usize) -> usize {
     if max == 0 {

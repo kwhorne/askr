@@ -2,6 +2,16 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.5.2 — 2026-07-05
+
+- **Supervised external sidecars.** The supervisor can now run arbitrary external
+  commands alongside the web/queue/scheduler slots — spawned, respawned if they
+  die, and stopped gracefully with the rest (run via `sh -c` in `$ASKR_APP_BASE`).
+  Enables **Inertia SSR** (`--sidecar "node bootstrap/ssr/ssr.mjs"` /
+  `[[sidecar]] command = …`) and any other helper process in the same container.
+  Verified: a node SSR-style server spawns, is respawned on kill, and drains on
+  shutdown.
+
 ## 0.5.1 — 2026-07-05
 
 - **Fix: empty static files.** A 0-byte static asset was served with

@@ -72,6 +72,26 @@ volumes:
   app-storage:
 ```
 
+## Inertia SSR (or any helper process)
+
+Askr can supervise an arbitrary external command alongside the workers — spawned,
+respawned if it dies, and stopped gracefully with the rest. This is how you run
+**Inertia SSR** (a Node server Inertia renders against) in the same container:
+
+```toml
+# askr.toml
+[[sidecar]]
+command = "node bootstrap/ssr/ssr.mjs"
+```
+
+or `--sidecar "node bootstrap/ssr/ssr.mjs"`. For SSR the app image also needs
+Node and the built SSR bundle (`npm run build` with an SSR entry, producing
+`bootstrap/ssr/ssr.mjs`) — add a Node stage to your Dockerfile. Inertia talks to
+the SSR server on `127.0.0.1:13714` inside the container. Without SSR, Inertia
+renders client-side and no sidecar is needed.
+
+The same mechanism runs any helper (a metrics exporter, a separate worker, etc.).
+
 ## The details that make it good
 
 ### Signals (PID 1)
