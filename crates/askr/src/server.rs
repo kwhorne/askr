@@ -98,6 +98,11 @@ pub struct Config {
     pub pusher_secret: Option<String>,
     /// Access-log destination: a file path, or `-` for stdout. Off if None.
     pub access_log: Option<PathBuf>,
+    /// Harden workers (Linux): seccomp no-exec + (with write paths) Landlock.
+    pub sandbox: bool,
+    /// Directories the sandbox may write to (enables the Landlock filesystem
+    /// restriction; empty = seccomp only).
+    pub sandbox_write: Vec<PathBuf>,
 }
 
 /// Shared per-worker runtime state for recycling/draining.

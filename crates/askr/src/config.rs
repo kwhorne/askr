@@ -81,6 +81,12 @@ pub struct ServerSection {
     pub https: bool,
     /// Structured (JSON) access log destination: a file path, or "-" for stdout.
     pub access_log: Option<PathBuf>,
+    /// Harden workers on Linux (seccomp no-exec).
+    #[serde(default)]
+    pub sandbox: bool,
+    /// Landlock-writable paths (enables the filesystem restriction).
+    #[serde(default)]
+    pub sandbox_write: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -198,6 +204,8 @@ impl Default for ServerSection {
             max_body_size: default_body(),
             https: false,
             access_log: None,
+            sandbox: false,
+            sandbox_write: Vec::new(),
         }
     }
 }
@@ -346,6 +354,8 @@ impl FileConfig {
                 pusher: self.pusher.enabled,
                 pusher_secret: self.pusher.secret,
                 access_log: self.server.access_log,
+                sandbox: self.server.sandbox || !self.server.sandbox_write.is_empty(),
+                sandbox_write: self.server.sandbox_write,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

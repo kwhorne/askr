@@ -13,8 +13,8 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:0.7        # latest 0.4.x
-ghcr.io/kwhorne/askr:0.7.2      # exact
+ghcr.io/kwhorne/askr:0.8        # latest 0.4.x
+ghcr.io/kwhorne/askr:0.8.2      # exact
 ghcr.io/kwhorne/askr:latest
 ```
 
@@ -35,7 +35,7 @@ COPY . /app
 RUN composer install --no-dev --optimize-autoloader
 
 # 2. drop them onto the Askr runtime
-FROM ghcr.io/kwhorne/askr:0.7 AS runtime
+FROM ghcr.io/kwhorne/askr:0.8 AS runtime
 COPY --from=deps --chown=askr /app /var/www/app
 ENV ASKR_APP_BASE=/var/www/app
 CMD ["serve", \

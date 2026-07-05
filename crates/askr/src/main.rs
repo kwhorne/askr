@@ -17,6 +17,7 @@ mod php;
 mod pusher;
 mod rcache;
 mod record;
+mod sandbox;
 mod server;
 mod squeue;
 mod tls;
@@ -230,6 +231,18 @@ enum Command {
         #[arg(long)]
         acme_ca_root: Option<PathBuf>,
 
+        /// Harden workers on Linux: a seccomp filter blocks process creation
+        /// (execve/ptrace → EPERM), so a PHP exploit can't spawn a shell. No-op
+        /// off Linux; PHP's own exec()/Process calls will fail.
+        #[arg(long)]
+        sandbox: bool,
+
+        /// Also restrict the filesystem with Landlock: writes allowed only under
+        /// these paths (repeatable, e.g. the app's storage/ and /tmp). Reads stay
+        /// open so PHP/templates keep working. Implies stronger --sandbox.
+        #[arg(long)]
+        sandbox_write: Vec<PathBuf>,
+
         /// Enable a Pusher-compatible WebSocket endpoint (/app/{key}) and HTTP
         /// trigger (/apps/{id}/events) — a drop-in Reverb for Laravel Echo.
         /// Auto-enables broadcasting.
@@ -346,6 +359,8 @@ fn main() -> anyhow::Result<()> {
             acme_directory,
             acme_http,
             acme_ca_root,
+            sandbox,
+            sandbox_write,
             pusher,
             pusher_secret,
             access_log,
@@ -430,6 +445,8 @@ fn main() -> anyhow::Result<()> {
                     pusher_secret: pusher_secret
                         .or_else(|| std::env::var("ASKR_PUSHER_SECRET").ok()),
                     access_log,
+                    sandbox: sandbox || !sandbox_write.is_empty(),
+                    sandbox_write,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);
@@ -1169,6 +1186,11 @@ fn cow_child_setup(cc: &CowCtx) {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
+    }
+    if cc.config.sandbox {
+        crate::sandbox::apply(&crate::sandbox::SandboxConfig {
+            write_paths: cc.config.sandbox_write.clone(),
+        });
     }
     let php = crate::php::Php::cow_bridge();
     let listener_fd = cc.listener_fd;

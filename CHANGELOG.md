@@ -2,6 +2,21 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.8.0 — 2026-07-05
+
+- **Hardening / sandbox (Linux)** — `--sandbox` shrinks the blast radius of a
+  PHP-level exploit:
+  - **seccomp** (all threads): `execve`/`execveat`/`ptrace`/`process_vm_*` return
+    `EPERM` — a compromised request can't spawn a shell.
+  - **Landlock** (with `--sandbox-write <dir>`, repeatable): read everywhere, but
+    write only under the listed paths — can't drop a webshell into the docroot.
+  Applied before the PHP/tokio threads spawn (so it covers the thread PHP runs
+  on); sidecars are left unsandboxed (jobs may shell out). `[server] sandbox` /
+  `sandbox_write` in askr.toml. No effect off Linux; Landlock degrades gracefully.
+  See docs/SANDBOX.md.
+  - Verified in a Linux container: `shell_exec` → blocked, write to `/tmp` → ok,
+    write into the docroot → denied, normal pages unchanged.
+
 ## 0.7.0 — 2026-07-05
 
 - **Automatic TLS (ACME / Let's Encrypt)** — the last piece of "single binary, no

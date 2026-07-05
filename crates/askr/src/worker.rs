@@ -33,6 +33,15 @@ pub fn run_worker(
     config: Config,
     ini: Option<String>,
 ) -> anyhow::Result<()> {
+    // Harden the worker (Linux) FIRST, before spawning the PHP/tokio threads —
+    // seccomp (all-threads) + Landlock are inherited by every thread we create,
+    // so the filter also covers the thread PHP runs on (where an exploit lives).
+    if config.sandbox {
+        crate::sandbox::apply(&crate::sandbox::SandboxConfig {
+            write_paths: config.sandbox_write.clone(),
+        });
+    }
+
     // Boot the interpreter (its own dedicated thread) before the runtime.
     // Worker mode boots the app once; otherwise each request runs fresh.
     let php = match config.worker_script.clone() {

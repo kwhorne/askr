@@ -17,6 +17,8 @@ workers = "auto"             # a number, or "auto" (= CPU cores)
 max_requests = 1000          # recycle each worker after N requests (0 = never)
 max_body_size = "16M"        # 413 above this (K/M/G or plain bytes)
 https = false                # force HTTPS in $_SERVER (behind a TLS terminator)
+# sandbox = true               # Linux: seccomp no-exec (no shell from an exploit)
+# sandbox_write = ["/var/www/app/storage", "/tmp"]  # + Landlock: writes only here
 # access_log = "/var/log/askr/access.log"   # JSON line per request; "-" = stdout
 
 [worker]

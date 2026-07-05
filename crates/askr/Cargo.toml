@@ -43,3 +43,8 @@ serde = { workspace = true }
 serde_json = "1"
 toml = { workspace = true }
 instant-acme = "0.8.5"
+
+# Linux-only hardening (seccomp syscall filter + Landlock filesystem sandbox).
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+landlock = "0.4"
