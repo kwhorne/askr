@@ -36,7 +36,7 @@ Download the tarball for your architecture from the
 
 ```bash
 cd /tmp
-VER=v0.5.2
+VER=v0.6.0
 ARCH=$(uname -m)            # x86_64 or aarch64
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz

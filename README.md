@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.5.2</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.6.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.5.2; ARCH=$(uname -m)
+VER=v0.6.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -75,7 +75,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.5.2)
+## What works today (0.6.0)
 
 - Embedded PHP (**non-ZTS**) running real Laravel 12/13 — no FastCGI, no FPM
 - **Full extension set** (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -97,7 +97,7 @@ Everything lives in [`docs/`](docs/README.md):
 - **`--paranoid`** state-bleed detector: tells you if your app is worker-safe
 - **CoW template** (`--cow`): boot once, fork workers — ~ms warm respawn + shared memory
 - **Queue workers + scheduler** supervised in the same binary (no Horizon/cron)
-- **Shared cache** (`askr_cache_*` + Laravel driver): cache, atomic counters, rate limiting — no Redis
+- **Shared cache** (`askr_cache_*` + Laravel driver): cache, counters, atomic **locks** (`Cache::lock`) and **sessions** (large region) — no Redis
 - **Broadcasting**: live updates to browsers via SSE + `askr_broadcast()` — no Reverb/Pusher
 - Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
 - **TLS** (rustls, ring — no OpenSSL) + **HTTP/2** (ALPN); `--tls-self-signed` for dev
@@ -132,7 +132,8 @@ Everything lives in [`docs/`](docs/README.md):
 | **0.5.0** — full extension set (intl/gd/curl/zip/pdo_mysql/pgsql) — runs Filament | ✅ |
 | **0.5.1** — fix: empty static files (Vite CSS-only entry) served with correct Content-Length | ✅ |
 | **0.5.2** — supervised external sidecars (Inertia SSR: `node bootstrap/ssr/ssr.mjs`) | ✅ |
-| **Next** — io_uring core (Linux), HTTP/3 (QUIC), auto-TLS (ACME), OTel traces, session/queue on shared memory, seccomp/Landlock | ⏳ |
+| **0.6.0** — cache size classes (64 KB values), atomic `add`/`Cache::lock`, sessions — Redis-free | ✅ |
+| **Next** — io_uring core (Linux), HTTP/3 (QUIC), auto-TLS (ACME), OTel traces, queue on shared memory, seccomp/Landlock | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
 benchmark against FrankenPHP/FPM — both Linux-native work. The plan is written up

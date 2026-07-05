@@ -153,6 +153,11 @@ enum Command {
         #[arg(long, default_value = "0")]
         cache_slots: usize,
 
+        /// Large-value cache region slots (64 KB each; 0 = off). Enables cache
+        /// values over 4 KB — Laravel sessions, cached fragments/collections.
+        #[arg(long, default_value = "0")]
+        cache_large_slots: usize,
+
         /// Enable the response cache with this many slots (0 = off; ~140 KB each).
         /// PHP marks responses cacheable via `header('Askr-Cache: 60, tags=posts')`;
         /// matching anonymous GETs are served from Rust without touching PHP, and
@@ -280,6 +285,7 @@ fn main() -> anyhow::Result<()> {
             scheduler_script,
             sidecar,
             cache_slots,
+            cache_large_slots,
             response_cache,
             broadcast,
             canary,
@@ -299,6 +305,7 @@ fn main() -> anyhow::Result<()> {
                 paranoid,
                 sidecars,
                 cache_slots,
+                cache_large_slots,
                 response_cache,
                 broadcast,
             ) = if let Some(path) = config_file {
@@ -324,6 +331,7 @@ fn main() -> anyhow::Result<()> {
                     r.paranoid,
                     sc,
                     r.cache_slots,
+                    r.cache_large_slots,
                     r.response_cache_slots,
                     r.broadcast,
                 )
@@ -386,14 +394,15 @@ fn main() -> anyhow::Result<()> {
                     paranoid,
                     sc,
                     cache_slots,
+                    cache_large_slots,
                     response_cache,
                     broadcast,
                 )
             };
 
             // Map shared regions before any fork so all workers share them.
-            if cache_slots > 0 {
-                cache::init(cache_slots);
+            if cache_slots > 0 || cache_large_slots > 0 {
+                cache::init(cache_slots.max(1), cache_large_slots);
             }
             if response_cache > 0 {
                 rcache::init(response_cache);

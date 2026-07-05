@@ -571,6 +571,7 @@ static PHP_FUNCTION(askr_handle_request) {
 
 typedef int  (*askr_cache_get_fn)(const char *key, size_t klen, char **out, size_t *out_len);
 typedef int  (*askr_cache_set_fn)(const char *key, size_t klen, const char *val, size_t vlen, long ttl);
+typedef int  (*askr_cache_add_fn)(const char *key, size_t klen, const char *val, size_t vlen, long ttl);
 typedef int  (*askr_cache_del_fn)(const char *key, size_t klen);
 typedef long (*askr_cache_incr_fn)(const char *key, size_t klen, long delta, long ttl);
 typedef void (*askr_cache_flush_fn)(void);
@@ -578,16 +579,18 @@ typedef void (*askr_cache_forget_tag_fn)(const char *tag, size_t tlen);
 
 static askr_cache_get_fn        g_cache_get = NULL;
 static askr_cache_set_fn        g_cache_set = NULL;
+static askr_cache_add_fn        g_cache_add = NULL;
 static askr_cache_del_fn        g_cache_del = NULL;
 static askr_cache_incr_fn       g_cache_incr = NULL;
 static askr_cache_flush_fn      g_cache_flush = NULL;
 static askr_cache_forget_tag_fn g_cache_forget_tag = NULL;
 
-void askr_php_set_cache_bridge(askr_cache_get_fn g, askr_cache_set_fn s, askr_cache_del_fn d,
-                               askr_cache_incr_fn i, askr_cache_flush_fn f,
+void askr_php_set_cache_bridge(askr_cache_get_fn g, askr_cache_set_fn s, askr_cache_add_fn a,
+                               askr_cache_del_fn d, askr_cache_incr_fn i, askr_cache_flush_fn f,
                                askr_cache_forget_tag_fn ft) {
     g_cache_get = g;
     g_cache_set = s;
+    g_cache_add = a;
     g_cache_del = d;
     g_cache_incr = i;
     g_cache_flush = f;
@@ -625,6 +628,24 @@ static PHP_FUNCTION(askr_cache_set) {
         Z_PARAM_LONG(ttl)
     ZEND_PARSE_PARAMETERS_END();
     RETURN_BOOL(g_cache_set ? g_cache_set(key, klen, val, vlen, (long)ttl) : 0);
+}
+
+/* bool askr_cache_add(string $key, string $value, int $ttl = 0) — atomic
+ * set-if-absent; backs Cache::lock(). */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_cache_add, 0, 0, 2)
+    ZEND_ARG_INFO(0, key)
+    ZEND_ARG_INFO(0, value)
+    ZEND_ARG_INFO(0, ttl)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_cache_add) {
+    char *key, *val; size_t klen, vlen; zend_long ttl = 0;
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STRING(key, klen)
+        Z_PARAM_STRING(val, vlen)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(ttl)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(g_cache_add ? g_cache_add(key, klen, val, vlen, (long)ttl) : 0);
 }
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_cache_delete, 0, 0, 1)
@@ -734,6 +755,7 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_defer, arginfo_askr_defer)
     ZEND_FE(askr_cache_get, arginfo_askr_cache_get)
     ZEND_FE(askr_cache_set, arginfo_askr_cache_set)
+    ZEND_FE(askr_cache_add, arginfo_askr_cache_add)
     ZEND_FE(askr_cache_delete, arginfo_askr_cache_delete)
     ZEND_FE(askr_cache_increment, arginfo_askr_cache_increment)
     ZEND_FE(askr_cache_flush, arginfo_askr_cache_flush)

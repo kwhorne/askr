@@ -16,14 +16,22 @@
  *
  *     'askr' => ['driver' => 'askr'],
  *
- * This removes the Redis dependency for cache, rate limiting and atomic counters
- * in small/mid deployments — it all lives in the Askr binary.
+ * This removes the Redis dependency for cache, rate limiting, atomic counters,
+ * atomic locks (Cache::lock) and — with the large region — sessions, all in the
+ * Askr binary for a single box.
  *
- * Note: values are capped at ~4 KB (larger values simply aren't cached).
- * Integers/floats are stored unserialized so `increment()`/`decrement()` (used
- * by the rate limiter) are truly atomic in shared memory.
+ * Sizes: small values (≤ 4 KB) use the main region; larger values (sessions,
+ * fragments, serialized collections) need the large region — start Askr with
+ * `--cache-large-slots N` (or `[cache] large_slots`), which allows values up to
+ * 64 KB. Integers/floats are stored unserialized so increment()/decrement()
+ * (the rate limiter) are truly atomic in shared memory.
+ *
+ * Sessions:  SESSION_DRIVER=cache, SESSION_STORE=askr
+ * Locks:     Cache::lock('deploy', 10)->get(fn () => …)  // atomic via add()
  */
-final class AskrCacheStore implements Illuminate\Contracts\Cache\Store
+final class AskrCacheStore implements
+    Illuminate\Contracts\Cache\Store,
+    Illuminate\Contracts\Cache\LockProvider
 {
     public function __construct(private string $prefix = '')
     {
@@ -65,6 +73,26 @@ final class AskrCacheStore implements Illuminate\Contracts\Cache\Store
             $ok = $this->put($key, $value, $seconds) && $ok;
         }
         return $ok;
+    }
+
+    /**
+     * Atomic set-if-absent — makes Cache::add() and Cache::lock() truly atomic
+     * across all worker processes (shared memory), no Redis needed.
+     */
+    public function add($key, $value, $seconds)
+    {
+        $v = (is_int($value) || is_float($value)) ? (string) $value : serialize($value);
+        return askr_cache_add($this->k($key), $v, (int) $seconds);
+    }
+
+    public function lock($name, $seconds = 0, $owner = null)
+    {
+        return new Illuminate\Cache\CacheLock($this, $name, $seconds, $owner);
+    }
+
+    public function restoreLock($name, $owner)
+    {
+        return $this->lock($name, 0, $owner);
     }
 
     public function increment($key, $value = 1)

@@ -136,6 +136,10 @@ pub struct CacheSection {
     /// Shared kv cache slots (0 = disabled). Each slot is ~4.3 KB.
     #[serde(default)]
     pub slots: usize,
+    /// Large-value region slots (64 KB each; 0 = off). Enables cache values over
+    /// 4 KB — Laravel sessions, cached fragments/collections.
+    #[serde(default)]
+    pub large_slots: usize,
     /// Response cache slots (0 = disabled). Full-response edge cache with tag
     /// invalidation (`Askr-Cache` header + `askr_cache_forget_tag`). ~140 KB each.
     #[serde(default)]
@@ -219,6 +223,7 @@ pub struct Resolved {
     pub scheduler_script: Option<PathBuf>,
     pub sidecars: Vec<String>,
     pub cache_slots: usize,
+    pub cache_large_slots: usize,
     pub response_cache_slots: usize,
     pub broadcast: bool,
     pub canary_reload: bool,
@@ -353,6 +358,7 @@ impl FileConfig {
             scheduler_script: self.scheduler.script,
             sidecars: self.sidecar.into_iter().map(|s| s.command).collect(),
             cache_slots: self.cache.slots,
+            cache_large_slots: self.cache.large_slots,
             response_cache_slots: self.cache.response_slots,
             broadcast: self.broadcast.enabled,
             canary_reload: self.reload.canary,

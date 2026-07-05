@@ -379,6 +379,8 @@ pub mod cache_bridge {
 
     pub type GetFn = extern "C" fn(*const c_char, usize, *mut *mut c_char, *mut usize) -> c_int;
     pub type SetFn = extern "C" fn(*const c_char, usize, *const c_char, usize, c_long) -> c_int;
+    /// Atomic set-if-absent (same signature as SetFn).
+    pub type AddFn = extern "C" fn(*const c_char, usize, *const c_char, usize, c_long) -> c_int;
     pub type DelFn = extern "C" fn(*const c_char, usize) -> c_int;
     pub type IncrFn = extern "C" fn(*const c_char, usize, c_long, c_long) -> c_long;
     pub type FlushFn = extern "C" fn();
@@ -390,6 +392,7 @@ pub mod cache_bridge {
         pub fn askr_php_set_cache_bridge(
             g: GetFn,
             s: SetFn,
+            a: AddFn,
             d: DelFn,
             i: IncrFn,
             f: FlushFn,

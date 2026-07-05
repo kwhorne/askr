@@ -81,10 +81,44 @@ Integers/floats are stored unserialized so `increment()`/`decrement()` (used by
 Laravel's rate limiter) are truly atomic in shared memory; other values are
 serialized.
 
+## Large values, sessions & locks (0.6.0)
+
+Two size classes: a **small** region (`--cache-slots`, 4 KB values — counters,
+locks, small entries) and an optional **large** region (`--cache-large-slots` /
+`[cache] large_slots`, 64 KB values — sessions, cached fragments, serialized
+collections). `set` routes by size and clears the key from the other region;
+`get`/`delete` check both. This keeps big values working without wasting 64 KB
+per counter.
+
+With the large region enabled, the `AskrCacheStore` covers what usually needs
+Redis on a single box:
+
+```php
+// sessions
+// .env: SESSION_DRIVER=cache  SESSION_STORE=askr
+
+// atomic locks (across all worker processes, via askr_cache_add)
+Cache::lock('deploy', 10)->get(fn () => run_migration());
+```
+
+`askr_cache_add($key, $value, $ttl)` is an atomic set-if-absent — the primitive
+behind `Cache::add()` and `Cache::lock()`. The store implements Laravel's
+`LockProvider`, so `Cache::lock()` is truly atomic in shared memory.
+
+| Redis use | Askr replacement |
+| --- | --- |
+| cache | `askr_cache_*` + `AskrCacheStore` (small + large regions) |
+| rate limiting / counters | `askr_cache_increment` (atomic) |
+| atomic locks | `askr_cache_add` + `Cache::lock()` |
+| sessions | large region + `SESSION_STORE=askr` |
+| pub/sub | broadcast ring + Pusher WS (see [BROADCAST](BROADCAST.md)) |
+| queues | still the DB driver (fine for small/mid); or Redis |
+
 ## Semantics & limits
 
-- **Eviction:** on a hash collision beyond the probe window (16 slots), the
-  colliding entry is overwritten. Sizing the table generously avoids this.
+- **Eviction:** the probe window (16 slots) evicts an expired entry, else the
+  oldest-written one; `askr_cache_evictions_total` counts evictions. Sizing the
+  table generously avoids eviction under load.
 - **TTL** is lazy (checked on read) — expired entries free their slot on the next
   access to it.
 - **Best-effort under crashes:** a per-slot spinlock is stolen if a holder dies

@@ -2,6 +2,25 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.6.0 — 2026-07-05
+
+- **Redis-free sessions, locks and bigger cache values.** The shared cache now
+  has two **size classes**: the small region (`--cache-slots`, 4 KB — counters,
+  locks, small entries) and an optional large region (`--cache-large-slots` /
+  `[cache] large_slots`, 64 KB — sessions, cached fragments, serialized
+  collections). `set` routes by size and clears the key from the other region;
+  `get`/`delete` check both.
+  - New **`askr_cache_add`** — atomic set-if-absent, the primitive behind
+    `Cache::add()` and `Cache::lock()`. `AskrCacheStore` now implements Laravel's
+    `LockProvider`, so `Cache::lock()` is truly atomic across all workers in
+    shared memory.
+  - With the large region, Laravel **sessions** run on the cache
+    (`SESSION_DRIVER=cache`, `SESSION_STORE=askr`).
+  - Internals: `cache.rs` is generic over value size (const generics); eviction
+    (oldest-first) + `askr_cache_evictions_total` carried over.
+  - So on a single box, Redis is replaceable for cache, counters, locks, sessions
+    and pub/sub — queues still use the DB driver. See docs/CACHE.md.
+
 ## 0.5.2 — 2026-07-05
 
 - **Supervised external sidecars.** The supervisor can now run arbitrary external
