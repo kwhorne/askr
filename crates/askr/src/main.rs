@@ -188,6 +188,11 @@ enum Command {
         /// $ASKR_PUSHER_SECRET. Without it, such subscriptions are accepted (dev).
         #[arg(long)]
         pusher_secret: Option<String>,
+
+        /// Write a structured (JSON) access log line per request to this file,
+        /// or `-` for stdout. Off if unset.
+        #[arg(long)]
+        access_log: Option<PathBuf>,
     },
 
     /// Run tests by forking a fresh, warm process per test file (#5-style CoW).
@@ -275,6 +280,7 @@ fn main() -> anyhow::Result<()> {
             record_errors,
             pusher,
             pusher_secret,
+            access_log,
         } => {
             // The config file, when given, is the single source of truth.
             #[allow(clippy::type_complexity)]
@@ -351,6 +357,7 @@ fn main() -> anyhow::Result<()> {
                     pusher,
                     pusher_secret: pusher_secret
                         .or_else(|| std::env::var("ASKR_PUSHER_SECRET").ok()),
+                    access_log,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

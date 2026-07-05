@@ -12,6 +12,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -57,6 +58,21 @@ fn full(bytes: Bytes) -> ResBody {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
 
+/// Open the access-log sink: a file (append), `-` for stdout, or None to disable.
+fn open_access_log(path: Option<&Path>) -> Option<Mutex<Box<dyn std::io::Write + Send>>> {
+    let path = path?;
+    if path.as_os_str() == "-" {
+        return Some(Mutex::new(Box::new(std::io::stdout())));
+    }
+    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(f) => Some(Mutex::new(Box::new(f))),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "access log: open failed; disabled");
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub docroot: PathBuf,
@@ -76,6 +92,8 @@ pub struct Config {
     /// Pusher app secret — when set, private/presence subscriptions must carry a
     /// valid HMAC auth signature. When unset, they're accepted (dev).
     pub pusher_secret: Option<String>,
+    /// Access-log destination: a file path, or `-` for stdout. Off if None.
+    pub access_log: Option<PathBuf>,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -90,6 +108,44 @@ struct Runtime {
     sse: SseHub,
     pusher: Arc<PusherHub>,
     pusher_enabled: bool,
+    access: Option<Mutex<Box<dyn std::io::Write + Send>>>,
+}
+
+impl Runtime {
+    /// Write one structured (JSON) access-log line, if access logging is on.
+    fn log_access(
+        &self,
+        method: &str,
+        path: &str,
+        status: u16,
+        bytes: u64,
+        dur: Duration,
+        peer: SocketAddr,
+    ) {
+        let Some(w) = &self.access else {
+            return;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let line = format!(
+            r#"{{"ts":{ts},"ip":"{}","method":"{}","path":"{}","status":{status},"bytes":{bytes},"dur_ms":{:.2}}}"#,
+            peer.ip(),
+            json_escape(method),
+            json_escape(path),
+            dur.as_secs_f64() * 1000.0,
+        );
+        if let Ok(mut w) = w.lock() {
+            let _ = writeln!(w, "{line}");
+            let _ = w.flush();
+        }
+    }
+}
+
+/// Minimal JSON string escaping for log fields.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Per-worker registry of live SSE subscribers. A background task tails the
@@ -167,6 +223,7 @@ pub async fn run(
     tls: Option<TlsAcceptor>,
 ) -> anyhow::Result<()> {
     let pusher_enabled = config.pusher;
+    let access = open_access_log(config.access_log.as_deref());
     let rt = Arc::new(Runtime {
         config,
         php,
@@ -178,6 +235,7 @@ pub async fn run(
         sse: SseHub::default(),
         pusher: Arc::new(PusherHub::default()),
         pusher_enabled,
+        access,
     });
 
     // Tail the shared broadcast ring and fan events out to local SSE subscribers
@@ -267,7 +325,21 @@ async fn serve_io<I>(io: I, rt: Arc<Runtime>, peer: SocketAddr)
 where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let service = service_fn(move |req| handle(req, rt.clone(), peer));
+    // Wrap handle so every response — whatever branch produced it — is logged.
+    let service = service_fn(move |req: Request<Incoming>| {
+        let rt = rt.clone();
+        async move {
+            let method = req.method().as_str().to_string();
+            let path = req.uri().path().to_string();
+            let start = Instant::now();
+            let resp = handle(req, rt.clone(), peer).await;
+            if let Ok(r) = &resp {
+                let bytes = r.body().size_hint().exact().unwrap_or(0);
+                rt.log_access(&method, &path, r.status().as_u16(), bytes, start.elapsed(), peer);
+            }
+            resp
+        }
+    });
     let mut builder = auto::Builder::new(TokioExecutor::new());
     // Bound how long a client may take to send request headers (slowloris).
     // header_read_timeout needs a timer registered on the builder.

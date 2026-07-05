@@ -69,6 +69,8 @@ pub struct ServerSection {
     /// Mark requests as HTTPS in $_SERVER (e.g. behind a TLS terminator).
     #[serde(default)]
     pub https: bool,
+    /// Structured (JSON) access log destination: a file path, or "-" for stdout.
+    pub access_log: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -177,6 +179,7 @@ impl Default for ServerSection {
             max_requests: 0,
             max_body_size: default_body(),
             https: false,
+            access_log: None,
         }
     }
 }
@@ -321,6 +324,7 @@ impl FileConfig {
                 record_dir: self.record.dir,
                 pusher: self.pusher.enabled,
                 pusher_secret: self.pusher.secret,
+                access_log: self.server.access_log,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),
