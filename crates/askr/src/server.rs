@@ -31,8 +31,11 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Notify};
 use tokio_rustls::TlsAcceptor;
 
+use fastwebsockets::upgrade;
+
 use crate::cgi;
 use crate::php::Php;
+use crate::pusher::{self, PusherHub};
 use crate::rcache;
 
 /// Response body: buffered (Full) or streaming (SSE / files), unified as a box.
@@ -68,6 +71,8 @@ pub struct Config {
     pub max_body_size: usize,
     /// Directory to record failing (5xx) requests into, for `askr replay` (#5).
     pub record_dir: Option<PathBuf>,
+    /// Pusher-compatible WebSocket + trigger endpoints (drop-in Reverb, #6).
+    pub pusher: bool,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -80,6 +85,8 @@ struct Runtime {
     active: AtomicUsize,
     tls: Option<TlsAcceptor>,
     sse: SseHub,
+    pusher: Arc<PusherHub>,
+    pusher_enabled: bool,
 }
 
 /// Per-worker registry of live SSE subscribers. A background task tails the
@@ -156,6 +163,7 @@ pub async fn run(
     recycle_after: usize,
     tls: Option<TlsAcceptor>,
 ) -> anyhow::Result<()> {
+    let pusher_enabled = config.pusher;
     let rt = Arc::new(Runtime {
         config,
         php,
@@ -165,9 +173,12 @@ pub async fn run(
         active: AtomicUsize::new(0),
         tls,
         sse: SseHub::default(),
+        pusher: Arc::new(PusherHub::default()),
+        pusher_enabled,
     });
 
-    // Tail the shared broadcast ring and fan events out to local SSE subscribers.
+    // Tail the shared broadcast ring and fan events out to local SSE subscribers
+    // and Pusher WebSocket connections (a publish from any process reaches all).
     if crate::broadcast::enabled() {
         let rt2 = rt.clone();
         tokio::spawn(async move {
@@ -182,10 +193,14 @@ pub async fn run(
                     let frame =
                         Bytes::from(format!("data: {}\n\n", String::from_utf8_lossy(&payload)));
                     rt2.sse.deliver(&channel, &frame);
+                    if rt2.pusher_enabled {
+                        rt2.pusher.deliver(&channel, &payload);
+                    }
                 }
                 ticks += 1;
                 if ticks % 300 == 0 {
                     rt2.sse.ping(); // ~15s keep-alive
+                    rt2.pusher.prune();
                 }
             }
         });
@@ -263,13 +278,28 @@ where
 }
 
 async fn handle(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     rt: Arc<Runtime>,
     peer: SocketAddr,
 ) -> Result<Response<ResBody>, Infallible> {
     let t_start = Instant::now();
     let config = &rt.config;
     let port = config.listen.port();
+
+    // Pusher WebSocket endpoint: /app/{key} (drop-in Reverb, #6).
+    if rt.pusher_enabled
+        && pusher::is_ws_path(req.uri().path())
+        && upgrade::is_upgrade_request(&req)
+    {
+        return Ok(match upgrade::upgrade(&mut req) {
+            Ok((resp, fut)) => {
+                tokio::spawn(pusher::serve(fut, rt.pusher.clone()));
+                let (parts, _) = resp.into_parts();
+                Response::from_parts(parts, full(Bytes::new()))
+            }
+            Err(e) => text(StatusCode::BAD_REQUEST, &format!("askr: ws upgrade: {e}")),
+        });
+    }
 
     // Reserved SSE endpoint: GET /askr/events?channel=NAME streams broadcast
     // events (see askr_broadcast() in PHP).
@@ -363,6 +393,19 @@ async fn handle(
             ));
         }
     };
+
+    // Pusher HTTP trigger: POST /apps/{id}/events (what Laravel's broadcaster
+    // calls server-side). Publish into the ring; the WS tailer fans it out.
+    if rt.pusher_enabled && parts.method == Method::POST && pusher::is_trigger(parts.uri.path()) {
+        let out = pusher::trigger(&body_bytes);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(full(Bytes::from(out)))
+            .unwrap();
+        finish(&rt, &response, t_start, 0);
+        return Ok(response);
+    }
 
     let request = cgi::build_request(
         &parts,

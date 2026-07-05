@@ -12,6 +12,7 @@ mod config;
 mod doctor;
 mod metrics;
 mod php;
+mod pusher;
 mod rcache;
 mod record;
 mod server;
@@ -173,6 +174,12 @@ enum Command {
         /// treat the directory as sensitive.
         #[arg(long)]
         record_errors: Option<PathBuf>,
+
+        /// Enable a Pusher-compatible WebSocket endpoint (/app/{key}) and HTTP
+        /// trigger (/apps/{id}/events) — a drop-in Reverb for Laravel Echo.
+        /// Auto-enables broadcasting.
+        #[arg(long)]
+        pusher: bool,
     },
 
     /// Replay a recorded failing request against a fresh interpreter (#5).
@@ -235,6 +242,7 @@ fn main() -> anyhow::Result<()> {
             canary,
             cow,
             record_errors,
+            pusher,
         } => {
             // The config file, when given, is the single source of truth.
             #[allow(clippy::type_complexity)]
@@ -312,6 +320,7 @@ fn main() -> anyhow::Result<()> {
                         tls_self_signed,
                         max_body_size,
                         record_dir: record_errors,
+                        pusher,
                     };
                     let w = workers.unwrap_or_else(default_workers).max(1);
                     let wmin = workers_min.unwrap_or(w).max(1);
@@ -343,8 +352,8 @@ fn main() -> anyhow::Result<()> {
             if response_cache > 0 {
                 rcache::init(response_cache);
             }
-            if broadcast {
-                broadcast::init();
+            if broadcast || config.pusher {
+                broadcast::init(); // the Pusher endpoints ride the broadcast ring
             }
 
             if paranoid {

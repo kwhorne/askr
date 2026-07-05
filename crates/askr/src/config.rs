@@ -36,6 +36,8 @@ pub struct FileConfig {
     pub reload: ReloadSection,
     #[serde(default)]
     pub record: RecordSection,
+    #[serde(default)]
+    pub pusher: PusherSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +151,15 @@ pub struct ReloadSection {
 pub struct RecordSection {
     /// Record failing (5xx) requests into this directory for `askr replay`.
     pub dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PusherSection {
+    /// Pusher-compatible WebSocket + HTTP trigger (drop-in Reverb). Rides the
+    /// broadcast ring, which is auto-enabled.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Default for ServerSection {
@@ -305,6 +316,7 @@ impl FileConfig {
                 tls_self_signed,
                 max_body_size,
                 record_dir: self.record.dir,
+                pusher: self.pusher.enabled,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),
