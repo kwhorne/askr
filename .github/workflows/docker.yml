@@ -1,16 +1,16 @@
 name: Docker
 
-# Build and publish the multi-arch container image to GHCR on each release tag.
-# The image is packaged from the release tarball (no recompile), so the build is
-# just fetch + apt — the Dockerfile's curl --retry waits for the release job to
-# finish uploading the asset.
+# Build and publish the multi-arch GHCR image, packaged from the release tarball
+# (no recompile — just fetch + apt). Runs AFTER the Release workflow finishes, so
+# the tarball is guaranteed to exist (no race). Also dispatchable by hand.
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (e.g. 0.4.1)"
+        description: "Version to build (e.g. 0.4.2)"
         required: true
 
 permissions:
@@ -19,21 +19,26 @@ permissions:
 
 jobs:
   image:
+    # Only on a successful, tag-triggered Release (or a manual dispatch).
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
       - name: Resolve version
         id: v
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VER="${{ github.event.inputs.version }}"
           else
-            VER="${GITHUB_REF#refs/tags/v}"
+            VER="${{ github.event.workflow_run.head_branch }}"
+            VER="${VER#v}"
           fi
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "minor=${VER%.*}" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
