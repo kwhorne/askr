@@ -493,8 +493,18 @@ fn response_cache_key(req: &Request<Incoming>) -> Vec<u8> {
         .get(hyper::header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    format!("{}\0{}\0{}", req.method().as_str(), host.to_ascii_lowercase(), pq).into_bytes()
+    let pq = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+    format!(
+        "{}\0{}\0{}",
+        req.method().as_str(),
+        host.to_ascii_lowercase(),
+        pq
+    )
+    .into_bytes()
 }
 
 /// Store a 200 response if the app opted in via an `Askr-Cache` header.

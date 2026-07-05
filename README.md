@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.2.1</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.3.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.2.1; ARCH=$(uname -m)
+VER=v0.3.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -67,17 +67,29 @@ Everything lives in [`docs/`](docs/README.md):
 - [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
 - [CLI reference](docs/CLI.md) — every command and flag
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
+- [Power features](docs/FEATURES.md) — response cache + tags, coalescing, Pusher WS, defer, autoscaling, record/replay, test runner
 - [Shared cache](docs/CACHE.md) — `askr_cache_*` + Laravel driver (no Redis)
 - [Broadcasting](docs/BROADCAST.md) — live updates via SSE (no Reverb/Pusher)
 - [CoW template](docs/COW.md) — boot once, fork workers for ~ms warm respawn (experimental)
 - [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.2.1)
+## What works today (0.3.0)
 
 - Embedded PHP (**non-ZTS**) running real Laravel 12 — no FastCGI, no FPM
 - Multi-core: one worker **process per core** on a shared listen socket
 - **Worker mode** (Octane-style) with per-request state reset — no bleed
+- **Response cache with tag invalidation** (`--response-cache`): cacheable pages
+  served from Rust at static-file speed; `askr_cache_forget_tag()` invalidates
+  across all workers instantly — a Varnish-effect, app-driven, zero infra
+- **Request coalescing**: identical cold-cache requests run PHP once (no stampede)
+- **Pusher-compatible WebSocket** (`--pusher`): drop-in Reverb — Echo works with
+  no frontend change (WS `/app/{key}` + trigger `POST /apps/{id}/events`)
+- **`askr_defer()`**: run work after the response is sent (email/webhooks, no queue)
+- **Elastic autoscaling** (CoW, `--workers-min/--workers-max`): warm workers added
+  under load and harvested when idle — practical only because respawn is ~ms
+- **Record & replay** (`--record-errors`): a 5xx is replayable with `askr replay`
+- **Fork-based test runner** (`askr test`): boot once, warm isolated process per file
 - **`--paranoid`** state-bleed detector: tells you if your app is worker-safe
 - **CoW template** (`--cow`): boot once, fork workers — ~ms warm respawn + shared memory
 - **Queue workers + scheduler** supervised in the same binary (no Horizon/cron)
@@ -107,7 +119,8 @@ Everything lives in [`docs/`](docs/README.md):
 | **0.2.0** — paranoid, shared cache, SSE broadcast, queue+scheduler, metrics, canary reload, CoW template | ✅ |
 | self-contained Linux releases (x86_64 + arm64) | ✅ |
 | **0.2.1** — static caching/streaming/Range, slowloris timeouts, pinned & cached CI | ✅ |
-| **Next** — io_uring core (Linux), HTTP/3 (QUIC), WebSockets/Reverb-compat, `$_FILES`, OTel, seccomp/Landlock | ⏳ |
+| **0.3.0** — response cache + tag invalidation, coalescing, Pusher WS, `askr_defer`, CoW autoscaling, record/replay, fork test runner | ✅ |
+| **Next** — io_uring core (Linux), HTTP/3 (QUIC), Pusher private/presence auth, `$_FILES`, OTel, seccomp/Landlock | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
 benchmark against FrankenPHP/FPM — both Linux-native work.

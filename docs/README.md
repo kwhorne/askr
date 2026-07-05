@@ -5,7 +5,7 @@ embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
 memory-safe hot path, and — in worker mode — boots your app once and serves many
 requests against it, eliminating per-request framework bootstrap.
 
-> Version **0.2.1**. Production target is Linux; development also works on macOS.
+> Version **0.3.0**. Production target is Linux; development also works on macOS.
 
 ## Start here
 
@@ -16,6 +16,7 @@ requests against it, eliminating per-request framework bootstrap.
 | [Configuration](CONFIGURATION.md) | The `askr.toml` reference, CLI flags, and environment variables. |
 | [CLI reference](CLI.md) | Every command and flag (`serve`, `doctor`, `config-check`). |
 | [Worker mode](WORKER_MODE.md) | Boot-once-serve-many, the Laravel worker script, per-request state reset, writing your own worker. |
+| [Power features](FEATURES.md) | Response cache + tag invalidation, coalescing, Pusher WS, `askr_defer`, CoW autoscaling, record/replay, fork test runner. |
 | [CoW template](COW.md) | Boot once, fork workers (copy-on-write) — ~ms warm respawn + shared memory (experimental). |
 | [Shared cache](CACHE.md) | In-binary cache, atomic counters and rate limiting (no Redis); the Laravel driver. |
 | [Broadcasting](BROADCAST.md) | Live updates to browsers via SSE + `askr_broadcast()` (no Reverb/Pusher). |
@@ -28,7 +29,7 @@ requests against it, eliminating per-request framework bootstrap.
 Install a self-contained release (Linux x86_64 / arm64) and serve a Laravel app:
 
 ```bash
-VER=v0.2.1; ARCH=$(uname -m)
+VER=v0.3.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -42,7 +43,7 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
 Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md).
 Building from source: [Building](BUILDING.md).
 
-## What works today (0.2.1)
+## What works today (0.3.0)
 
 - Embedded PHP (non-ZTS) running real Laravel 12, **~9× the per-request/FPM model**
 - Multi-core via one worker **process per core** on a shared listen socket

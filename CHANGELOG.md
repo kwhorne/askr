@@ -2,12 +2,54 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.3.0 — 2026-07-05
 
-- **Dependency maintenance** — `rcgen` 0.13 → 0.14 (adapted for the
-  `CertifiedKey::key_pair` → `signing_key` rename), `toml` 0.8 → 1.1,
-  `thiserror` 1 → 2, and their transitives. CI actions bumped: `actions/checkout`
-  5 → 7, `actions/cache` 4 → 6.
+Seven features that fall out of Askr's architecture (shared-memory substrate +
+CoW + full request-lifecycle control) — several are things no other PHP server
+can do.
+
+### Edge cache
+- **Response cache with instant tag invalidation** (`--response-cache <slots>`).
+  PHP opts a response in with `header('Askr-Cache: 60, tags=posts,homepage')`;
+  matching anonymous `GET`/`HEAD` requests are served straight from Rust,
+  bypassing PHP entirely — static-file speed for cacheable pages.
+  `askr_cache_forget_tag('posts')` bumps a generation counter in a shared tag
+  table, invalidating every entry with that tag across **all** workers at once
+  (O(1), no scan). `Set-Cookie` is stripped on store; only cookie-less GET/HEAD
+  are cacheable. `X-Askr-Cache: HIT|MISS` + hit-rate on the dashboard.
+- **Request coalescing (singleflight)** — when identical cacheable requests hit
+  a cold cache together, one runs PHP and the rest wait for the fill. Cache
+  stampedes are eliminated across worker processes.
+
+### Real-time
+- **Pusher-compatible WebSocket + trigger** (`--pusher`) — a drop-in Reverb:
+  WS `/app/{key}` (connect / subscribe / ping) and the HTTP trigger
+  `POST /apps/{id}/events` that Laravel's broadcaster calls. Rides the shared
+  broadcast ring, so a trigger in any worker reaches subscribers in all of them.
+  Laravel Echo works with no frontend config change. (Auth-signature
+  verification for private/presence channels is a follow-up.)
+
+### Lifecycle
+- **`askr_defer()`** — register work that runs after the response is sent to the
+  client, before the worker takes the next request (email, webhooks, logging) —
+  Octane-style deferred work with no queue.
+- **Elastic worker autoscaling** in CoW mode (`--workers-min`/`--workers-max`).
+  The template sizes the pool on a live queue-depth signal, adding warm workers
+  (~ms respawn) under load and harvesting them when idle. Process autoscaling has
+  never been practical for PHP (~300ms cold boot) — CoW makes it cheap.
+
+### Operations
+- **Record & replay** (`--record-errors <dir>`) — a 5xx persists its full CGI
+  envelope; `askr replay <id.json>` re-runs the exact request against a fresh
+  interpreter. Recent failures are listed on the dashboard.
+- **Fork-based parallel test runner** (`askr test`) — boot once, fork a warm,
+  isolated process per test file (PHPUnit/Pest via `examples/askr-test.php`).
+
+### Maintenance
+- Deps: `rcgen` 0.13 → 0.14 (`CertifiedKey::key_pair` → `signing_key`),
+  `toml` 0.8 → 1.1, `thiserror` 1 → 2. CI actions: `actions/checkout` 5 → 7,
+  `actions/cache` 4 → 6.
+- shim: `run_script` returns `EG(exit_status)` (correct exit(0)=0 handling).
 
 ## 0.2.1 — 2026-07-04
 

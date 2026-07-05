@@ -10,6 +10,10 @@ listen = "0.0.0.0:8000"
 root = "/var/www/app/public"
 front = "index.php"          # front controller, relative to root
 workers = "auto"             # a number, or "auto" (= CPU cores)
+# workers_min / workers_max: CoW autoscaling (only with --cow). When max > min,
+# the template adds warm workers under load and harvests them when idle.
+# workers_min = 2
+# workers_max = 12
 max_requests = 1000          # recycle each worker after N requests (0 = never)
 max_body_size = "16M"        # 413 above this (K/M/G or plain bytes)
 https = false                # force HTTPS in $_SERVER (behind a TLS terminator)
@@ -44,11 +48,24 @@ listen = "127.0.0.1:9000"
 
 # Shared-memory cache (askr_cache_* + the Laravel driver). 0 = off.
 # [cache]
-# slots = 16384   # ~4.3 KB each; 16384 ≈ 70 MB
+# slots = 16384          # kv cache: ~4.3 KB each; 16384 ≈ 70 MB
+# response_slots = 512   # response cache: ~140 KB each; 512 ≈ 70 MB.
+#                        # PHP opts in per-response: header('Askr-Cache: 60, tags=posts');
+#                        # askr_cache_forget_tag('posts') invalidates across all workers.
 
 # Broadcasting: askr_broadcast() + SSE at GET /askr/events?channel=NAME.
 # [broadcast]
 # enabled = true
+
+# Pusher-compatible WebSocket (/app/{key}) + trigger (/apps/{id}/events) — a
+# drop-in Reverb for Laravel Echo. Auto-enables the broadcast ring.
+# [pusher]
+# enabled = true
+
+# Record failing (5xx) requests here so `askr replay <id>.json` can reproduce
+# them. Captures request bodies — treat this directory as sensitive.
+# [record]
+# dir = "/var/lib/askr/errors"
 
 # Canary reload: roll one worker and health-check it before the rest.
 # [reload]

@@ -280,93 +280,89 @@ fn main() -> anyhow::Result<()> {
                 response_cache,
                 broadcast,
             ) = if let Some(path) = config_file {
-                    let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
-                    if let Some(base) = &r.app_base {
-                        // Exported for the worker script; children inherit it across fork.
-                        std::env::set_var("ASKR_APP_BASE", base);
-                    }
-                    CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
-                    WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
-                    WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
-                    let sc = Sidecars {
-                        queue: r.queue_workers,
-                        queue_script: r.queue_script,
-                        scheduler_script: r.scheduler_script,
-                    };
-                    (
-                        r.config,
-                        r.workers,
-                        r.ini,
-                        r.admin_listen,
-                        r.paranoid,
-                        sc,
-                        r.cache_slots,
-                        r.response_cache_slots,
-                        r.broadcast,
-                    )
-                } else {
-                    let max_body_size = parse_size(&max_body_size)?;
-                    let docroot = resolve_root(root)?;
-                    if !docroot.join(&front).is_file() {
-                        anyhow::bail!(
-                            "front controller not found: {} (use --root / --front)",
-                            docroot.join(&front).display()
-                        );
-                    }
-                    if let Some(ws) = &worker_script {
-                        anyhow::ensure!(ws.is_file(), "worker script not found: {}", ws.display());
-                    }
-                    if let Some(c) = &tls_cert {
-                        anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
-                    }
-                    CANARY_ENABLED.store(canary, Ordering::SeqCst);
-                    let tls_on = tls_cert.is_some() || tls_self_signed;
-                    if let Some(qs) = &queue_script {
-                        anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
-                    }
-                    if let Some(ss) = &scheduler_script {
-                        anyhow::ensure!(
-                            ss.is_file(),
-                            "scheduler script not found: {}",
-                            ss.display()
-                        );
-                    }
-                    let cfg = Config {
-                        docroot,
-                        front_controller: front,
-                        listen,
-                        https: https || tls_on,
-                        worker_script,
-                        max_requests,
-                        tls_cert,
-                        tls_key,
-                        tls_self_signed,
-                        max_body_size,
-                        record_dir: record_errors,
-                        pusher,
-                    };
-                    let w = workers.unwrap_or_else(default_workers).max(1);
-                    let wmin = workers_min.unwrap_or(w).max(1);
-                    let wmax = workers_max.unwrap_or(w).max(wmin);
-                    WORKERS_MIN.store(wmin, Ordering::SeqCst);
-                    WORKERS_MAX.store(wmax, Ordering::SeqCst);
-                    let sc = Sidecars {
-                        queue: if queue_script.is_some() { queue } else { 0 },
-                        queue_script,
-                        scheduler_script,
-                    };
-                    (
-                        cfg,
-                        w,
-                        ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
-                        admin,
-                        paranoid,
-                        sc,
-                        cache_slots,
-                        response_cache,
-                        broadcast,
-                    )
+                let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
+                if let Some(base) = &r.app_base {
+                    // Exported for the worker script; children inherit it across fork.
+                    std::env::set_var("ASKR_APP_BASE", base);
+                }
+                CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
+                WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
+                WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
+                let sc = Sidecars {
+                    queue: r.queue_workers,
+                    queue_script: r.queue_script,
+                    scheduler_script: r.scheduler_script,
                 };
+                (
+                    r.config,
+                    r.workers,
+                    r.ini,
+                    r.admin_listen,
+                    r.paranoid,
+                    sc,
+                    r.cache_slots,
+                    r.response_cache_slots,
+                    r.broadcast,
+                )
+            } else {
+                let max_body_size = parse_size(&max_body_size)?;
+                let docroot = resolve_root(root)?;
+                if !docroot.join(&front).is_file() {
+                    anyhow::bail!(
+                        "front controller not found: {} (use --root / --front)",
+                        docroot.join(&front).display()
+                    );
+                }
+                if let Some(ws) = &worker_script {
+                    anyhow::ensure!(ws.is_file(), "worker script not found: {}", ws.display());
+                }
+                if let Some(c) = &tls_cert {
+                    anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
+                }
+                CANARY_ENABLED.store(canary, Ordering::SeqCst);
+                let tls_on = tls_cert.is_some() || tls_self_signed;
+                if let Some(qs) = &queue_script {
+                    anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
+                }
+                if let Some(ss) = &scheduler_script {
+                    anyhow::ensure!(ss.is_file(), "scheduler script not found: {}", ss.display());
+                }
+                let cfg = Config {
+                    docroot,
+                    front_controller: front,
+                    listen,
+                    https: https || tls_on,
+                    worker_script,
+                    max_requests,
+                    tls_cert,
+                    tls_key,
+                    tls_self_signed,
+                    max_body_size,
+                    record_dir: record_errors,
+                    pusher,
+                };
+                let w = workers.unwrap_or_else(default_workers).max(1);
+                let wmin = workers_min.unwrap_or(w).max(1);
+                let wmax = workers_max.unwrap_or(w).max(wmin);
+                WORKERS_MIN.store(wmin, Ordering::SeqCst);
+                WORKERS_MAX.store(wmax, Ordering::SeqCst);
+                let sc = Sidecars {
+                    queue: if queue_script.is_some() { queue } else { 0 },
+                    queue_script,
+                    scheduler_script,
+                };
+                (
+                    cfg,
+                    w,
+                    ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
+                    admin,
+                    paranoid,
+                    sc,
+                    cache_slots,
+                    response_cache,
+                    broadcast,
+                )
+            };
 
             // Map shared regions before any fork so all workers share them.
             if cache_slots > 0 {
@@ -1196,7 +1192,11 @@ fn collect_tests(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
         let p = e.path();
         if p.is_dir() {
             collect_tests(&p, out);
-        } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("Test.php")) {
+        } else if p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("Test.php"))
+        {
             out.push(p);
         }
     }

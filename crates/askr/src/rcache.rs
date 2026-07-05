@@ -481,8 +481,16 @@ unsafe fn write_entry(
     }
     ptr::write(ptr::addr_of_mut!((*e).hdr_len), blob.len() as u32);
     ptr::write(ptr::addr_of_mut!((*e).body_len), body.len() as u32);
-    ptr::copy_nonoverlapping(blob.as_ptr(), ptr::addr_of_mut!((*e).hdr) as *mut u8, blob.len());
-    ptr::copy_nonoverlapping(body.as_ptr(), ptr::addr_of_mut!((*e).body) as *mut u8, body.len());
+    ptr::copy_nonoverlapping(
+        blob.as_ptr(),
+        ptr::addr_of_mut!((*e).hdr) as *mut u8,
+        blob.len(),
+    );
+    ptr::copy_nonoverlapping(
+        body.as_ptr(),
+        ptr::addr_of_mut!((*e).body) as *mut u8,
+        body.len(),
+    );
 }
 
 /// Empty the cache (keeps tag generations).
@@ -512,7 +520,10 @@ fn parse_hdr_blob(raw: &[u8]) -> Vec<(String, String)> {
     String::from_utf8_lossy(raw)
         .split("\r\n")
         .filter(|l| !l.is_empty())
-        .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+        .filter_map(|l| {
+            l.split_once(':')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        })
         .collect()
 }
 
@@ -526,7 +537,14 @@ mod tests {
         assert!(enabled());
 
         let hdrs = vec![("Content-Type".to_string(), "text/html".to_string())];
-        assert!(store(b"GET|/posts", 200, &hdrs, b"<h1>posts</h1>", 60, &[b"posts".to_vec()]));
+        assert!(store(
+            b"GET|/posts",
+            200,
+            &hdrs,
+            b"<h1>posts</h1>",
+            60,
+            &[b"posts".to_vec()]
+        ));
 
         let hit = get(b"GET|/posts").expect("hit");
         assert_eq!(hit.status, 200);
@@ -538,7 +556,14 @@ mod tests {
         assert!(get(b"GET|/posts").is_none());
 
         // A fresh store after invalidation is servable again.
-        assert!(store(b"GET|/posts", 200, &hdrs, b"v2", 60, &[b"posts".to_vec()]));
+        assert!(store(
+            b"GET|/posts",
+            200,
+            &hdrs,
+            b"v2",
+            60,
+            &[b"posts".to_vec()]
+        ));
         assert_eq!(get(b"GET|/posts").unwrap().body, b"v2");
 
         // An untagged entry is unaffected by tag bumps.
