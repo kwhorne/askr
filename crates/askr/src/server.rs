@@ -288,6 +288,12 @@ async fn handle(
     let t_start = Instant::now();
     let config = &rt.config;
     let port = config.listen.port();
+    let accept_encoding = req
+        .headers()
+        .get(hyper::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
 
     // Pusher WebSocket endpoint: /app/{key} (drop-in Reverb, #6).
     if rt.pusher_enabled
@@ -338,7 +344,7 @@ async fn handle(
     let mut coalesce_leader = false;
     if let Some(key) = &cache_key {
         if let Some(c) = rcache::get(key) {
-            let response = cached_response(c);
+            let response = cached_response(c, &accept_encoding);
             finish(&rt, &response, t_start, 0);
             return Ok(response);
         }
@@ -360,7 +366,7 @@ async fn handle(
                 }
                 if let Some(c) = served {
                     rcache::note_coalesced();
-                    let response = cached_response(c);
+                    let response = cached_response(c, &accept_encoding);
                     finish(&rt, &response, t_start, 0);
                     return Ok(response);
                 }
@@ -491,7 +497,7 @@ async fn handle(
                 maybe_store(key, &resp);
             }
             let state = rcache::enabled().then_some("MISS");
-            build_response(resp, state)
+            build_response(resp, state, &accept_encoding)
         }
         Err(e) => {
             tracing::error!(error = %e, "php handling failed");
@@ -614,23 +620,53 @@ fn parse_cache_directive(v: &str) -> Option<(u64, Vec<Vec<u8>>)> {
     Some((ttl, tags))
 }
 
-/// Build a hyper response from a cached entry.
-fn cached_response(c: rcache::Cached) -> Response<ResBody> {
-    let mut builder =
-        Response::builder().status(StatusCode::from_u16(c.status).unwrap_or(StatusCode::OK));
-    for (name, value) in &c.headers {
-        builder = builder.header(name, value);
-    }
+/// Finish a response body, compressing it (br/gzip) when the client accepts it
+/// and the content type is worth compressing.
+fn finish_body(
+    builder: hyper::http::response::Builder,
+    body: Vec<u8>,
+    content_type: &str,
+    accept_encoding: &str,
+) -> Response<ResBody> {
+    let builder = match crate::compress::maybe(&body, content_type, accept_encoding) {
+        Some((enc, compressed)) => {
+            return builder
+                .header(hyper::header::CONTENT_ENCODING, enc.header())
+                .header(hyper::header::VARY, "Accept-Encoding")
+                .body(full(Bytes::from(compressed)))
+                .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"));
+        }
+        None => builder,
+    };
     builder
-        .header("X-Askr-Cache", "HIT")
-        .body(full(Bytes::from(c.body)))
+        .body(full(Bytes::from(body)))
         .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
 }
 
-fn build_response(resp: askr_php::Response, cache_state: Option<&str>) -> Response<ResBody> {
+/// Build a hyper response from a cached entry.
+fn cached_response(c: rcache::Cached, accept_encoding: &str) -> Response<ResBody> {
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(c.status).unwrap_or(StatusCode::OK));
+    let mut content_type = String::new();
+    for (name, value) in &c.headers {
+        if name.eq_ignore_ascii_case("content-type") {
+            content_type = value.clone();
+        }
+        builder = builder.header(name, value);
+    }
+    builder = builder.header("X-Askr-Cache", "HIT");
+    finish_body(builder, c.body, &content_type, accept_encoding)
+}
+
+fn build_response(
+    resp: askr_php::Response,
+    cache_state: Option<&str>,
+    accept_encoding: &str,
+) -> Response<ResBody> {
     let mut builder =
         Response::builder().status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
 
+    let mut content_type = String::new();
     for (name, value) in &resp.headers {
         // Strip framing headers (hyper recomputes them) and the internal
         // `Askr-Cache` control header (never leaks to the client).
@@ -640,15 +676,16 @@ fn build_response(resp: askr_php::Response, cache_state: Option<&str>) -> Respon
         {
             continue;
         }
+        if name.eq_ignore_ascii_case("content-type") {
+            content_type = value.clone();
+        }
         builder = builder.header(name, value);
     }
     if let Some(state) = cache_state {
         builder = builder.header("X-Askr-Cache", state);
     }
 
-    builder
-        .body(full(Bytes::from(resp.body)))
-        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
+    finish_body(builder, resp.body, &content_type, accept_encoding)
 }
 
 /// Subscribe to a channel and stream Server-Sent Events.
@@ -738,18 +775,53 @@ async fn serve_static(
         "public, max-age=3600"
     };
 
-    // Conditional GET.
+    // Conditional GET (tolerate the -br/-gz suffix a compressed variant carries).
     if let Some(inm) = headers
         .get(hyper::header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
     {
-        if inm.split(',').any(|t| t.trim() == etag) {
+        if inm.split(',').any(|t| {
+            let t = t.trim().trim_end_matches("-br").trim_end_matches("-gz");
+            t == etag
+        }) {
             return Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(hyper::header::ETAG, &etag)
                 .header(hyper::header::CACHE_CONTROL, cache_control)
                 .body(full(Bytes::new()))
                 .unwrap();
+        }
+    }
+
+    // Compress small, compressible, non-Range static files on the fly (JS/CSS/
+    // JSON/SVG assets). Large files keep streaming uncompressed.
+    let ct = mime_for(path);
+    if !headers.contains_key(hyper::header::RANGE)
+        && len <= crate::compress::MAX_STATIC
+        && crate::compress::compressible(ct)
+    {
+        let accept = headers
+            .get(hyper::header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if let Some(enc) = crate::compress::negotiate(accept) {
+            if let Ok(bytes) = tokio::fs::read(path).await {
+                if let Some(compressed) = crate::compress::compress(&bytes, enc) {
+                    if compressed.len() < bytes.len() {
+                        return Response::builder()
+                            .status(StatusCode::OK)
+                            .header(hyper::header::CONTENT_TYPE, ct)
+                            .header(hyper::header::ETAG, format!("{etag}{}", enc.etag_suffix()))
+                            .header(hyper::header::CACHE_CONTROL, cache_control)
+                            .header(hyper::header::CONTENT_ENCODING, enc.header())
+                            .header(hyper::header::VARY, "Accept-Encoding")
+                            .body(full(Bytes::from(compressed)))
+                            .unwrap_or_else(|_| {
+                                text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response")
+                            });
+                    }
+                }
+            }
         }
     }
 
@@ -908,7 +980,7 @@ mod tests {
             body: b"hello".to_vec(),
             php_status: 0,
         };
-        let out = build_response(resp, None);
+        let out = build_response(resp, None, "");
         assert_eq!(out.status(), StatusCode::CREATED);
         assert_eq!(out.headers().get("X-Test").unwrap(), "yes");
         // hyper computes framing; our explicit Content-Length is stripped.

@@ -8,6 +8,7 @@ mod admin;
 mod broadcast;
 mod cache;
 mod cgi;
+mod compress;
 mod config;
 mod doctor;
 mod metrics;
