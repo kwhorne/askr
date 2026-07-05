@@ -29,6 +29,11 @@ typos fail fast in `config-check`.
 | `max_requests` | int | `0` | Recycle each worker after N requests (`0` = never). |
 | `max_body_size` | string | `16M` | Reject larger bodies with `413`. `K`/`M`/`G` or plain bytes. |
 | `https` | bool | `false` | Force HTTPS in `$_SERVER` (e.g. behind a TLS terminator). Implied by TLS. |
+| `workers_min` | int | = `workers` | CoW autoscaling floor (with `--cow`). |
+| `workers_max` | int | = `workers` | CoW autoscaling ceiling (> min enables autoscaling). |
+| `access_log` | path | — | JSON access log per request; `-` for stdout. Off if unset. |
+| `sandbox` | bool | `false` | Linux hardening: seccomp no-exec. See [Sandbox](SANDBOX.md). |
+| `sandbox_write` | path[] | `[]` | Landlock: writes allowed only under these paths (enables the FS restriction). |
 
 ### `[worker]`
 
@@ -53,6 +58,10 @@ Omit this whole section to run in per-request mode. Present it to enable
 Enabling TLS negotiates HTTP/2 or HTTP/1.1 via ALPN and sets `HTTPS=on` in
 `$_SERVER` (so Laravel emits `secure` cookies). Certs must be **X.509 v3**.
 
+**Auto-TLS (ACME / Let's Encrypt)** is configured via flags (`--acme`,
+`--acme-domain`, `--acme-email`, …) — combine with `--config`. See
+[Auto-TLS](AUTOTLS.md).
+
 ### `[admin]`
 
 | Key | Type | Meaning |
@@ -67,6 +76,7 @@ Run queue workers in the same binary, supervised alongside the web workers.
 | --- | --- | --- |
 | `workers` | int | Number of queue-worker processes (`0` = off). |
 | `script` | path | Queue runner script (e.g. `examples/askr-queue.php`). |
+| `slots` | int | Shared-memory job queue slots (`0` = off; 32 KB each) — `askr_queue_*` + the `AskrQueue` driver. See [Cache](CACHE.md). |
 
 ### `[scheduler]`
 
@@ -76,6 +86,16 @@ Run the scheduler (built-in cron) in the same binary.
 | --- | --- | --- |
 | `script` | path | Scheduler runner script (e.g. `examples/askr-scheduler.php`). Omit to disable. |
 
+### `[[sidecar]]`
+
+Supervise arbitrary external commands (array of tables; respawned if they die).
+Run via `sh -c` in `$ASKR_APP_BASE`. Used for e.g. Inertia SSR — see [Docker](DOCKER.md).
+
+```toml
+[[sidecar]]
+command = "node bootstrap/ssr/ssr.mjs"
+```
+
 ### `[cache]`
 
 Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See
@@ -83,7 +103,9 @@ Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `slots` | int | Number of cache slots (`0` = disabled). Each slot is ~4.3 KB. |
+| `slots` | int | Small kv cache slots (`0` = disabled). ~4.3 KB each — counters, locks, small values. |
+| `large_slots` | int | Large-value region slots (`0` = off). 64 KB each — Laravel sessions, cached fragments/collections. |
+| `response_slots` | int | Response cache slots (`0` = off). ~140 KB each — full-response edge cache with tag invalidation. |
 
 ### `[broadcast]`
 
@@ -92,6 +114,22 @@ Enable `askr_broadcast()` and the SSE endpoint. See [Broadcasting](BROADCAST.md)
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `enabled` | bool | Turn on the broadcast ring + `GET /askr/events`. |
+
+### `[pusher]`
+
+Pusher-compatible WebSocket + HTTP trigger (drop-in Reverb). Auto-enables the
+broadcast ring.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `enabled` | bool | Turn on the WS endpoint `/app/{key}` + trigger `/apps/{id}/events`. |
+| `secret` | string | App secret to verify private/presence subscription auth (omit = accept, dev). |
+
+### `[record]`
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `dir` | path | Record failing (5xx) requests here for `askr replay`. Captures bodies — sensitive. |
 
 ### `[reload]`
 

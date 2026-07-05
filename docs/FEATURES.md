@@ -1,4 +1,4 @@
-# Askr power features (0.3.0)
+# Askr power features
 
 Seven capabilities that fall out of Askr's architecture — the shared-memory
 substrate, the CoW template, and owning the whole request lifecycle in-process.
@@ -169,3 +169,35 @@ The `--max-body-size` limit is enforced on the stream (`413` above it); set PHP'
     - job_name: askr
       static_configs: [{ targets: ["127.0.0.1:9000"] }]
   ```
+
+## 10. Redis-free stack (0.5.0–0.6.1)
+
+Everything a single-box Laravel app usually needs Redis for is built into the
+binary and lives in shared memory across all workers — see [Cache](CACHE.md):
+
+- **Cache** — `askr_cache_*` + the `AskrCacheStore` driver (small + 64 KB large
+  region for sessions/fragments; `[cache] slots` / `large_slots`).
+- **Counters & atomic locks** — `askr_cache_increment` and `askr_cache_add`
+  (set-if-absent) back `Cache::lock()` for rate limiting and mutexes.
+- **Sessions** — `SESSION_STORE=askr` (large region), no external store.
+- **Job queue** — `askr_queue_*` + the `AskrQueue` driver with reserve/visibility
+  timeout, delayed jobs and retries (`[queue] slots`).
+- **Full extension set** — intl, gd, curl, zip, exif, pdo_mysql/pgsql — so
+  Filament/Livewire/Inertia apps run unmodified.
+- **Sidecars** — supervise any command (`--sidecar`, `[[sidecar]]`), e.g. Inertia
+  SSR, respawned like a worker.
+
+## 11. Auto-TLS via ACME (0.7.0)
+
+`--acme --acme-domain example.com --acme-email you@example.com` obtains and
+renews a Let's Encrypt certificate over HTTP-01 — the master answers challenges
+on port 80 before forking, workers serve HTTPS from the cache, and a renewal
+thread rolls workers when the cert nears expiry. One binary, no certbot/proxy.
+See [Auto-TLS](AUTOTLS.md).
+
+## 12. Hardening / sandbox (0.8.0, Linux)
+
+`--sandbox` shrinks the blast radius of a PHP exploit: a seccomp filter makes
+`execve`/`ptrace` return `EPERM` (no shell from an RCE), and `--sandbox-write
+<dir>` adds Landlock so the worker can read everywhere but **write only** under
+the allowlist (no webshell into the docroot). See [Sandbox](SANDBOX.md).

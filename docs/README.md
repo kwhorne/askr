@@ -54,11 +54,15 @@ Building from source: [Building](BUILDING.md).
 - **Worker mode** (Octane-style) with per-request state reset — no bleed
 - **`--paranoid`** state-bleed detector — is your app worker-safe?
 - **CoW template** (`--cow`) — boot once, fork workers for ~ms warm respawn (experimental)
-- **Queue workers + scheduler** in the same binary (no Horizon/cron)
-- **Shared cache** (`askr_cache_*` + Laravel driver) — cache/counters/rate limiting, no Redis
-- **Broadcasting** — live updates via SSE + `askr_broadcast()`, no Reverb/Pusher
+- **Queue workers + scheduler + sidecars** in the same binary (no Horizon/cron)
+- **Shared cache / sessions / locks / job queue** (`askr_cache_*`, `askr_queue_*` + Laravel drivers) — **fully replaces Redis** on a single box
+- **Broadcasting** — SSE + `askr_broadcast()`, plus a **Pusher-compatible WebSocket** (`--pusher`, drop-in Reverb with auth)
+- **Response cache** with tag invalidation, request **coalescing**, `askr_defer()` post-response work
+- **Multipart uploads** (`$_FILES`) + response **compression** (br/gzip)
+- **Record & replay** failing requests (`--record-errors` / `askr replay`)
 - Graceful **recycling** + auto-respawn + crash resilience
-- **TLS** (rustls) + **HTTP/2**; `--tls-self-signed` for dev
+- **TLS** (rustls) + **HTTP/2**; `--tls-self-signed` for dev; **auto-TLS via ACME** (`--acme`)
+- **Hardening** (`--sandbox`, Linux): seccomp no-exec + Landlock write-restriction
 - Zero-downtime **rolling reload** on `SIGHUP`, with optional **canary**
 - Request hardening: body-size limit (413), HEAD, GET/POST
 - Typed **`askr.toml`** config + `config-check`
@@ -68,7 +72,5 @@ Building from source: [Building](BUILDING.md).
 
 ## Not yet
 
-The per-core **io_uring** I/O core (the biggest efficiency step, Linux), HTTP/3
-(QUIC), raw WebSockets / Reverb-protocol compatibility, multipart `$_FILES`,
-OpenTelemetry export, seccomp/Landlock sandboxing, and the `askr-laravel`
-composer package.
+The per-core **io_uring** I/O core (the biggest efficiency step, Linux), **HTTP/3**
+(QUIC), **OpenTelemetry** trace export, and an `askr-laravel` composer package.

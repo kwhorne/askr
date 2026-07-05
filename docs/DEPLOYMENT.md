@@ -161,10 +161,11 @@ See [Admin](ADMIN.md) for scripting examples.
 
 ## Security notes
 
-- The admin plane has **no built-in auth** in 0.1.0 — bind it to `127.0.0.1` and
-  reach it via SSH / private network, or front it with your own auth.
+- The admin plane has **no built-in auth** — bind it to `127.0.0.1` and reach it
+  via SSH / private network, or front it with your own auth.
 - The entire server hot path is memory-safe Rust; PHP is the single `unsafe`
-  frontier. seccomp/Landlock sandboxing of the PHP boundary is planned.
+  frontier. On Linux, harden that boundary with `--sandbox` (seccomp no-exec +
+  optional Landlock write-restriction) — see [Sandbox](SANDBOX.md).
 - Run as a non-root user (`User=www-data`) and keep `--max-body-size` sane for
   your app to bound request memory.
 

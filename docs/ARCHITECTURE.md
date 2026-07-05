@@ -53,8 +53,9 @@ the one thread that created it.
 - injects `$_SERVER` via `register_server_variables`.
 
 All `unsafe` is confined to this FFI boundary; the rest of the server is safe
-Rust. PHP is the single `unsafe` frontier (and the target for future
-seccomp/Landlock sandboxing).
+Rust. PHP is the single `unsafe` frontier — and on Linux it can be boxed in with
+`--sandbox` (seccomp no-exec + optional Landlock write-restriction; see
+[Sandbox](SANDBOX.md)).
 
 ## Two serving modes
 
@@ -151,6 +152,25 @@ crates/askr/src/
   cgi.rs       HTTP request → CGI $_SERVER mapping
   tls.rs       rustls acceptor (PEM or self-signed)
   config.rs    typed askr.toml + validation
-  admin.rs     admin dashboard + status/reload API
+  admin.rs     admin dashboard + status/reload API + Prometheus /metrics
   doctor.rs    pre-flight checks
+  metrics.rs   shared-memory counters/histogram (PHP-vs-I/O, RSS, latency)
+  cache.rs     shared kv cache: size-class regions (counters, locks, sessions)
+  rcache.rs    response cache + O(1) tag invalidation + request coalescing
+  squeue.rs    shared-memory job queue (reserve/visibility/delay/retry)
+  broadcast.rs SSE broadcast ring (askr_broadcast + /askr/events)
+  pusher.rs    Pusher-compatible WebSocket + HTTP trigger (drop-in Reverb)
+  upload.rs    streaming multipart → temp files ($_FILES)
+  compress.rs  br/gzip response compression
+  record.rs    record failing 5xx requests for `askr replay`
+  acme.rs      auto-TLS via ACME/Let's Encrypt (HTTP-01)
+  sandbox.rs   Linux hardening: seccomp + Landlock
 ```
+
+### Shared-memory substrate
+
+The master `mmap`s an anonymous `MAP_SHARED` region **before** forking, so every
+worker inherits the same memory. It backs the metrics, kv cache, response cache
+(+ tag generations, coalescing table), the job queue and ACME challenge tokens.
+Reads are length-clamped (memory-safe under races) and per-slot spinlocks are
+stolen if a holder dies — no worker can corrupt or wedge another.

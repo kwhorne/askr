@@ -5,9 +5,10 @@ Pusher, Redis pub/sub). PHP publishes an event with `askr_broadcast()`; Rust
 holds the client connections and fans events out — across **all** worker
 processes, via a shared-memory ring.
 
-Today this is **Server-Sent Events (SSE)**, which covers most "live update" needs
-(notifications, dashboards, progress, Livewire refreshes). Raw WebSockets and
-Pusher-protocol (drop-in Reverb) compatibility are planned.
+This ships as **Server-Sent Events (SSE)**, which covers most "live update" needs
+(notifications, dashboards, progress, Livewire refreshes). For Laravel Echo there
+is also a **Pusher-compatible WebSocket** endpoint (`--pusher`, a drop-in Reverb,
+with private/presence auth) — see [Features](FEATURES.md).
 
 ## Enabling it
 
