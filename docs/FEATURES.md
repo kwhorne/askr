@@ -151,3 +151,21 @@ $request->input('name');                       // multipart fields too
 Temp files land under `$TMPDIR/askr-uploads` and are removed after each request.
 The `--max-body-size` limit is enforced on the stream (`413` above it); set PHP's
 `upload_max_filesize`/`post_max_size` via `[worker] ini` if your app checks them.
+
+## 9. Compression, logging & observability (0.4.1)
+
+- **Response compression** — compressible responses are compressed in Rust,
+  negotiating `br` (preferred) or `gzip` from `Accept-Encoding` (often 5–10×
+  fewer bytes). Dynamic, cached, and small static responses; large files keep
+  streaming. Automatic — no config.
+- **Access log** — `--access-log <path|->` / `[server] access_log` writes one
+  JSON line per request (ts, ip, method, path, status, bytes, dur_ms).
+- **Prometheus** — `GET /metrics` on the admin plane exposes Prometheus text
+  format (requests, status classes, PHP-vs-I/O seconds, cache
+  hits/misses/evictions, in-flight + live workers, latency histogram):
+
+  ```
+  scrape_configs:
+    - job_name: askr
+      static_configs: [{ targets: ["127.0.0.1:9000"] }]
+  ```

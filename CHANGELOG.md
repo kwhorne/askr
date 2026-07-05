@@ -2,6 +2,28 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.4.1 — 2026-07-05
+
+Server-environment completeness: compression, logging, observability.
+
+- **Response compression** — compressible responses (HTML/JSON/JS/CSS/SVG/…) are
+  compressed in the Rust hot path, negotiating `br` (preferred) or `gzip` from
+  `Accept-Encoding`; often 5–10× fewer bytes on the wire. Applies to dynamic PHP
+  responses, cached responses, and small static files (large files keep
+  streaming). Pure-Rust encoders (`flate2` + `brotli`) — the self-contained build
+  is unaffected. Adds `Content-Encoding` + `Vary`; compressed static ETags get a
+  `-br`/`-gz` suffix and conditional GET tolerates it.
+- **Structured access log** — `--access-log <path|->` / `[server] access_log`
+  writes one JSON line per request (ts, ip, method, path, status, bytes, dur_ms),
+  covering every response path (static, cache, SSE, Pusher, PHP). Off by default.
+- **Prometheus `/metrics`** — the admin plane now exposes Prometheus text format
+  (requests/errors/bytes, PHP-vs-total seconds, status classes, cache
+  hits/misses/coalesced/evictions, in-flight + live-workers gauges, a request
+  latency histogram) so Askr is scrapeable by standard tooling.
+- **KV cache eviction** — under pressure the cache now evicts an expired entry,
+  else the oldest-written one (was: overwrite the primary slot blindly), with a
+  new `askr_cache_evictions_total` metric.
+
 ## 0.4.0 — 2026-07-05
 
 - **Multipart file uploads (worker mode)** — the last big thing blocking "run any
