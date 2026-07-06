@@ -132,6 +132,33 @@ multi-week runtime rewrite that the data says wouldn't move the needle.**
 - **CoW** shares a warm template across workers — competitive throughput at
   slightly lower memory.
 
+## Soak test — endurance under sustained load
+
+Short sprints don't prove stability. We soaked the same app (a route that also
+hits SQLite) under continuous c64 load and sampled every 30 s. The app *leaks*
+(~1.5 KB/request, Laravel-internal — [see WORKER_MODE.md](WORKER_MODE.md)), so
+this specifically exercises the crash-recovery.
+
+| Mode | Duration | Errors | RSS | p99 | Recovery events |
+| --- | --- | ---: | --- | --- | --- |
+| **CoW** (`--cow`) | 7 min | **0** | bounded, oscillating ~260–505 MB | 13–25 ms | 63 **warm re-forks** |
+| **Worker** (prefork, no `--max-requests`) | 4 min | **0** | bounded ~277–543 MB | mostly 12–20 ms (one 63 ms blip) | 36 OOM → **cold respawns** |
+
+The takeaways:
+
+- **Zero errors, both modes, for the whole soak** — even though the worker mode
+  OOM'd **36 times**. The 0.8.3 resilience fix turns each `memory_limit` fatal
+  into a clean respawn; the other workers + the socket backlog absorb the gap.
+- **Memory stays bounded.** The leak doesn't run away — a worker fills up, dies at
+  the limit, and is replaced with a fresh one, so RSS oscillates within a band
+  instead of climbing to an OOM-kill.
+- **CoW is smoother.** Its re-fork is warm (~ms), so p99 stays tight; prefork's
+  respawn is a cold boot (~300 ms), which shows up as the occasional p99 blip.
+  That's the concrete reason to **prefer CoW for long-running deployments** — or
+  set `--max-requests` to recycle proactively before the OOM.
+
+No panics, no segfaults, no flood. A leaking app degrades *gracefully*.
+
 ## Honest caveats
 
 1. **Shared dev VM.** Run-to-run variance was real (one Askr-CoW sample came in
