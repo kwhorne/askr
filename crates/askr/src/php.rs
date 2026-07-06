@@ -14,6 +14,8 @@
 
 use std::ffi::{c_char, c_void, CString};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 use tokio::sync::{mpsc, oneshot};
@@ -73,7 +75,11 @@ impl Php {
     /// Worker mode: boot the app once via `script`, then serve many requests
     /// against the booted app — no per-request bootstrap. The loop ends when the
     /// server drops the sender (graceful drain on recycle/shutdown).
-    pub fn spawn_worker(script: PathBuf, ini: Option<String>) -> anyhow::Result<Self> {
+    pub fn spawn_worker(
+        script: PathBuf,
+        ini: Option<String>,
+        draining: Arc<AtomicBool>,
+    ) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::channel::<Job>(1024);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let script_c = CString::new(script.to_string_lossy().as_ref().to_owned())?;
@@ -112,6 +118,21 @@ impl Php {
                     )
                 };
                 tracing::debug!(rc, "worker loop ended");
+                // Resilience: the worker loop only ends when the interpreter is
+                // finished — either we're draining (graceful shutdown / recycle),
+                // or the app fatal'd inside the loop (classically: hit PHP's
+                // `memory_limit` after a slow leak in the long-lived worker). In
+                // that second case the interpreter is dead but the process would
+                // keep answering `502 php worker unavailable` forever, so exit and
+                // let the supervisor respawn a fresh worker instead of flooding.
+                if !draining.load(Ordering::SeqCst) {
+                    tracing::error!(
+                        rc,
+                        "php worker interpreter exited unexpectedly (fatal/OOM?) — \
+                         exiting for supervisor respawn"
+                    );
+                    std::process::exit(75);
+                }
             })?;
 
         wait_ready(ready_rx)?;

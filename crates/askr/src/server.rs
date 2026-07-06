@@ -14,7 +14,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -230,6 +230,7 @@ pub async fn run(
     php: Php,
     recycle_after: usize,
     tls: Option<TlsAcceptor>,
+    draining: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let pusher_enabled = config.pusher;
     let access = open_access_log(config.access_log.as_deref());
@@ -297,10 +298,12 @@ pub async fn run(
                 });
             }
             _ = rt.shutdown.notified() => {
+                draining.store(true, Ordering::SeqCst);
                 tracing::info!(served = rt.served.load(Ordering::SeqCst), "recycling: draining");
                 break;
             }
             _ = sigterm.recv() => {
+                draining.store(true, Ordering::SeqCst);
                 tracing::info!(served = rt.served.load(Ordering::SeqCst), "SIGTERM: draining");
                 break;
             }

@@ -908,6 +908,18 @@ int askr_php_run_worker(const char *script, askr_wait_fn wait, askr_reply_fn rep
         rc = 2;
     } zend_end_try();
 
+    /* INSTRUMENTATION: why did the worker loop end? Capture PG(last_error_*)
+     * before php_request_shutdown() clears it. */
+    if (rc != 0) {
+        fprintf(stderr,
+                "askr-worker: EXIT rc=%d err_type=%d line=%d msg=[%s]\n",
+                rc,
+                (int)PG(last_error_type),
+                (int)PG(last_error_lineno),
+                PG(last_error_message) ? ZSTR_VAL(PG(last_error_message)) : "(none)");
+        fflush(stderr);
+    }
+
     g_worker_mode = 0;
     php_request_shutdown((void *)0);
     askr_req_reset();

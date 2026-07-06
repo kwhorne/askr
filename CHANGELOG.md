@@ -2,6 +2,23 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.8.3 — 2026-07-06
+
+- **Fix (important): worker mode no longer floods `502 php worker unavailable`
+  under high concurrency.** Benchmarking revealed that a long-lived worker whose
+  app leaks memory eventually hits PHP's `memory_limit`, and the resulting fatal
+  ended the worker's request loop — after which the process kept answering `502`
+  for every request instead of recovering. Now the interpreter thread, when it
+  exits unexpectedly (a fatal/OOM rather than a graceful drain), **exits the
+  process so the supervisor respawns a fresh worker** — no flood, and throughput
+  stays clean. A graceful `SIGTERM`/recycle drain is distinguished from a crash
+  via a shared `draining` flag, so normal shutdown is unaffected. The shim also
+  logs the triggering PHP error (e.g. the exhausted `memory_limit`) so the cause
+  is visible in the logs.
+- Guidance: prefer **CoW mode** (`--cow`) for leaky apps — its warm re-fork makes
+  respawns ~ms instead of a cold boot — and/or set `--max-requests` to recycle
+  workers proactively. See docs/BENCHMARKS.md and docs/COW.md.
+
 ## 0.8.2 — 2026-07-05
 
 - **PHP 8.5** — upgraded the embedded engine from 8.4.11 to **8.5.8** (latest),

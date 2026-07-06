@@ -44,8 +44,12 @@ pub fn run_worker(
 
     // Boot the interpreter (its own dedicated thread) before the runtime.
     // Worker mode boots the app once; otherwise each request runs fresh.
+    // Shared flag: set when the server starts draining (graceful shutdown /
+    // recycle) so the interpreter thread can tell an expected exit from an
+    // unexpected one (a fatal/OOM) and, in the latter case, exit for respawn.
+    let draining = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let php = match config.worker_script.clone() {
-        Some(script) => Php::spawn_worker(script, ini)?,
+        Some(script) => Php::spawn_worker(script, ini, draining.clone())?,
         None => Php::spawn(ini)?,
     };
 
@@ -65,7 +69,15 @@ pub fn run_worker(
 
     rt.block_on(async move {
         let listener = TcpListener::from_std(listener)?;
-        server::run(listener, Arc::new(config), php, recycle_after, tls).await
+        server::run(
+            listener,
+            Arc::new(config),
+            php,
+            recycle_after,
+            tls,
+            draining,
+        )
+        .await
     })
 }
 

@@ -51,22 +51,38 @@ noise.**
 
 ## Results — `/bench` (JSON, isolates server + framework overhead)
 
-Median of 3 runs, req/s (higher is better):
+> **Correction (0.8.3).** An earlier version of this page reported Askr worker
+> mode at ~18k req/s (≈2× FrankenPHP). That number was **wrong** — it was
+> inflated by `502` responses that `wrk` counted as "requests". A concurrency
+> sweep exposed it: above `--workers` concurrency the worker was 502-flooding,
+> because a **memory leak in the long-lived worker eventually hit PHP's
+> `memory_limit`, the worker died, and the process kept answering 502s**. We
+> fixed the crash-recovery (the worker now respawns instead of flooding — see
+> the CHANGELOG) and re-measured with **zero-error validation on every run**. The
+> honest, validated numbers are below. Lesson, reinforced: *a req/s figure
+> without response validation is noise.*
 
-| Stack | req/s (median) | p50 | p99 | RSS¹ |
+Representative validated run at c64 (0 non-2xx responses on every stack), req/s:
+
+| Stack | req/s | p50 | p99 | RSS¹ |
 | --- | ---: | ---: | ---: | ---: |
-| **Askr — CoW** | **18 207** | 3.6 ms | 11 ms | ~470 MB |
-| **Askr — worker** | **18 132** | 3.1 ms | 14 ms | ~490 MB |
-| Octane + FrankenPHP | 8 563 | 7.3 ms | 11 ms | ~220 MB |
+| **Askr — CoW** | **13 213** | ~3.5 ms | ~11 ms | ~470 MB |
+| **Askr — worker** (fixed) | **10 909** | ~4 ms | ~14 ms | ~490 MB |
+| Octane + FrankenPHP | 8 217 | 7.3 ms | 11 ms | ~220 MB |
 | PHP-FPM + nginx | 4 380 | 14.4 ms | 17 ms | ~90 MB |
 | Octane + RoadRunner² | 3 861 | 12.9 ms | 100–155 ms | ~390 MB |
 
-So on pure server + framework overhead, Askr lands at roughly **2.1× FrankenPHP**
-(the closest embedded-PHP peer), **~4× PHP-FPM**, and **~4.7× RoadRunner**.
+So on pure server + framework overhead, **Askr CoW is ~1.6× FrankenPHP** (the
+closest embedded-PHP peer) and **~3× PHP-FPM**; **Askr worker is ~1.3×
+FrankenPHP**. Worker trails CoW here because this app *leaks* — the worker OOMs
+and cold-respawns under sustained load, while CoW replaces a dead worker with a
+warm re-fork in ~ms. **For leaky apps, prefer CoW** (`--cow`) and/or
+`--max-requests` to recycle proactively.
 
 ## Results — `/bench-db` (a `SELECT count(*)` — realistic read)
 
-Single run, req/s — the database work narrows the field, as it should:
+Single run, req/s — the database work narrows the field, as it should. *(These
+predate the 0.8.3 worker fix; the worker figure is directional.)*
 
 | Stack | req/s | p50 | p99 |
 | --- | ---: | ---: | ---: |
@@ -112,7 +128,7 @@ multi-week runtime rewrite that the data says wouldn't move the needle.**
   between a web server and a PHP pool.
 - **Process-per-core (NTS), not threads (ZTS).** No thread-safety locking on the
   hot path; the OS scheduler does the work. This is the main structural
-  difference from FrankenPHP, and where the ~2× on pure overhead comes from.
+  difference from FrankenPHP, and where the ~1.6× (CoW) on pure overhead comes from.
 - **CoW** shares a warm template across workers — competitive throughput at
   slightly lower memory.
 

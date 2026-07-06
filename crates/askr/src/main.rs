@@ -1237,8 +1237,19 @@ fn cow_child_setup(cc: &CowCtx) {
         rt.block_on(async move {
             match tokio::net::TcpListener::from_std(std_listener) {
                 Ok(l) => {
-                    let _ =
-                        crate::server::run(l, std::sync::Arc::new(config), php, recycle, tls).await;
+                    // CoW already self-heals: this child exits after run() returns
+                    // and the template reforks a warm worker, so the draining flag
+                    // here is only to satisfy the signature.
+                    let draining = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let _ = crate::server::run(
+                        l,
+                        std::sync::Arc::new(config),
+                        php,
+                        recycle,
+                        tls,
+                        draining,
+                    )
+                    .await;
                 }
                 Err(e) => tracing::error!(error = %e, "cow listener"),
             }
