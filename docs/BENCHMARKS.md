@@ -135,9 +135,12 @@ multi-week runtime rewrite that the data says wouldn't move the needle.**
 ## Soak test — endurance under sustained load
 
 Short sprints don't prove stability. We soaked the same app (a route that also
-hits SQLite) under continuous c64 load and sampled every 30 s. The app *leaks*
-(~1.5 KB/request, Laravel-internal — [see WORKER_MODE.md](WORKER_MODE.md)), so
-this specifically exercises the crash-recovery.
+hits SQLite) under continuous c64 load and sampled every 30 s. Our
+`SESSION_DRIVER=array` choice (to dodge the DB-session lock) turned out to *leak*
+under this cookie-less load — the array handler piles one session per request
+into the heap until `memory_limit` — so this soak doubles as a crash-recovery
+test. (A real session driver removes the leak entirely — see
+[WORKER_MODE.md](WORKER_MODE.md).)
 
 | Mode | Duration | Errors | RSS | p99 | Recovery events |
 | --- | --- | ---: | --- | --- | --- |

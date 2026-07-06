@@ -100,20 +100,38 @@ see **Memory growth & recycling** below.)
 
 ## Memory growth & recycling
 
-A long-lived PHP worker gradually accumulates memory. We measured exactly where
-it comes from:
+A long-lived PHP worker can accumulate memory. We traced exactly where it comes
+from — and it's more specific (and more fixable) than "the framework leaks":
 
 - **Askr itself does not leak.** A minimal worker (no framework) held **flat at
   2 MB across 3,000,000+ requests** — the loop, the shim and the FFI boundary
   add nothing over time.
-- **Laravel's framework accumulates ~1.5 KB per request** of *held* references
-  (not cyclic garbage — forcing `gc_collect_cycles()` doesn't help) that the
-  template's reset subset doesn't clear. This is inherent to running the
-  framework long-lived, and it's why **Laravel Octane itself defaults to
-  recycling workers** (`--max-requests=500`) rather than trying to zero it out.
+- **The dominant leak is `SESSION_DRIVER=array`.** We instrumented the worker and
+  the only thing that grew linearly was the **array session handler's storage —
+  one entry per request** (`memory_get_usage` and GC roots both tracked the
+  request count exactly). The `array` driver keeps every session in the worker's
+  heap and only garbage-collects *expired* ones, so under load — especially a
+  cookie-less load test, where every request mints a *new* session — it grows
+  without bound until PHP hits `memory_limit`. **Turn off the session middleware
+  and the worker is flat at 8 MB over 60k+ requests.**
 
-So the practical guidance is the same as Octane's — **recycle**, don't chase a
-perfect reset:
+So the first fix is a **config fix**: don't use `array` sessions in a long-lived
+worker. Pick a driver that doesn't pile sessions into the PHP heap. Each has a
+trade-off, and Askr's own store is the one that wins on all of them:
+
+| `SESSION_DRIVER` | Fast? | No heap leak? | No lock? | No extra server? |
+| --- | :---: | :---: | :---: | :---: |
+| `array` | ✅ | ❌ (OOMs) | ✅ | ✅ |
+| `file` | ❌ (disk I/O/req) | ✅ | ✅ | ✅ |
+| `database` (SQLite) | ❌ (write lock) | ✅ | ❌ | ✅ |
+| `redis` | ✅ | ✅ | ✅ | ❌ |
+| **`askr`** (shared memory) | ✅ | ✅ | ✅ | ✅ |
+
+(The `askr` shared-memory session driver ships in the planned `askr-laravel`
+package; until then, `redis`/`file`/`database` all avoid the heap leak.)
+
+Beyond sessions, the residual per-request growth is tiny. Still, treat recycling
+as the safety net — same as Octane, which defaults to `--max-requests=500`:
 
 - **`--max-requests N`** — recycle each worker after N requests (staggered across
   workers so there's always a live one). The proactive, smooth option.
@@ -125,9 +143,10 @@ perfect reset:
   the triggering error logged), instead of the process getting stuck answering
   `502`s. So a leak degrades gracefully; it never floods.
 
-The eventual `askr-laravel` package will carry an Octane-grade, version-aware
-reset to push the per-request accumulation as close to zero as the framework
-allows.
+The planned `askr-laravel` package will ship the **`askr` session driver**
+(shared-memory, lock-free, no heap growth — the only option that's fast *and*
+serverless *and* leak-free) plus an Octane-grade, version-aware reset for the
+residual accumulation.
 
 ## Is my app worker-safe? — `--paranoid`
 
