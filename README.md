@@ -101,6 +101,7 @@ Everything lives in [`docs/`](docs/README.md):
 - **CoW template** (`--cow`): boot once, fork workers — ~ms warm respawn + shared memory
 - **Queue workers + scheduler** supervised in the same binary (no Horizon/cron)
 - **Shared cache** (`askr_cache_*` + Laravel driver): cache, counters, atomic **locks** (`Cache::lock`) and **sessions** (large region) — no Redis
+- **[`askr-laravel`](packages/laravel) package**: drop-in `askr` **session** (shared-memory, no heap leak, ~11–15k req/s flat), **cache** and **queue** drivers via `composer require`
 - **Broadcasting**: live updates to browsers via SSE + `askr_broadcast()` — no Reverb/Pusher
 - Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
 - **TLS** (rustls, ring) + **HTTP/2** (ALPN); `--tls-self-signed` for dev, or **auto-TLS via ACME/Let's Encrypt** (`--acme`)
@@ -143,6 +144,7 @@ Everything lives in [`docs/`](docs/README.md):
 | **0.8.2** — PHP 8.5 + Laravel 13, OPcache/JIT built in | ✅ |
 | Benchmarks: CoW ~1.6× FrankenPHP, ~3× FPM on server overhead (validated) ([details](docs/BENCHMARKS.md)) | ✅ |
 | **0.8.3** — fix: worker mode respawns instead of 502-flooding on OOM under load | ✅ |
+| `askr-laravel` composer package: shared-memory session/cache/queue drivers | ✅ |
 | **Next** — HTTP/3 (QUIC), OTel traces. *(io_uring deprioritised: benchmarks show PHP is 99.5% of request time, I/O ~0.5%)* | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a

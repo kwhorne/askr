@@ -127,8 +127,11 @@ trade-off, and Askr's own store is the one that wins on all of them:
 | `redis` | ✅ | ✅ | ✅ | ❌ |
 | **`askr`** (shared memory) | ✅ | ✅ | ✅ | ✅ |
 
-(The `askr` shared-memory session driver ships in the planned `askr-laravel`
-package; until then, `redis`/`file`/`database` all avoid the heap leak.)
+(The `askr` shared-memory session driver ships in the
+[`askr-laravel`](../packages/laravel) package: `composer require
+kwhorne/askr-laravel`, then `SESSION_DRIVER=askr`. Measured ~11–15k req/s with
+**flat 8 MB per worker** and zero OOMs. `redis`/`file`/`database` also avoid the
+heap leak.)
 
 Beyond sessions, the residual per-request growth is tiny. Still, treat recycling
 as the safety net — same as Octane, which defaults to `--max-requests=500`:
@@ -143,10 +146,10 @@ as the safety net — same as Octane, which defaults to `--max-requests=500`:
   the triggering error logged), instead of the process getting stuck answering
   `502`s. So a leak degrades gracefully; it never floods.
 
-The planned `askr-laravel` package will ship the **`askr` session driver**
-(shared-memory, lock-free, no heap growth — the only option that's fast *and*
-serverless *and* leak-free) plus an Octane-grade, version-aware reset for the
-residual accumulation.
+The [`askr-laravel`](../packages/laravel) package ships the **`askr` session
+driver** (shared-memory, lock-free, no heap growth — the only option that's fast
+*and* serverless *and* leak-free), plus the `askr` cache store and queue
+connector. `composer require kwhorne/askr-laravel` and set `SESSION_DRIVER=askr`.
 
 ## Is my app worker-safe? — `--paranoid`
 

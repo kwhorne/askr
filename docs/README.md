@@ -73,7 +73,7 @@ Building from source: [Building](BUILDING.md).
 
 ## Not yet
 
-**HTTP/3** (QUIC), **OpenTelemetry** trace export, and an `askr-laravel` composer
-package. The per-core **io_uring** core is **deprioritised**: our
+**HTTP/3** (QUIC) and **OpenTelemetry** trace export. The per-core **io_uring**
+core is **deprioritised**: our
 [benchmarks](BENCHMARKS.md) show PHP execution is ~99.5% of request time, so an
 I/O-syscall optimisation would move ~0.5% — the engine, not I/O, is the ceiling.
