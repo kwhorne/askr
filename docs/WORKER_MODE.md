@@ -89,13 +89,45 @@ the template performs an Octane-style reset after each request:
 
 This is verified with a deliberate bleed probe: a `scoped()` binding returns the
 **same** id on every request *without* the reset (bleed) and a **distinct** id
-*with* it (isolated). Under load: 500/500 requests `200`, worker RSS flat
-(~64→66 MB over 600 requests — no accumulation), zero errors.
+*with* it (isolated). Under load: 500/500 requests `200`, zero errors. (The reset
+stops per-request *bleed*; a slow framework-level memory *accumulation* remains —
+see **Memory growth & recycling** below.)
 
 > The full, framework-version-aware reset (covering every flow: sessions, auth,
 > config sandboxing, …) will live in the `askr-laravel` package. The template
 > covers the common sources of bleed; audit your app's own static/singleton
 > state.
+
+## Memory growth & recycling
+
+A long-lived PHP worker gradually accumulates memory. We measured exactly where
+it comes from:
+
+- **Askr itself does not leak.** A minimal worker (no framework) held **flat at
+  2 MB across 3,000,000+ requests** — the loop, the shim and the FFI boundary
+  add nothing over time.
+- **Laravel's framework accumulates ~1.5 KB per request** of *held* references
+  (not cyclic garbage — forcing `gc_collect_cycles()` doesn't help) that the
+  template's reset subset doesn't clear. This is inherent to running the
+  framework long-lived, and it's why **Laravel Octane itself defaults to
+  recycling workers** (`--max-requests=500`) rather than trying to zero it out.
+
+So the practical guidance is the same as Octane's — **recycle**, don't chase a
+perfect reset:
+
+- **`--max-requests N`** — recycle each worker after N requests (staggered across
+  workers so there's always a live one). The proactive, smooth option.
+- **`--cow`** — CoW mode replaces a finished/dead worker with a **warm re-fork in
+  ~ms** instead of a cold boot, so recycling is nearly free. Recommended for
+  long-running deployments.
+- **Resilience (0.8.3+)** — if a worker *does* exhaust `memory_limit` and PHP
+  fatals, Askr exits that worker and the supervisor respawns a fresh one (with
+  the triggering error logged), instead of the process getting stuck answering
+  `502`s. So a leak degrades gracefully; it never floods.
+
+The eventual `askr-laravel` package will carry an Octane-grade, version-aware
+reset to push the per-request accumulation as close to zero as the framework
+allows.
 
 ## Is my app worker-safe? — `--paranoid`
 
