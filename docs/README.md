@@ -20,7 +20,8 @@ requests against it, eliminating per-request framework bootstrap.
 | [Auto-TLS (ACME)](AUTOTLS.md) | Obtain + renew Let's Encrypt certs over HTTP-01 (`--acme`) — no proxy. |
 | [Hardening / sandbox](SANDBOX.md) | seccomp no-exec + Landlock filesystem sandbox (`--sandbox`, Linux). |
 | [Docker](DOCKER.md) | Official multi-arch GHCR image — one container replaces app+nginx+redis+queue+cron. |
-| [io_uring core (plan)](IO-URING.md) | The remaining efficiency step: a Linux io_uring I/O core behind the `Php::handle` seam, with the tokio path as fallback. |
+| [Benchmarks](BENCHMARKS.md) | Reproducible comparison vs FrankenPHP, PHP-FPM+nginx and RoadRunner — and the PHP-vs-I/O split that shaped the roadmap. |
+| [io_uring core (plan)](IO-URING.md) | Design notes for a Linux io_uring I/O core. **Deprioritised** — benchmarks show PHP is ~99.5% of request time, so I/O isn't the bottleneck. |
 | [CoW template](COW.md) | Boot once, fork workers (copy-on-write) — ~ms warm respawn + shared memory (experimental). |
 | [Shared cache](CACHE.md) | In-binary cache, atomic counters and rate limiting (no Redis); the Laravel driver. |
 | [Broadcasting](BROADCAST.md) | Live updates to browsers via SSE + `askr_broadcast()` (no Reverb/Pusher). |
@@ -72,5 +73,7 @@ Building from source: [Building](BUILDING.md).
 
 ## Not yet
 
-The per-core **io_uring** I/O core (the biggest efficiency step, Linux), **HTTP/3**
-(QUIC), **OpenTelemetry** trace export, and an `askr-laravel` composer package.
+**HTTP/3** (QUIC), **OpenTelemetry** trace export, and an `askr-laravel` composer
+package. The per-core **io_uring** core is **deprioritised**: our
+[benchmarks](BENCHMARKS.md) show PHP execution is ~99.5% of request time, so an
+I/O-syscall optimisation would move ~0.5% — the engine, not I/O, is the ceiling.

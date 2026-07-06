@@ -75,6 +75,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
 - [Auto-TLS (ACME)](docs/AUTOTLS.md) — obtain + renew Let's Encrypt certs (`--acme`)
 - [Hardening / sandbox](docs/SANDBOX.md) — seccomp + Landlock (`--sandbox`)
+- [Benchmarks](docs/BENCHMARKS.md) — vs FrankenPHP, FPM+nginx, RoadRunner (reproducible)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
 ## What works today (0.8.2)
@@ -139,7 +140,9 @@ Everything lives in [`docs/`](docs/README.md):
 | **0.6.1** — shared-memory job queue (`askr_queue_*` + AskrQueue driver): delayed jobs, retries | ✅ |
 | **0.7.0** — auto-TLS via ACME/Let's Encrypt (`--acme`, HTTP-01) — single binary, no proxy | ✅ |
 | **0.8.0** — hardening: seccomp no-exec + Landlock filesystem sandbox (`--sandbox`) | ✅ |
-| **Next** — io_uring core (Linux), HTTP/3 (QUIC), OTel traces | ⏳ |
+| **0.8.2** — PHP 8.5 + Laravel 13, OPcache/JIT built in | ✅ |
+| Benchmarks: ~2× FrankenPHP, ~4× FPM on server overhead ([details](docs/BENCHMARKS.md)) | ✅ |
+| **Next** — HTTP/3 (QUIC), OTel traces. *(io_uring deprioritised: benchmarks show PHP is 99.5% of request time, I/O ~0.5%)* | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a
 benchmark against FrankenPHP/FPM — both Linux-native work. The plan is written up
