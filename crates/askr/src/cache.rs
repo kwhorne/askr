@@ -28,7 +28,7 @@ const PROBE: usize = 16;
 
 #[repr(C)]
 struct Entry<const V: usize> {
-    lock: AtomicU32, // 0 = free, 1 = held
+    lock: AtomicU32, // 0 = free, else holder pid (see shmlock)
     state: u32,      // 0 = empty, 1 = occupied
     hash: u64,
     expires_at: u64, // unix secs; 0 = never
@@ -85,23 +85,13 @@ struct Slot<const V: usize>(*mut Entry<V>);
 impl<const V: usize> Slot<V> {
     fn lock(e: *mut Entry<V>) -> Slot<V> {
         // SAFETY: `lock` is an AtomicU32 in the shared mapping.
-        let lock = unsafe { &(*e).lock };
-        for _ in 0..50_000 {
-            if lock
-                .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Slot(e);
-            }
-            std::hint::spin_loop();
-        }
-        lock.store(1, Ordering::SeqCst); // steal from a dead holder
+        crate::shmlock::acquire(unsafe { &(*e).lock });
         Slot(e)
     }
 }
 impl<const V: usize> Drop for Slot<V> {
     fn drop(&mut self) {
-        unsafe { (*self.0).lock.store(0, Ordering::Release) };
+        crate::shmlock::release(unsafe { &(*self.0).lock });
     }
 }
 

@@ -106,23 +106,13 @@ fn base() -> Option<(*mut Job, usize)> {
 struct Slot(*mut Job);
 impl Slot {
     fn lock(e: *mut Job) -> Slot {
-        let lock = unsafe { &(*e).lock };
-        for _ in 0..50_000 {
-            if lock
-                .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Slot(e);
-            }
-            std::hint::spin_loop();
-        }
-        lock.store(1, Ordering::SeqCst);
+        crate::shmlock::acquire(unsafe { &(*e).lock });
         Slot(e)
     }
 }
 impl Drop for Slot {
     fn drop(&mut self) {
-        unsafe { (*self.0).lock.store(0, Ordering::Release) };
+        crate::shmlock::release(unsafe { &(*self.0).lock });
     }
 }
 

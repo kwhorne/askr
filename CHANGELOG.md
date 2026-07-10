@@ -2,6 +2,36 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.8.4 — 2026-07-10
+
+Security and robustness hardening from a full architecture review.
+
+- **Security (httpoxy): the client `Proxy:` header is now dropped** before headers
+  become `$_SERVER` vars, so it can never surface as `HTTP_PROXY`. Left unfiltered,
+  many HTTP clients (Guzzle, libcurl) read that to route *outbound* requests,
+  letting an attacker hijack server-side calls (CVE-2016-5385 and friends).
+- **Robustness (shared-memory corruption): the per-slot spinlock no longer steals
+  a lock from a live holder.** The old scheme spun a fixed count (~100–200 µs) then
+  stole unconditionally — but a holder merely preempted by the scheduler (10–100 ms
+  slice) or mid-copy of a 64 KB value would lose its lock, letting two processes
+  into the same critical section and corrupting sessions/cache/queue. The lock now
+  records the holder's **PID** and steals *only* from a holder the kernel confirms
+  is dead (`kill(pid, 0)` → `ESRCH`); a live holder is waited on (`shmlock`).
+- **Robustness (fork safety): the admin plane thread now starts *after* the initial
+  workers are forked.** `fork()` clones only the calling thread, so a background
+  thread holding an internal lock (malloc arena, tracing writer, stdout) at fork
+  time would deadlock the child. Forking the initial workers while the master is
+  single-threaded closes that window at startup.
+- **Robustness (temp-file DoS): uploaded temp files are now unlinked by an RAII
+  guard.** Previously a failed multipart parse, or a client disconnecting while PHP
+  ran, leaked files under `/tmp/askr-uploads` — an attacker could fill the disk.
+  The guard drops (and unlinks) whether the request completes, errors, or its
+  future is cancelled mid-await.
+- **Performance (cache stampede): coalesced followers no longer poll the slot
+  lock.** While the leader computes, followers now do a cheap atomic `is_inflight`
+  check with exponential backoff and take the slot lock (`peek`) at most once, when
+  the leader finishes — instead of contending on the spinlock every 2 ms.
+
 ## 0.8.3 — 2026-07-06
 
 - **Fix (important): worker mode no longer floods `502 php worker unavailable`

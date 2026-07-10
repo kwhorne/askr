@@ -19,6 +19,7 @@ mod rcache;
 mod record;
 mod sandbox;
 mod server;
+mod shmlock;
 mod squeue;
 mod tls;
 mod upgrade;
@@ -872,20 +873,6 @@ fn supervise(
     START_TIME.store(now_secs(), Ordering::SeqCst);
     let listen_fd: RawFd = listener.as_raw_fd();
 
-    // Optional admin dashboard/API (runs in its own thread in the master).
-    if let Some(addr) = admin_listen {
-        let info = admin::Info {
-            server_listen: config.listen,
-            mode: if config.worker_script.is_some() {
-                "worker"
-            } else {
-                "per-request"
-            },
-            record_dir: config.record_dir.clone(),
-        };
-        admin::spawn(addr, info);
-    }
-
     // Fork one worker into slot `i`. In the child this never returns (it runs
     // the worker and exits); in the parent it records the pid.
     let spawn_slot = |i: usize| {
@@ -951,6 +938,27 @@ fn supervise(
 
     for i in 0..workers {
         spawn_slot(i);
+    }
+
+    // Start the admin dashboard/API *after* the initial fork storm. `fork()` only
+    // clones the calling thread, so if a background thread (the admin Tokio
+    // runtime) held an internal lock — malloc arena, the tracing writer, stdout —
+    // at the instant of fork, that lock would stay locked forever in the child and
+    // deadlock it on its first allocation or log. Forking the initial workers
+    // while the master is still single-threaded closes that window at startup.
+    // (Respawns during runtime fork with the admin thread live, but the child's
+    // pre-tokio work is minimal; glibc's own atfork handlers keep malloc safe.)
+    if let Some(addr) = admin_listen {
+        let info = admin::Info {
+            server_listen: config.listen,
+            mode: if config.worker_script.is_some() {
+                "worker"
+            } else {
+                "per-request"
+            },
+            record_dir: config.record_dir.clone(),
+        };
+        admin::spawn(addr, info);
     }
 
     install_signals();

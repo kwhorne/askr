@@ -25,8 +25,33 @@ pub struct Parsed {
     pub fields: Vec<(String, String)>,
     /// Uploaded files, streamed to temp paths.
     pub files: Vec<UploadedFile>,
-    /// Temp files to delete once the request is done.
-    pub temp_paths: Vec<PathBuf>,
+    /// Temp files, unlinked when this guard drops (see [`TempFiles`]).
+    pub temp_paths: TempFiles,
+}
+
+/// Owns the on-disk temp paths for an upload and unlinks them on drop, so a
+/// failed parse (partial upload) *or* a client that disconnects while PHP is
+/// running never leaks files under `/tmp/askr-uploads` — the guard is dropped
+/// whether the request completes, errors, or its future is cancelled mid-await.
+/// `move_uploaded_file()` may have already renamed a path away; a missing file
+/// is fine (the unlink is best-effort).
+#[derive(Default)]
+pub struct TempFiles {
+    paths: Vec<PathBuf>,
+}
+
+impl TempFiles {
+    fn push(&mut self, p: PathBuf) {
+        self.paths.push(p);
+    }
+}
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for p in &self.paths {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 pub enum UploadError {
@@ -64,7 +89,7 @@ where
 
     let mut fields = Vec::new();
     let mut files = Vec::new();
-    let mut temp_paths = Vec::new();
+    let mut temp_paths = TempFiles::default();
 
     loop {
         let field = match mp.next_field().await {
@@ -132,5 +157,22 @@ fn map_err(e: multer::Error) -> UploadError {
             UploadError::TooLarge
         }
         other => UploadError::Parse(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tempfiles_unlink_on_drop() {
+        let p = std::env::temp_dir().join(format!("askr-droptest-{}.tmp", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        assert!(p.exists());
+        {
+            let mut t = TempFiles::default();
+            t.push(p.clone());
+        } // guard drops here
+        assert!(!p.exists(), "temp file should be unlinked on drop");
     }
 }

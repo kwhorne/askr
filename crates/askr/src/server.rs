@@ -442,17 +442,23 @@ async fn handle(
         match rcache::begin(key) {
             rcache::Lead::Leader => coalesce_leader = true,
             rcache::Lead::Follower => {
-                // Wait (fail-open) for the leader to fill the cache.
+                // Wait (fail-open) for the leader to fill the cache. While the
+                // leader is still computing, followers only do a cheap atomic
+                // `is_inflight` load (no per-slot lock) with backoff — so a
+                // 100-way fan-in doesn't melt a core contending on the slot
+                // spinlock. `peek` (which locks) runs at most once, after the
+                // leader clears inflight (it stores the response *before*
+                // clearing, so the cache is populated by then).
                 let deadline = Instant::now() + COALESCE_WAIT;
                 let mut served = None;
+                let mut backoff = Duration::from_millis(1);
                 while Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(2)).await;
-                    if let Some(c) = rcache::peek(key) {
-                        served = Some(c);
-                        break;
-                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_millis(16));
                     if !rcache::is_inflight(key) {
-                        break; // leader finished without caching → run PHP ourselves
+                        // Leader finished: read once (a HIT if it was cacheable).
+                        served = rcache::peek(key);
+                        break;
                     }
                 }
                 if let Some(c) = served {
@@ -481,7 +487,10 @@ async fn handle(
         .filter(|ct| ct.starts_with("multipart/form-data"))
         .and_then(|ct| multer::parse_boundary(ct).ok());
 
-    let (request, upload_temp_paths) = if let Some(boundary) = multipart_boundary {
+    // `_upload_temp_paths` is an RAII guard: it unlinks the streamed temp files
+    // when this handler returns *or* when its future is cancelled (client
+    // disconnect during PHP execution). Held to end of scope on purpose.
+    let (request, _upload_temp_paths) = if let Some(boundary) = multipart_boundary {
         match crate::upload::parse(body.into_data_stream(), &boundary, max).await {
             Ok(parsed) => {
                 let mut request = cgi::build_request(
@@ -562,7 +571,7 @@ async fn handle(
             config.https,
             port,
         );
-        (request, Vec::new())
+        (request, crate::upload::TempFiles::default())
     };
 
     // Keep a copy of the request iff we may need to record it on a 5xx (#5).
@@ -607,10 +616,8 @@ async fn handle(
         }
     }
 
-    // Clean up any uploaded temp files (the app may already have moved them).
-    for p in &upload_temp_paths {
-        let _ = tokio::fs::remove_file(p).await;
-    }
+    // Uploaded temp files are cleaned up by the `_upload_temp_paths` RAII guard
+    // when this scope ends (or the future is cancelled) — no explicit unlink.
 
     // Record a failing request so it can be replayed later (#5).
     if response.status().as_u16() >= 500 {

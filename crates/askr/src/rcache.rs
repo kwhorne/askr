@@ -311,23 +311,13 @@ pub fn forget_tag(tag: &[u8]) {
 struct Slot(*mut Entry);
 impl Slot {
     fn lock(e: *mut Entry) -> Slot {
-        let lock = unsafe { &(*e).lock };
-        for _ in 0..50_000 {
-            if lock
-                .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Slot(e);
-            }
-            std::hint::spin_loop();
-        }
-        lock.store(1, Ordering::SeqCst); // steal from a dead holder
+        crate::shmlock::acquire(unsafe { &(*e).lock });
         Slot(e)
     }
 }
 impl Drop for Slot {
     fn drop(&mut self) {
-        unsafe { (*self.0).lock.store(0, Ordering::Release) };
+        crate::shmlock::release(unsafe { &(*self.0).lock });
     }
 }
 

@@ -90,6 +90,12 @@ pub fn build_request(
         if key.eq_ignore_ascii_case("content-type") || key.eq_ignore_ascii_case("content-length") {
             continue;
         }
+        // httpoxy (CVE-2016-5385 et al.): a client-supplied `Proxy:` header must
+        // never become `HTTP_PROXY`, which many HTTP clients (Guzzle, libcurl via
+        // getenv) read to route outbound requests. Drop it unconditionally.
+        if key.eq_ignore_ascii_case("proxy") {
+            continue;
+        }
         if let Ok(v) = value.to_str() {
             let upper = key.to_ascii_uppercase().replace('-', "_");
             server_vars.push((format!("HTTP_{upper}"), v.to_string()));
@@ -114,4 +120,41 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn parts_with(headers: &[(&str, &str)]) -> Parts {
+        let mut b = hyper::Request::builder().method("GET").uri("/");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(()).unwrap().into_parts().0
+    }
+
+    #[test]
+    fn drops_proxy_header_httpoxy() {
+        let parts = parts_with(&[("Proxy", "http://evil.example"), ("X-Foo", "bar")]);
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000);
+        let req = build_request(
+            &parts,
+            Vec::new(),
+            Path::new("/srv"),
+            Path::new("/srv/index.php"),
+            "/index.php",
+            peer,
+            false,
+            80,
+        );
+        // The httpoxy header must NOT reach PHP as HTTP_PROXY…
+        assert!(!req.server_vars.iter().any(|(k, _)| k == "HTTP_PROXY"));
+        // …but ordinary headers still map through.
+        assert!(req
+            .server_vars
+            .iter()
+            .any(|(k, v)| k == "HTTP_X_FOO" && v == "bar"));
+    }
 }
