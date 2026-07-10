@@ -110,9 +110,13 @@ final class AskrCacheStore implements
         return $this->put($key, $value, 0);
     }
 
-    // Update a key's TTL without touching its value (Laravel 11+).
+    // Update a key's TTL without touching its value (Laravel 11+). Atomic via the
+    // native askr_cache_touch (no get-then-set race); get+set only as a fallback.
     public function touch($key, $seconds)
     {
+        if (function_exists('askr_cache_touch')) {
+            return (bool) askr_cache_touch($this->k($key), (int) $seconds);
+        }
         $v = askr_cache_get($this->k($key));
         if ($v === null) {
             return false;

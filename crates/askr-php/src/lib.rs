@@ -385,6 +385,8 @@ pub mod cache_bridge {
     pub type IncrFn = extern "C" fn(*const c_char, usize, c_long, c_long) -> c_long;
     pub type FlushFn = extern "C" fn();
     pub type ForgetTagFn = extern "C" fn(*const c_char, usize);
+    /// Atomic TTL refresh: (key, klen, ttl) -> found?
+    pub type TouchFn = extern "C" fn(*const c_char, usize, c_long) -> c_int;
 
     extern "C" {
         /// Register the cache callbacks with the shim. Call once per process,
@@ -397,6 +399,7 @@ pub mod cache_bridge {
             i: IncrFn,
             f: FlushFn,
             ft: ForgetTagFn,
+            t: TouchFn,
         );
     }
 }

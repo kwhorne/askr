@@ -580,6 +580,7 @@ typedef int  (*askr_cache_del_fn)(const char *key, size_t klen);
 typedef long (*askr_cache_incr_fn)(const char *key, size_t klen, long delta, long ttl);
 typedef void (*askr_cache_flush_fn)(void);
 typedef void (*askr_cache_forget_tag_fn)(const char *tag, size_t tlen);
+typedef int  (*askr_cache_touch_fn)(const char *key, size_t klen, long ttl);
 
 static askr_cache_get_fn        g_cache_get = NULL;
 static askr_cache_set_fn        g_cache_set = NULL;
@@ -588,10 +589,11 @@ static askr_cache_del_fn        g_cache_del = NULL;
 static askr_cache_incr_fn       g_cache_incr = NULL;
 static askr_cache_flush_fn      g_cache_flush = NULL;
 static askr_cache_forget_tag_fn g_cache_forget_tag = NULL;
+static askr_cache_touch_fn      g_cache_touch = NULL;
 
 void askr_php_set_cache_bridge(askr_cache_get_fn g, askr_cache_set_fn s, askr_cache_add_fn a,
                                askr_cache_del_fn d, askr_cache_incr_fn i, askr_cache_flush_fn f,
-                               askr_cache_forget_tag_fn ft) {
+                               askr_cache_forget_tag_fn ft, askr_cache_touch_fn t) {
     g_cache_get = g;
     g_cache_set = s;
     g_cache_add = a;
@@ -599,6 +601,7 @@ void askr_php_set_cache_bridge(askr_cache_get_fn g, askr_cache_set_fn s, askr_ca
     g_cache_incr = i;
     g_cache_flush = f;
     g_cache_forget_tag = ft;
+    g_cache_touch = t;
 }
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_cache_get, 0, 0, 1)
@@ -696,6 +699,22 @@ static PHP_FUNCTION(askr_cache_forget_tag) {
         Z_PARAM_STRING(tag, tlen)
     ZEND_PARSE_PARAMETERS_END();
     if (g_cache_forget_tag) g_cache_forget_tag(tag, tlen);
+}
+
+/* bool askr_cache_touch(string $key, int $ttl = 0) — atomically refresh a key's
+ * TTL without reading/rewriting its value (no get-then-set race). */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_cache_touch, 0, 0, 1)
+    ZEND_ARG_INFO(0, key)
+    ZEND_ARG_INFO(0, ttl)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_cache_touch) {
+    char *key; size_t klen; zend_long ttl = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STRING(key, klen)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(ttl)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(g_cache_touch ? g_cache_touch(key, klen, (long)ttl) : 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -867,6 +886,7 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_cache_increment, arginfo_askr_cache_increment)
     ZEND_FE(askr_cache_flush, arginfo_askr_cache_flush)
     ZEND_FE(askr_cache_forget_tag, arginfo_askr_cache_forget_tag)
+    ZEND_FE(askr_cache_touch, arginfo_askr_cache_touch)
     ZEND_FE(askr_queue_push, arginfo_askr_queue_push)
     ZEND_FE(askr_queue_pop, arginfo_askr_queue_pop)
     ZEND_FE(askr_queue_delete, arginfo_askr_queue_delete)

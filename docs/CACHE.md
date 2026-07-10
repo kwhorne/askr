@@ -37,6 +37,7 @@ Askr (web workers, the worker loop, and queue/scheduler sidecars):
 | `askr_cache_set(string $key, string $value, int $ttl = 0): bool` | `ttl` seconds (`0` = forever). `false` if too large. |
 | `askr_cache_delete(string $key): bool` | `true` if it existed. |
 | `askr_cache_increment(string $key, int $delta = 1, int $ttl = 0): int` | Atomic add; returns the new value. |
+| `askr_cache_touch(string $key, int $ttl = 0): bool` | Atomically refresh a key's TTL without rewriting its value (`false` if absent). |
 | `askr_cache_flush(): void` | Empty the table. |
 
 ```php

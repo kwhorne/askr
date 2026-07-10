@@ -435,7 +435,7 @@ async fn handle(
     let mut coalesce_leader = false;
     if let Some(key) = &cache_key {
         if let Some(c) = rcache::get(key) {
-            let response = cached_response(c, &accept_encoding);
+            let response = cached_response(c);
             finish(&rt, &response, t_start, 0);
             return Ok(response);
         }
@@ -463,7 +463,7 @@ async fn handle(
                 }
                 if let Some(c) = served {
                     rcache::note_coalesced();
-                    let response = cached_response(c, &accept_encoding);
+                    let response = cached_response(c);
                     finish(&rt, &response, t_start, 0);
                     return Ok(response);
                 }
@@ -594,7 +594,7 @@ async fn handle(
             // Cache store: the app opts in per-response with an `Askr-Cache`
             // header (which we consume, never forwarding it to the client).
             if let Some(key) = &cache_key {
-                maybe_store(key, &resp);
+                maybe_store(key, &resp, &accept_encoding);
             }
             let state = rcache::enabled().then_some("MISS");
             build_response(resp, state, &accept_encoding)
@@ -657,11 +657,22 @@ fn response_cache_key(req: &Request<Incoming>) -> Vec<u8> {
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
+    // Vary the key on the negotiated content-encoding so each encoding caches its
+    // own *already-compressed* bytes. Without this, one uncompressed entry is
+    // shared by all clients and every HIT recompresses the same body.
+    let enc = req
+        .headers()
+        .get(hyper::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::compress::negotiate)
+        .map(|e| e.header())
+        .unwrap_or("id");
     format!(
-        "{}\0{}\0{}",
+        "{}\0{}\0{}\0{}",
         req.method().as_str(),
         host.to_ascii_lowercase(),
-        pq
+        pq,
+        enc
     )
     .into_bytes()
 }
@@ -669,7 +680,7 @@ fn response_cache_key(req: &Request<Incoming>) -> Vec<u8> {
 /// Store a 200 response if the app opted in via an `Askr-Cache` header.
 /// `Set-Cookie` is stripped so a cached page can't pin one client's session
 /// onto every anonymous visitor.
-fn maybe_store(key: &[u8], resp: &askr_php::Response) {
+fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str) {
     if resp.status != 200 {
         return;
     }
@@ -684,20 +695,46 @@ fn maybe_store(key: &[u8], resp: &askr_php::Response) {
     let Some((ttl, tags)) = parse_cache_directive(dir) else {
         return;
     };
-    let stored: Vec<(String, String)> = resp
+    let mut stored: Vec<(String, String)> = resp
         .headers
         .iter()
         .filter(|(k, _)| storable_header(k))
         .cloned()
         .collect();
-    rcache::store(key, resp.status, &stored, &resp.body, ttl, &tags);
+    // Compress *once*, at store time, and cache the finished bytes. Every HIT on
+    // this (encoding-keyed) entry then serves them verbatim — no re-compression.
+    let content_type = resp
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    let body = match crate::compress::maybe(&resp.body, content_type, accept_encoding) {
+        Some((enc, compressed)) => {
+            stored.push((
+                hyper::header::CONTENT_ENCODING.to_string(),
+                enc.header().to_string(),
+            ));
+            stored.push((
+                hyper::header::VARY.to_string(),
+                "Accept-Encoding".to_string(),
+            ));
+            compressed
+        }
+        None => resp.body.clone(),
+    };
+    rcache::store(key, resp.status, &stored, &body, ttl, &tags);
 }
 
 fn storable_header(name: &str) -> bool {
+    // Askr owns Content-Encoding/Vary for cached entries (set at store time), and
+    // hyper recomputes framing headers — so don't persist any of these.
     !(name.eq_ignore_ascii_case("set-cookie")
         || name.eq_ignore_ascii_case("askr-cache")
         || name.eq_ignore_ascii_case("content-length")
-        || name.eq_ignore_ascii_case("transfer-encoding"))
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("content-encoding")
+        || name.eq_ignore_ascii_case("vary"))
 }
 
 /// Parse a directive like `60, tags=posts,homepage` → `(60, [posts, homepage])`.
@@ -741,19 +778,19 @@ fn finish_body(
         .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
 }
 
-/// Build a hyper response from a cached entry.
-fn cached_response(c: rcache::Cached, accept_encoding: &str) -> Response<ResBody> {
+/// Build a hyper response from a cached entry. The body is already in its final
+/// form (compressed at store time, per the encoding baked into the cache key), so
+/// this serves the stored bytes and headers verbatim — no per-HIT compression.
+fn cached_response(c: rcache::Cached) -> Response<ResBody> {
     let mut builder =
         Response::builder().status(StatusCode::from_u16(c.status).unwrap_or(StatusCode::OK));
-    let mut content_type = String::new();
     for (name, value) in &c.headers {
-        if name.eq_ignore_ascii_case("content-type") {
-            content_type = value.clone();
-        }
         builder = builder.header(name, value);
     }
     builder = builder.header("X-Askr-Cache", "HIT");
-    finish_body(builder, c.body, &content_type, accept_encoding)
+    builder
+        .body(full(Bytes::from(c.body)))
+        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
 }
 
 fn build_response(

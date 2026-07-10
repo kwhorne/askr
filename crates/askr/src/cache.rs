@@ -299,6 +299,33 @@ impl<const V: usize> Region<V> {
         false
     }
 
+    /// Refresh the TTL of an existing, live key without touching its value.
+    fn touch(&self, key: &[u8], h: u64, ttl: u64) -> bool {
+        let Some((p, slots)) = self.base() else {
+            return false;
+        };
+        let now = now_secs();
+        let expires = if ttl > 0 { now + ttl } else { 0 };
+        for i in 0..PROBE {
+            let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
+            let _g = Slot::lock(e);
+            unsafe {
+                if r_u32(ptr::addr_of!((*e).state)) == 0 {
+                    return false;
+                }
+                if Self::matches(e, key, h) {
+                    if Self::expired(e, now) {
+                        ptr::write(ptr::addr_of_mut!((*e).state), 0);
+                        return false;
+                    }
+                    ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn increment(&self, key: &[u8], h: u64, delta: i64, ttl: u64) -> i64 {
         let Some((p, slots)) = self.base() else {
             return 0;
@@ -409,6 +436,17 @@ pub fn delete(key: &[u8]) -> bool {
     s || l
 }
 
+/// Atomically refresh a key's TTL without reading and rewriting its value —
+/// closes the get-then-set race a naive cache `touch()` would have (a concurrent
+/// writer's value can't be clobbered because the value is never rewritten).
+pub fn touch(key: &[u8], ttl: u64) -> bool {
+    if key.len() > KEY_MAX {
+        return false;
+    }
+    let h = hash_key(key);
+    SMALL.touch(key, h, ttl) || LARGE.touch(key, h, ttl)
+}
+
 /// Atomically add `delta` to a numeric key (counters / rate limiting).
 pub fn increment(key: &[u8], delta: i64, ttl: u64) -> i64 {
     if key.len() > KEY_MAX {
@@ -486,6 +524,11 @@ extern "C" fn c_incr(key: *const c_char, klen: usize, delta: c_long, ttl: c_long
     increment(key, delta, ttl.max(0) as u64)
 }
 
+extern "C" fn c_touch(key: *const c_char, klen: usize, ttl: c_long) -> c_int {
+    let key = unsafe { std::slice::from_raw_parts(key as *const u8, klen) };
+    touch(key, ttl.max(0) as u64) as c_int
+}
+
 extern "C" fn c_flush() {
     flush();
     crate::rcache::flush(); // askr_cache_flush() clears both caches
@@ -513,6 +556,7 @@ pub fn register_bridge() {
             c_incr,
             c_flush,
             c_forget_tag,
+            c_touch,
         );
     }
 }
@@ -548,6 +592,13 @@ mod tests {
         // counters
         assert_eq!(increment(b"hits", 1, 60), 1);
         assert_eq!(increment(b"hits", 5, 60), 6);
+
+        // atomic touch: refreshes TTL of an existing key, leaves value intact;
+        // false for a missing key.
+        assert!(set(b"tk", b"tv", 60));
+        assert!(touch(b"tk", 120));
+        assert_eq!(get(b"tk").as_deref(), Some(&b"tv"[..]));
+        assert!(!touch(b"missing", 60));
 
         // too large for any region
         assert!(!set(b"huge", &vec![0u8; VAL_LARGE + 1], 0));

@@ -100,9 +100,16 @@ final class AskrStore implements Store, LockProvider
         return $this->put($key, $value, 0);
     }
 
-    /** Update a key's TTL without touching its value (Laravel 11+). */
+    /**
+     * Update a key's TTL without touching its value (Laravel 11+). Uses the
+     * atomic native `askr_cache_touch` (no get-then-set race); falls back to
+     * get+set only when running outside Askr.
+     */
     public function touch($key, $seconds)
     {
+        if (function_exists('askr_cache_touch')) {
+            return (bool) askr_cache_touch($this->k($key), (int) $seconds);
+        }
         $v = askr_cache_get($this->k($key));
         if ($v === null) {
             return false;

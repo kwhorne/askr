@@ -2,6 +2,23 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Performance (response cache): cached responses are now compressed once, at
+  store time, and served verbatim.** Previously the cache stored the *uncompressed*
+  body and every HIT re-ran Brotli/Gzip — so a hot page was recompressed thousands
+  of times per second, wasting the CPU the cache was meant to save. The cache key
+  now varies on the negotiated `Content-Encoding`, so each encoding caches its
+  finished bytes (with `Content-Encoding`/`Vary` set) and a HIT does zero
+  compression work. Verified: MISS and HIT return byte-identical compressed
+  payloads that decompress to the original.
+- **Robustness (`askr` cache driver): atomic `touch()`.** Added a native
+  `askr_cache_touch(string $key, int $ttl): bool` builtin that refreshes a key's
+  TTL under the slot lock *without* reading and rewriting the value — closing the
+  get-then-set race in the Laravel driver's `touch()` (a concurrent writer's value
+  could be clobbered with a stale copy). `AskrStore::touch()` uses it, with the
+  old get+set only as an out-of-Askr fallback.
+
 ## 0.8.4 — 2026-07-10
 
 Security and robustness hardening from a full architecture review.
