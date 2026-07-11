@@ -85,6 +85,9 @@ pub struct Config {
     pub https: bool,
     pub worker_script: Option<PathBuf>,
     pub max_requests: usize,
+    /// Recycle a worker gracefully once its RSS exceeds this many MB (0 = off).
+    /// Leak-aware, predictive recycling: drain before PHP hits `memory_limit`.
+    pub max_rss_mb: usize,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub tls_self_signed: bool,

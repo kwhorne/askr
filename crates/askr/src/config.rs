@@ -73,6 +73,9 @@ pub struct ServerSection {
     /// Recycle each worker after this many requests (0 = never).
     #[serde(default)]
     pub max_requests: usize,
+    /// Recycle a worker gracefully once its RSS exceeds this many MB (0 = off).
+    #[serde(default)]
+    pub max_rss: usize,
     /// Max request body size, e.g. "16M".
     #[serde(default = "default_body")]
     pub max_body_size: String,
@@ -201,6 +204,7 @@ impl Default for ServerSection {
             workers_min: None,
             workers_max: None,
             max_requests: 0,
+            max_rss: 0,
             max_body_size: default_body(),
             https: false,
             access_log: None,
@@ -346,6 +350,7 @@ impl FileConfig {
                 https: self.server.https || tls_on,
                 worker_script: self.worker.script,
                 max_requests: self.server.max_requests,
+                max_rss_mb: self.server.max_rss,
                 tls_cert: self.tls.cert,
                 tls_key: self.tls.key,
                 tls_self_signed,

@@ -112,6 +112,14 @@ enum Command {
         #[arg(long, default_value = "0")]
         max_requests: usize,
 
+        /// Recycle a worker gracefully once its resident memory (RSS) exceeds
+        /// this many MB (0 = never). Leak-aware, predictive recycling: the
+        /// supervisor drains and respawns a worker *before* it hits PHP's
+        /// `memory_limit` and OOMs — no 502s, unlike a crash. Linux only (reads
+        /// /proc). Set it comfortably below `memory_limit` × workers.
+        #[arg(long, default_value = "0")]
+        max_rss: usize,
+
         /// TLS certificate chain (PEM). Enables HTTPS (ALPN: h2, http/1.1).
         #[arg(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
@@ -349,6 +357,7 @@ fn main() -> anyhow::Result<()> {
             ini,
             worker_script,
             max_requests,
+            max_rss,
             tls_cert,
             tls_key,
             tls_self_signed,
@@ -451,6 +460,7 @@ fn main() -> anyhow::Result<()> {
                     https: https || tls_on,
                     worker_script,
                     max_requests,
+                    max_rss_mb: max_rss,
                     tls_cert,
                     tls_key,
                     tls_self_signed,
@@ -574,6 +584,7 @@ fn main() -> anyhow::Result<()> {
                 || !sidecars.commands.is_empty();
             let need_supervisor = workers > 1
                 || config.max_requests > 0
+                || config.max_rss_mb > 0
                 || admin_listen.is_some()
                 || has_sidecars
                 || acme;
@@ -651,6 +662,7 @@ fn main() -> anyhow::Result<()> {
                 println!("  worker script: {}", ws.display());
             }
             println!("  max_requests:  {}", c.max_requests);
+            println!("  max_rss_mb:    {}", c.max_rss_mb);
             println!("  max_body_size: {} bytes", c.max_body_size);
             println!(
                 "  tls:           {}",
@@ -751,6 +763,11 @@ static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RELOAD_CURSOR: AtomicUsize = AtomicUsize::new(usize::MAX);
 static START_TIME: AtomicU64 = AtomicU64::new(0);
 static RESPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
+// Leak-aware recycling: the pid we last SIGTERM'd for exceeding --max-rss (per
+// slot), so we don't re-signal a worker that's already draining, and a count of
+// how many times it has fired (observability).
+static RECYCLE_SENT: [AtomicI32; MAX_WORKERS] = [const { AtomicI32::new(0) }; MAX_WORKERS];
+static MEM_RECYCLE_COUNT: AtomicUsize = AtomicUsize::new(0);
 // CoW autoscaling bounds + the current desired web-worker count.
 static WORKERS_MIN: AtomicUsize = AtomicUsize::new(1);
 static WORKERS_MAX: AtomicUsize = AtomicUsize::new(1);
@@ -835,6 +852,59 @@ enum Kind {
     Queue,
     Scheduler,
     Command,
+}
+
+/// A process's resident set size (RSS) in bytes, via `/proc/<pid>/statm` (field 2
+/// = resident pages). Linux only; `None` elsewhere or if the process is gone.
+#[cfg(target_os = "linux")]
+fn worker_rss_bytes(pid: i32) -> Option<u64> {
+    let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+    let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    (page > 0).then(|| resident_pages * page as u64)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn worker_rss_bytes(_pid: i32) -> Option<u64> {
+    None
+}
+
+/// Gracefully recycle any PHP worker whose RSS has crossed `max_rss_mb`, *before*
+/// it hits PHP's `memory_limit` and OOMs. Sending SIGTERM triggers the worker's
+/// graceful drain (finish in-flight requests, then exit); the supervisor's reap
+/// loop respawns a fresh one. Coalesced per slot so we never signal a worker
+/// that's already draining. `php_workers` = the leading slots that run PHP
+/// (web + queue); sidecars are external and skipped.
+fn recycle_over_rss(max_rss_mb: usize, php_workers: usize) {
+    if max_rss_mb == 0 {
+        return;
+    }
+    let cap = max_rss_mb as u64 * 1024 * 1024;
+    for i in 0..php_workers.min(MAX_WORKERS) {
+        let pid = CHILDREN[i].load(Ordering::SeqCst);
+        if pid <= 0 {
+            continue;
+        }
+        // Already asked this exact pid to drain? leave it alone.
+        if RECYCLE_SENT[i].load(Ordering::SeqCst) == pid {
+            continue;
+        }
+        let Some(rss) = worker_rss_bytes(pid) else {
+            continue;
+        };
+        if rss >= cap {
+            RECYCLE_SENT[i].store(pid, Ordering::SeqCst);
+            MEM_RECYCLE_COUNT.fetch_add(1, Ordering::SeqCst);
+            tracing::warn!(
+                pid,
+                worker = i,
+                rss_mb = rss / (1024 * 1024),
+                max_rss_mb,
+                "worker over RSS cap — recycling gracefully before OOM"
+            );
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
 }
 
 fn supervise(
@@ -972,7 +1042,8 @@ fn supervise(
 
     // Reap exited workers and respawn (recycling / crash resilience / rolling
     // reload) unless shutting down. A non-blocking poll lets us also drive the
-    // canary health check on a timer.
+    // canary health check and the leak-aware RSS check on a timer.
+    let mut last_mem_check = std::time::Instant::now();
     loop {
         // Reap everything that has exited.
         loop {
@@ -1021,6 +1092,15 @@ fn supervise(
                     "canary UNHEALTHY — aborting reload; remaining workers keep old code"
                 );
             }
+        }
+
+        // Leak-aware recycling: sample worker RSS ~once a second and drain any
+        // that crossed --max-rss before it OOMs. Reading /proc for a handful of
+        // workers is cheap, and a tighter interval keeps a fast leak from
+        // overshooting the cap by much before the next sample.
+        if config.max_rss_mb > 0 && last_mem_check.elapsed() >= std::time::Duration::from_secs(1) {
+            last_mem_check = std::time::Instant::now();
+            recycle_over_rss(config.max_rss_mb, web + queue);
         }
 
         if SHUTDOWN.load(Ordering::SeqCst) && CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0)
@@ -1510,6 +1590,17 @@ fn resolve_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{cpu_limit_from_cgroup_v2, parse_size};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_rss_reads_proc() {
+        // Our own RSS must be readable and non-trivial.
+        let rss = super::worker_rss_bytes(std::process::id() as i32);
+        assert!(rss.is_some(), "should read /proc/self RSS on Linux");
+        assert!(rss.unwrap() > 512 * 1024, "RSS should be > 512 KB");
+        // A pid that cannot exist yields None (not a panic).
+        assert!(super::worker_rss_bytes(-1).is_none());
+    }
 
     #[test]
     fn cgroup_cpu_parsing() {

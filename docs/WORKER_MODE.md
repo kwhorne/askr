@@ -138,13 +138,22 @@ as the safety net — same as Octane, which defaults to `--max-requests=500`:
 
 - **`--max-requests N`** — recycle each worker after N requests (staggered across
   workers so there's always a live one). The proactive, smooth option.
+- **`--max-rss <MB>`** — *leak-aware, predictive* recycling (Linux). The
+  supervisor samples each worker's RSS ~once a second and, when one crosses the
+  cap, drains it gracefully and respawns a fresh one **before** it hits PHP's
+  `memory_limit` and OOMs. Unlike a crash-and-respawn, this is zero-error: no
+  `502`s at all. Set it with margin below `memory_limit` (e.g. `--max-rss 400`
+  with a 512 MB limit). Measured: under a synthetic leak, RSS stayed bounded at
+  ~230 MB against a 200 MB cap over 10 000+ requests with **0 OOMs and 0 errors**,
+  where the same leak without it OOM-floods.
 - **`--cow`** — CoW mode replaces a finished/dead worker with a **warm re-fork in
   ~ms** instead of a cold boot, so recycling is nearly free. Recommended for
   long-running deployments.
 - **Resilience (0.8.3+)** — if a worker *does* exhaust `memory_limit` and PHP
   fatals, Askr exits that worker and the supervisor respawns a fresh one (with
   the triggering error logged), instead of the process getting stuck answering
-  `502`s. So a leak degrades gracefully; it never floods.
+  `502`s. So a leak degrades gracefully; it never floods. `--max-rss` is the
+  proactive complement: recycle *before* the fatal.
 
 The [`askr-laravel`](../packages/laravel) package ships the **`askr` session
 driver** (shared-memory, lock-free, no heap growth — the only option that's fast

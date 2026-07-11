@@ -4,6 +4,15 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (worker mode): leak-aware, predictive recycling (`--max-rss <MB>`).**
+  The supervisor samples each PHP worker's RSS (via `/proc`, Linux) ~once a second
+  and, when one exceeds the cap, drains it gracefully and respawns a fresh one
+  **before** it hits PHP's `memory_limit` and OOMs. Unlike the 0.8.3 crash-and-
+  respawn safety net, this is proactive and zero-error — no `502`s at all. Also
+  forces the multi-process supervisor on (like `--max-requests`). Verified in a
+  Linux container: under a synthetic leak, RSS stayed bounded at ~230 MB against a
+  200 MB cap over 10 000+ requests with **0 OOMs and 0 non-2xx**, where the same
+  leak without it OOM-floods.
 - **Feature (response cache): stale-while-revalidate + background refresh.** A
   response can now declare a stale window: `header('Askr-Cache: 60, swr=600')`.
   For the first 60s it's served fresh; for the next 600s it's served **stale
