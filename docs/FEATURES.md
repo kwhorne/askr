@@ -31,9 +31,24 @@ Invalidate everything with a tag — instantly, across **all** workers (O(1)):
 askr_cache_forget_tag('posts');   // e.g. in a Post::saved() observer
 ```
 
+**Stale-while-revalidate** — serve a warm page instantly and refresh it in the
+background, so a client never waits for PHP on a hot page:
+
+```php
+// fresh 60s, then serve STALE for up to 600s more while ONE background
+// refresh re-runs PHP off the request path and repopulates the cache
+header('Askr-Cache: 60, swr=600, tags=posts');
+```
+
+Within the `swr` window the response is served immediately with
+`X-Askr-Cache: STALE`; Askr fires a single coalesced background refresh (reusing
+the request-coalescing inflight table so N concurrent stale hits trigger just one
+recompute). Past `swr` it's a normal miss again. Compression is applied once at
+store time, so hits and stale serves do zero per-request compression.
+
 - Only cookie-less `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
   so a cached page can't pin one session onto every visitor.
-- Responses carry `X-Askr-Cache: HIT|MISS`; hit-rate shows on the dashboard.
+- Responses carry `X-Askr-Cache: HIT|MISS|STALE`; hit-rate shows on the dashboard.
 - `askr_cache_flush()` clears the response cache too.
 
 ## 2. Request coalescing (singleflight)

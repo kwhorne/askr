@@ -435,6 +435,11 @@ async fn handle(
     let mut coalesce_leader = false;
     if let Some(key) = &cache_key {
         if let Some(c) = rcache::get(key) {
+            // Stale-while-revalidate: serve the stale body now, and trigger one
+            // background refresh (coalesced) so PHP runs off the request path.
+            if c.stale {
+                spawn_swr_refresh(&rt, key, &req, peer);
+            }
             let response = cached_response(c);
             finish(&rt, &response, t_start, 0);
             return Ok(response);
@@ -692,7 +697,7 @@ fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str) {
     else {
         return;
     };
-    let Some((ttl, tags)) = parse_cache_directive(dir) else {
+    let Some((ttl, swr, tags)) = parse_cache_directive(dir) else {
         return;
     };
     let mut stored: Vec<(String, String)> = resp
@@ -723,7 +728,7 @@ fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str) {
         }
         None => resp.body.clone(),
     };
-    rcache::store(key, resp.status, &stored, &body, ttl, &tags);
+    rcache::store(key, resp.status, &stored, &body, ttl, swr, &tags);
 }
 
 fn storable_header(name: &str) -> bool {
@@ -737,8 +742,11 @@ fn storable_header(name: &str) -> bool {
         || name.eq_ignore_ascii_case("vary"))
 }
 
-/// Parse a directive like `60, tags=posts,homepage` → `(60, [posts, homepage])`.
-fn parse_cache_directive(v: &str) -> Option<(u64, Vec<Vec<u8>>)> {
+/// Parse a directive like `60, swr=600, tags=posts,homepage` →
+/// `(ttl=60, swr=600, [posts, homepage])`. `swr` (stale-while-revalidate) is the
+/// extra window, after the fresh TTL, during which the stale entry is served
+/// while a background refresh runs; it defaults to 0 (no stale serving).
+fn parse_cache_directive(v: &str) -> Option<(u64, u64, Vec<Vec<u8>>)> {
     let (head, tagstr) = match v.find("tags=") {
         Some(i) => (&v[..i], &v[i + 5..]),
         None => (v, ""),
@@ -746,13 +754,86 @@ fn parse_cache_directive(v: &str) -> Option<(u64, Vec<Vec<u8>>)> {
     let ttl = head
         .split([',', ';', ' '])
         .find_map(|t| t.trim().parse::<u64>().ok())?;
+    let swr = v
+        .find("swr=")
+        .and_then(|i| v[i + 4..].split([',', ';', ' ']).next())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
     let tags = tagstr
         .split([',', ';', ' '])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.as_bytes().to_vec())
         .collect();
-    Some((ttl, tags))
+    Some((ttl, swr, tags))
+}
+
+/// Trigger a single background refresh of a stale cache entry so a page in its
+/// stale-while-revalidate window is recomputed *off* the request path. Coalesced
+/// through the inflight table: at most one refresh per key runs at a time.
+fn spawn_swr_refresh(rt: &Arc<Runtime>, key: &[u8], req: &Request<Incoming>, peer: SocketAddr) {
+    if !matches!(rcache::begin(key), rcache::Lead::Leader) {
+        return; // a refresh (or a live leader) already owns this key
+    }
+    let rt = rt.clone();
+    let key = key.to_vec();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let header = |name: hyper::header::HeaderName| {
+        req.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let host = header(hyper::header::HOST);
+    let accept_encoding = header(hyper::header::ACCEPT_ENCODING);
+    tokio::spawn(async move {
+        refresh_entry(rt, key, method, uri, host, accept_encoding, peer).await;
+    });
+}
+
+/// Re-run the front controller for `key` and re-store the fresh response. Only
+/// anonymous, cacheable GET/HEADs reach here, so the request is fully determined
+/// by method + host + path + Accept-Encoding (no body, no cookies).
+async fn refresh_entry(
+    rt: Arc<Runtime>,
+    key: Vec<u8>,
+    method: Method,
+    uri: hyper::Uri,
+    host: String,
+    accept_encoding: String,
+    peer: SocketAddr,
+) {
+    let config = &rt.config;
+    let port = config.listen.port();
+    let script = config.docroot.join(&config.front_controller);
+    let script_name = format!("/{}", config.front_controller.display());
+
+    let mut builder = hyper::Request::builder().method(method).uri(uri);
+    builder = builder.header(hyper::header::HOST, host);
+    if !accept_encoding.is_empty() {
+        builder = builder.header(hyper::header::ACCEPT_ENCODING, &accept_encoding);
+    }
+    let Ok(built) = builder.body(()) else {
+        rcache::end(&key);
+        return;
+    };
+    let (parts, _) = built.into_parts();
+    let request = cgi::build_request(
+        &parts,
+        Vec::new(),
+        &config.docroot,
+        &script,
+        &script_name,
+        peer,
+        config.https,
+        port,
+    );
+    if let Ok(resp) = rt.php.handle(request).await {
+        maybe_store(&key, &resp, &accept_encoding);
+    }
+    rcache::end(&key);
 }
 
 /// Finish a response body, compressing it (br/gzip) when the client accepts it
@@ -787,7 +868,7 @@ fn cached_response(c: rcache::Cached) -> Response<ResBody> {
     for (name, value) in &c.headers {
         builder = builder.header(name, value);
     }
-    builder = builder.header("X-Askr-Cache", "HIT");
+    builder = builder.header("X-Askr-Cache", if c.stale { "STALE" } else { "HIT" });
     builder
         .body(full(Bytes::from(c.body)))
         .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))

@@ -33,7 +33,9 @@ struct Entry {
     lock: AtomicU32,
     state: u32, // 0 = empty, 1 = occupied
     key_hash: u64,
-    expires_at: u64, // unix secs; 0 = never
+    expires_at: u64,  // fresh deadline (unix secs; 0 = never)
+    stale_until: u64, // hard deadline (unix secs; 0 = never). Between expires_at
+    // and stale_until the entry is served stale while a background refresh runs.
     status: u32,
     ntags: u32,
     tag_hash: [u64; MAX_TAGS],
@@ -326,6 +328,9 @@ pub struct Cached {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// True when past the fresh deadline but within the stale-while-revalidate
+    /// window: serve this immediately, but trigger a background refresh.
+    pub stale: bool,
 }
 
 /// Look up a cached response and record a hit/miss. Use [`peek`] for the
@@ -360,25 +365,30 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
                 continue;
             }
             let exp = ptr::read(ptr::addr_of!((*e).expires_at));
-            if exp != 0 && exp < now {
+            let hard = ptr::read(ptr::addr_of!((*e).stale_until));
+            // Past the hard deadline ⇒ fully expired (a real miss).
+            if hard != 0 && hard < now {
                 ptr::write(ptr::addr_of_mut!((*e).state), 0);
                 break;
             }
-            // Tag validity: any tag whose generation advanced ⇒ stale.
+            // Tag invalidation is a *hard* invalidation (content changed): never
+            // serve it stale.
             let ntags = (ptr::read(ptr::addr_of!((*e).ntags)) as usize).min(MAX_TAGS);
-            let mut stale = false;
+            let mut tag_invalid = false;
             for t in 0..ntags {
                 let th = ptr::read(ptr::addr_of!((*e).tag_hash[t]));
                 let tg = ptr::read(ptr::addr_of!((*e).tag_gen[t]));
                 if tag_gen(th) != tg {
-                    stale = true;
+                    tag_invalid = true;
                     break;
                 }
             }
-            if stale {
+            if tag_invalid {
                 ptr::write(ptr::addr_of_mut!((*e).state), 0);
                 break;
             }
+            // Past the fresh deadline but within the stale window ⇒ serve stale.
+            let swr_stale = exp != 0 && exp < now;
             let status = ptr::read(ptr::addr_of!((*e).status)) as u16;
             let hlen = (ptr::read(ptr::addr_of!((*e).hdr_len)) as usize).min(HDR_MAX);
             let blen = (ptr::read(ptr::addr_of!((*e).body_len)) as usize).min(BODY_MAX);
@@ -390,6 +400,7 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
                 status,
                 headers: parse_hdr_blob(&hdr),
                 body,
+                stale: swr_stale,
             });
             break;
         }
@@ -405,6 +416,7 @@ pub fn store(
     headers: &[(String, String)],
     body: &[u8],
     ttl: u64,
+    swr: u64,
     tags: &[Vec<u8>],
 ) -> bool {
     let Some((p, slots)) = base() else {
@@ -415,7 +427,15 @@ pub fn store(
         return false;
     }
     let h = hash_bytes(key);
-    let expires = if ttl > 0 { now_secs() + ttl } else { 0 };
+    let now = now_secs();
+    // expires_at = fresh deadline; stale_until = fresh + swr (hard deadline).
+    // ttl == 0 means forever (both 0). swr == 0 means no stale window.
+    let expires = if ttl > 0 { now + ttl } else { 0 };
+    let stale_until = if ttl > 0 && swr > 0 {
+        expires + swr
+    } else {
+        expires
+    };
 
     // Snapshot each tag's current generation, so a forget_tag that raced ahead
     // of this store still invalidates us.
@@ -434,7 +454,20 @@ pub fn store(
         let state = unsafe { ptr::read(ptr::addr_of!((*e).state)) };
         let same = unsafe { ptr::read(ptr::addr_of!((*e).key_hash)) } == h;
         if state == 0 || same {
-            unsafe { write_entry(e, h, status, &blob, body, expires, ntags, &th, &tg) };
+            unsafe {
+                write_entry(
+                    e,
+                    h,
+                    status,
+                    &blob,
+                    body,
+                    expires,
+                    stale_until,
+                    ntags,
+                    &th,
+                    &tg,
+                )
+            };
             return true;
         }
         if target.is_none() {
@@ -444,7 +477,20 @@ pub fn store(
     // Probe window full: evict the primary slot.
     let e = target.unwrap_or_else(|| unsafe { p.add((h as usize) % slots) });
     let _g = Slot::lock(e);
-    unsafe { write_entry(e, h, status, &blob, body, expires, ntags, &th, &tg) };
+    unsafe {
+        write_entry(
+            e,
+            h,
+            status,
+            &blob,
+            body,
+            expires,
+            stale_until,
+            ntags,
+            &th,
+            &tg,
+        )
+    };
     true
 }
 
@@ -456,6 +502,7 @@ unsafe fn write_entry(
     blob: &[u8],
     body: &[u8],
     expires: u64,
+    stale_until: u64,
     ntags: usize,
     th: &[u64; MAX_TAGS],
     tg: &[u64; MAX_TAGS],
@@ -463,6 +510,7 @@ unsafe fn write_entry(
     ptr::write(ptr::addr_of_mut!((*e).state), 1);
     ptr::write(ptr::addr_of_mut!((*e).key_hash), h);
     ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
+    ptr::write(ptr::addr_of_mut!((*e).stale_until), stale_until);
     ptr::write(ptr::addr_of_mut!((*e).status), status as u32);
     ptr::write(ptr::addr_of_mut!((*e).ntags), ntags as u32);
     for i in 0..MAX_TAGS {
@@ -533,12 +581,14 @@ mod tests {
             &hdrs,
             b"<h1>posts</h1>",
             60,
+            0,
             &[b"posts".to_vec()]
         ));
 
         let hit = get(b"GET|/posts").expect("hit");
         assert_eq!(hit.status, 200);
         assert_eq!(hit.body, b"<h1>posts</h1>");
+        assert!(!hit.stale);
         assert_eq!(hit.headers[0], ("Content-Type".into(), "text/html".into()));
 
         // Forgetting the tag invalidates the entry instantly.
@@ -552,13 +602,26 @@ mod tests {
             &hdrs,
             b"v2",
             60,
+            0,
             &[b"posts".to_vec()]
         ));
         assert_eq!(get(b"GET|/posts").unwrap().body, b"v2");
 
         // An untagged entry is unaffected by tag bumps.
-        assert!(store(b"GET|/about", 200, &hdrs, b"about", 0, &[]));
+        assert!(store(b"GET|/about", 200, &hdrs, b"about", 0, 0, &[]));
         forget_tag(b"posts");
         assert_eq!(get(b"GET|/about").unwrap().body, b"about");
+
+        // Stale-while-revalidate: 1s fresh, +5s stale window. Fresh immediately;
+        // past the fresh deadline it is served STALE (not a miss) until the hard
+        // deadline.
+        assert!(store(b"GET|/swr", 200, &hdrs, b"swrbody", 1, 10, &[]));
+        assert!(!get(b"GET|/swr").unwrap().stale);
+        // Sleep past the 1s fresh deadline (with margin for the second boundary),
+        // staying inside the 10s stale window.
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        let s = get(b"GET|/swr").expect("served stale");
+        assert!(s.stale);
+        assert_eq!(s.body, b"swrbody");
     }
 }

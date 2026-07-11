@@ -4,6 +4,15 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (response cache): stale-while-revalidate + background refresh.** A
+  response can now declare a stale window: `header('Askr-Cache: 60, swr=600')`.
+  For the first 60s it's served fresh; for the next 600s it's served **stale
+  immediately** (`X-Askr-Cache: STALE`) while Askr fires a single, coalesced
+  background refresh that re-runs the front controller off the request path and
+  repopulates the cache. Clients never wait for PHP on a hot page, and the
+  refresh is deduplicated through the existing request-coalescing inflight table.
+  Verified end-to-end: a warm page served stale in-place while a background
+  render advanced the cached content exactly once.
 - **Performance (response cache): cached responses are now compressed once, at
   store time, and served verbatim.** Previously the cache stored the *uncompressed*
   body and every HIT re-ran Brotli/Gzip — so a hot page was recompressed thousands
