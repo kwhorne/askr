@@ -2,7 +2,10 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.0 — 2026-07-11
+
+Three power features (stale-while-revalidate, leak-aware recycling, traffic
+shadowing) plus response-cache and cache-driver correctness fixes.
 
 - **Feature (deploy validation): traffic shadowing (`--shadow-to <url>`).** Mirror
   a sampled fraction of *safe* (GET/HEAD, cookie-less) requests to a shadow
