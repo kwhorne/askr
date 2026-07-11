@@ -35,6 +35,11 @@ pub struct Metrics {
     pub inflight: AtomicU64,
     /// KV cache entries evicted under pressure (probe window full).
     pub cache_evictions: AtomicU64,
+    /// Traffic-shadow outcomes: mirrored requests, matches, mismatches, errors.
+    pub shadow_total: AtomicU64,
+    pub shadow_match: AtomicU64,
+    pub shadow_mismatch: AtomicU64,
+    pub shadow_error: AtomicU64,
 }
 
 static METRICS_PTR: AtomicPtr<Metrics> = AtomicPtr::new(ptr::null_mut());

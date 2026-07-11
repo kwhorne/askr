@@ -76,6 +76,12 @@ pub struct ServerSection {
     /// Recycle a worker gracefully once its RSS exceeds this many MB (0 = off).
     #[serde(default)]
     pub max_rss: usize,
+    /// Traffic shadowing: mirror sampled safe requests to this upstream URL.
+    #[serde(default)]
+    pub shadow_to: Option<String>,
+    /// Percent (1..=100) of eligible requests to mirror.
+    #[serde(default = "default_shadow_sample")]
+    pub shadow_sample: u8,
     /// Max request body size, e.g. "16M".
     #[serde(default = "default_body")]
     pub max_body_size: String,
@@ -205,6 +211,8 @@ impl Default for ServerSection {
             workers_max: None,
             max_requests: 0,
             max_rss: 0,
+            shadow_to: None,
+            shadow_sample: default_shadow_sample(),
             max_body_size: default_body(),
             https: false,
             access_log: None,
@@ -222,6 +230,10 @@ fn default_workers() -> String {
 }
 fn default_body() -> String {
     "16M".into()
+}
+
+fn default_shadow_sample() -> u8 {
+    100
 }
 
 /// The fully-resolved runtime configuration produced from a file.
@@ -361,6 +373,8 @@ impl FileConfig {
                 access_log: self.server.access_log,
                 sandbox: self.server.sandbox || !self.server.sandbox_write.is_empty(),
                 sandbox_write: self.server.sandbox_write,
+                shadow_to: self.server.shadow_to,
+                shadow_sample: self.server.shadow_sample,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

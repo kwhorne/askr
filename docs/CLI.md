@@ -46,6 +46,8 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--worker-script <FILE>` | — | Boot the app once, serve many (Octane model). Omit for per-request. |
 | `--max-requests <N>` | `0` | Recycle each worker after N requests (`0` = never). |
 | `--max-rss <MB>` | `0` | Recycle a worker gracefully once its RSS exceeds N MB (`0` = never). Leak-aware: drains before PHP hits `memory_limit` and OOMs. Linux only. |
+| `--shadow-to <URL>` | — | Mirror sampled safe (GET/HEAD, cookie-less) requests to this upstream (e.g. a staging deploy of the next version) and report divergence on `/metrics`. Never affects the client. |
+| `--shadow-sample <PCT>` | `100` | Percent of eligible requests to mirror to `--shadow-to`. |
 | `--workers-min <N>` | `--workers` | CoW autoscaling floor. |
 | `--workers-max <N>` | `--workers` | CoW autoscaling ceiling (> min enables autoscaling). |
 | `--cow` | off | CoW template: boot once, fork warm workers (~ms respawn). Needs `--worker-script`. |

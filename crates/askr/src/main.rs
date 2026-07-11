@@ -19,6 +19,7 @@ mod rcache;
 mod record;
 mod sandbox;
 mod server;
+mod shadow;
 mod shmlock;
 mod squeue;
 mod tls;
@@ -119,6 +120,18 @@ enum Command {
         /// /proc). Set it comfortably below `memory_limit` × workers.
         #[arg(long, default_value = "0")]
         max_rss: usize,
+
+        /// Traffic shadowing: mirror a sampled fraction of *safe* (GET/HEAD,
+        /// cookie-less) requests to this upstream URL — e.g. a staging deploy of
+        /// the next version — after serving the real response, and report where
+        /// the shadow's response diverges (on /metrics). The client is never
+        /// affected. Only idempotent, non-user-specific requests are mirrored.
+        #[arg(long)]
+        shadow_to: Option<String>,
+
+        /// Percent (1..=100) of eligible requests to mirror to `--shadow-to`.
+        #[arg(long, default_value = "100")]
+        shadow_sample: u8,
 
         /// TLS certificate chain (PEM). Enables HTTPS (ALPN: h2, http/1.1).
         #[arg(long, requires = "tls_key")]
@@ -358,6 +371,8 @@ fn main() -> anyhow::Result<()> {
             worker_script,
             max_requests,
             max_rss,
+            shadow_to,
+            shadow_sample,
             tls_cert,
             tls_key,
             tls_self_signed,
@@ -472,6 +487,8 @@ fn main() -> anyhow::Result<()> {
                     access_log,
                     sandbox: sandbox || !sandbox_write.is_empty(),
                     sandbox_write,
+                    shadow_to,
+                    shadow_sample,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

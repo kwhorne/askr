@@ -106,6 +106,11 @@ pub struct Config {
     /// Directories the sandbox may write to (enables the Landlock filesystem
     /// restriction; empty = seccomp only).
     pub sandbox_write: Vec<PathBuf>,
+    /// Traffic shadowing: mirror sampled safe requests to this upstream URL for
+    /// deploy validation (None = off).
+    pub shadow_to: Option<String>,
+    /// Percent (1..=100) of eligible requests to mirror.
+    pub shadow_sample: u8,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -121,6 +126,7 @@ struct Runtime {
     pusher: Arc<PusherHub>,
     pusher_enabled: bool,
     access: Option<Mutex<Box<dyn std::io::Write + Send>>>,
+    shadow: Option<crate::shadow::Shadow>,
 }
 
 impl Runtime {
@@ -237,6 +243,10 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let pusher_enabled = config.pusher;
     let access = open_access_log(config.access_log.as_deref());
+    let shadow = config
+        .shadow_to
+        .as_ref()
+        .map(|url| crate::shadow::Shadow::new(url.clone(), config.shadow_sample));
     let rt = Arc::new(Runtime {
         config,
         php,
@@ -249,6 +259,7 @@ pub async fn run(
         pusher: Arc::new(PusherHub::default()),
         pusher_enabled,
         access,
+        shadow,
     });
 
     // Tail the shared broadcast ring and fan events out to local SSE subscribers
@@ -433,6 +444,22 @@ async fn handle(
         && matches!(*req.method(), Method::GET | Method::HEAD)
         && !req.headers().contains_key(hyper::header::COOKIE);
     let cache_key = cacheable.then(|| response_cache_key(&req));
+
+    // Traffic shadow: decide (and sample) now, while `req` is still intact, what
+    // to mirror. The mirror itself fires after the real response is built.
+    let shadow_probe: Option<(Method, String)> = rt.shadow.as_ref().and_then(|sh| {
+        let has_cookie = req.headers().contains_key(hyper::header::COOKIE);
+        if crate::shadow::eligible(req.method(), has_cookie) && sh.sampled() {
+            let pq = req
+                .uri()
+                .path_and_query()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| "/".to_string());
+            Some((req.method().clone(), pq))
+        } else {
+            None
+        }
+    });
     // #2 request coalescing: when a cacheable key misses, exactly one request
     // (the leader) runs PHP; the rest wait for it to populate the cache.
     let mut coalesce_leader = false;
@@ -603,6 +630,16 @@ async fn handle(
             // header (which we consume, never forwarding it to the client).
             if let Some(key) = &cache_key {
                 maybe_store(key, &resp, &accept_encoding);
+            }
+            // Fire the shadow mirror off the request path: hash prod's body now,
+            // then compare on a background task without touching the client.
+            if let (Some((method, pq)), Some(sh)) = (shadow_probe, rt.shadow.as_ref()) {
+                let client = sh.clone_client();
+                let base = sh.base_url().to_string();
+                let (ps, ph) = (resp.status, crate::shadow::hash_body(&resp.body));
+                tokio::spawn(async move {
+                    crate::shadow::compare_owned(client, base, method, pq, ps, ph).await;
+                });
             }
             let state = rcache::enabled().then_some("MISS");
             build_response(resp, state, &accept_encoding)

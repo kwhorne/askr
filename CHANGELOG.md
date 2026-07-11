@@ -4,6 +4,18 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (deploy validation): traffic shadowing (`--shadow-to <url>`).** Mirror
+  a sampled fraction of *safe* (GET/HEAD, cookie-less) requests to a shadow
+  upstream — typically a staging deploy of the next version — after serving the
+  real response, and compare the shadow's status + body to production. Divergence
+  is logged and counted on `/metrics` (`askr_shadow_total`, `askr_shadow_match_total`,
+  `askr_shadow_mismatch_total`, `askr_shadow_error_total`). The client's response
+  and latency are untouched (the mirror is a fire-and-forget background task), and
+  only idempotent, non-user-specific requests are mirrored, so a shadow deploy
+  never receives writes or one visitor's session. `--shadow-sample <pct>` controls
+  the fraction. Verified end-to-end: identical versions report all-match; a
+  diverging shadow version is caught (mismatch counted + logged) with the client
+  unaffected.
 - **Feature (worker mode): leak-aware, predictive recycling (`--max-rss <MB>`).**
   The supervisor samples each PHP worker's RSS (via `/proc`, Linux) ~once a second
   and, when one exceeds the cap, drains it gracefully and respawns a fresh one

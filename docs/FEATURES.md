@@ -216,3 +216,27 @@ See [Auto-TLS](AUTOTLS.md).
 `execve`/`ptrace` return `EPERM` (no shell from an RCE), and `--sandbox-write
 <dir>` adds Landlock so the worker can read everywhere but **write only** under
 the allowlist (no webshell into the docroot). See [Sandbox](SANDBOX.md).
+
+## 13. Traffic shadowing for deploy validation
+
+Validate the next version against **real production traffic** before you promote
+it — without risking a single user request.
+
+```bash
+# mirror 10% of safe traffic to a staging deploy of the new version
+askr serve … --shadow-to http://127.0.0.1:8081 --shadow-sample 10 --admin 127.0.0.1:9090
+```
+
+After Askr serves the real response, it mirrors a sampled fraction of **safe**
+(GET/HEAD, cookie-less) requests to the shadow upstream on a fire-and-forget
+background task, and compares the shadow's status + body hash to production:
+
+- The client's response and latency are **never** touched.
+- Only idempotent, non-user-specific requests are mirrored — a shadow deploy never
+  gets writes or one visitor's session.
+- Divergence is logged and counted on `/metrics`: `askr_shadow_total`,
+  `askr_shadow_match_total`, `askr_shadow_mismatch_total`, `askr_shadow_error_total`.
+
+If `askr_shadow_mismatch_total` stays at 0 under load, the new version is
+byte-for-byte compatible; any mismatch is logged with the URL and both statuses so
+you can investigate **before** flipping traffic over.

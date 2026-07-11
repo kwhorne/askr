@@ -28,6 +28,8 @@ typos fail fast in `config-check`.
 | `workers` | string | `auto` | Number of worker processes, or `auto` (= CPU cores). |
 | `max_requests` | int | `0` | Recycle each worker after N requests (`0` = never). |
 | `max_rss` | int | `0` | Recycle a worker gracefully once its RSS exceeds this many MB (`0` = never). Leak-aware; Linux only. |
+| `shadow_to` | string | — | Mirror sampled safe requests to this upstream URL for deploy validation. |
+| `shadow_sample` | int | `100` | Percent of eligible requests to mirror. |
 | `max_body_size` | string | `16M` | Reject larger bodies with `413`. `K`/`M`/`G` or plain bytes. |
 | `https` | bool | `false` | Force HTTPS in `$_SERVER` (e.g. behind a TLS terminator). Implied by TLS. |
 | `workers_min` | int | = `workers` | CoW autoscaling floor (with `--cow`). |

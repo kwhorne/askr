@@ -241,6 +241,30 @@ fn prometheus() -> Response<Full<Bytes>> {
         "KV cache entries evicted under pressure.",
         &m.cache_evictions.load(Relaxed).to_string(),
     );
+    push_counter(
+        &mut s,
+        "askr_shadow_total",
+        "Requests mirrored to the shadow upstream.",
+        &m.shadow_total.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_shadow_match_total",
+        "Shadow responses matching production (status + body).",
+        &m.shadow_match.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_shadow_mismatch_total",
+        "Shadow responses diverging from production.",
+        &m.shadow_mismatch.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
+        "askr_shadow_error_total",
+        "Shadow upstream unreachable / read errors.",
+        &m.shadow_error.load(Relaxed).to_string(),
+    );
 
     // Response status classes.
     let _ = write!(
