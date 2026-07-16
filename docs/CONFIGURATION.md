@@ -77,7 +77,8 @@ Run queue workers in the same binary, supervised alongside the web workers.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `workers` | int | Number of queue-worker processes (`0` = off). |
+| `workers` | int | Number of queue-worker processes (`0` = off; floor when autoscaling). |
+| `workers_max` | int | Autoscaling ceiling. When `> workers`, the pool scales on backlog (Horizon `balance=auto`, no extra daemon). Defaults to `workers`. |
 | `script` | path | Queue runner script (e.g. `examples/askr-queue.php`). |
 | `slots` | int | Shared-memory job queue slots (`0` = off; 32 KB each) — `askr_queue_*` + the `AskrQueue` driver. See [Cache](CACHE.md). |
 

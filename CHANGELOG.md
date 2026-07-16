@@ -2,6 +2,19 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Feature (queue): backlog-driven autoscaling of queue workers (`--queue-max`).**
+  The supervisor reads the shared-memory job-queue backlog and scales the
+  queue-worker pool between `--queue` (floor) and `--queue-max` (ceiling) — Horizon
+  `balance=auto`, but native, with no extra daemon, because Askr owns both the
+  queue (shared memory) *and* the worker pool. Scales up to target on a burst
+  (~1 worker per 10 ready jobs), drains one worker every ~2 s as the backlog
+  clears (graceful `SIGTERM`, not respawned). New `/metrics` gauges:
+  `askr_queue_workers`, `askr_queue_ready`, `askr_queue_total`,
+  `askr_queue_oldest_seconds` (also in the admin JSON). Verified end-to-end: a
+  200-job burst scaled 1→8 workers and drained back to 1.
+
 ## 0.9.0 — 2026-07-11
 
 Three power features (stale-while-revalidate, leak-aware recycling, traffic

@@ -71,7 +71,8 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--queue <N>` + `--queue-script <FILE>` | `0` | Supervised queue-worker processes. |
+| `--queue <N>` + `--queue-script <FILE>` | `0` | Supervised queue-worker processes (floor when autoscaling). |
+| `--queue-max <N>` | = `--queue` | Autoscaling ceiling: scale the queue-worker pool between `--queue` and N on backlog (Horizon `balance=auto`, no extra daemon). |
 | `--scheduler-script <FILE>` | — | Run the built-in scheduler (cron). |
 | `--sidecar "<cmd>"` | — | Supervise an arbitrary command (repeatable), e.g. Inertia SSR. |
 

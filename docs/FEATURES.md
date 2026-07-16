@@ -202,6 +202,29 @@ binary and lives in shared memory across all workers — see [Cache](CACHE.md):
 - **Sidecars** — supervise any command (`--sidecar`, `[[sidecar]]`), e.g. Inertia
   SSR, respawned like a worker.
 
+### The "Redis replacement" is data layer *plus* runtime
+
+Redis is only the **data layer** — you still run Horizon/a supervisor to *consume*
+the queue, and cron to run the scheduler. Askr owns **both**: the shared-memory
+store *and* the worker pool, scheduler, and queue consumer (worker-mode + sidecars).
+So "serverless queue" isn't a feature bolted on — it's what falls out when storage
+and the process supervisor live in one binary.
+
+That synthesis makes one thing possible that Redis + Horizon needs a separate
+daemon for: **queue-worker autoscaling**. Askr sees the backlog (it's in shared
+memory) and owns the pool (it forks/drains it), so it scales queue workers on
+demand — Horizon `balance=auto`, natively:
+
+```bash
+askr serve … --queue 1 --queue-max 8 --queue-slots 8192 --queue-script worker.php --admin 127.0.0.1:9090
+```
+
+`--queue` is the floor, `--queue-max` the ceiling. On a burst the pool jumps to the
+target (~1 worker per 10 ready jobs, clamped); as the backlog clears it drains one
+worker every couple seconds (scaled-down workers get a graceful `SIGTERM` and are
+not respawned). Backlog and pool size are exported on `/metrics`:
+`askr_queue_workers`, `askr_queue_ready`, `askr_queue_total`, `askr_queue_oldest_seconds`.
+
 ## 11. Auto-TLS via ACME (0.7.0)
 
 `--acme --acme-domain example.com --acme-email you@example.com` obtains and

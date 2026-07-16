@@ -270,6 +270,40 @@ pub fn release(id: u64, delay: u64) -> bool {
 }
 
 /// Number of ready (available, not live-reserved) jobs on `queue`.
+/// Backlog stats across *all* queues, for autoscaling and metrics:
+/// `(ready, total, oldest_ready_ms)`.
+///
+/// - `ready`   — occupied jobs available now and not live-reserved (waiting for a
+///   worker); the signal the master autoscales queue workers on.
+/// - `total`   — all occupied jobs (incl. delayed and reserved).
+/// - `oldest_ready_ms` — age of the oldest ready job (queue latency).
+///
+/// Lock-free approximate scan (aligned u64 reads): a slightly stale count is fine
+/// for a heuristic gauge, and it keeps the master off the per-slot spinlocks.
+pub fn stats() -> (usize, usize, u64) {
+    let Some((p, slots)) = base() else {
+        return (0, 0, 0);
+    };
+    let now = now_ms();
+    let (mut ready, mut total, mut oldest) = (0usize, 0usize, 0u64);
+    for idx in 0..slots {
+        let e = unsafe { p.add(idx) };
+        unsafe {
+            if r_u64(ptr::addr_of!((*e).id)) == 0 {
+                continue;
+            }
+            total += 1;
+            let avail = r_u64(ptr::addr_of!((*e).available_at));
+            let reserved = r_u64(ptr::addr_of!((*e).reserved_until));
+            if avail <= now && (reserved == 0 || reserved <= now) {
+                ready += 1;
+                oldest = oldest.max(now.saturating_sub(avail));
+            }
+        }
+    }
+    (ready, total, oldest)
+}
+
 pub fn size(queue: &[u8]) -> u64 {
     let Some((p, slots)) = base() else {
         return 0;

@@ -132,8 +132,13 @@ pub struct AdminSection {
 #[serde(deny_unknown_fields)]
 pub struct QueueSection {
     /// Number of queue-worker processes (runs the queue script). 0 = off.
+    /// With `workers_max`, this is the floor of an autoscaling range.
     #[serde(default)]
     pub workers: usize,
+    /// Autoscaling ceiling for queue workers (backlog-driven). Defaults to
+    /// `workers` (fixed count).
+    #[serde(default)]
+    pub workers_max: Option<usize>,
     /// Queue runner script (e.g. examples/askr-queue.php).
     pub script: Option<PathBuf>,
     /// Shared-memory job queue slots (0 = off; 32 KB each). Enables askr_queue_*
@@ -247,6 +252,7 @@ pub struct Resolved {
     pub paranoid: bool,
     pub admin_listen: Option<SocketAddr>,
     pub queue_workers: usize,
+    pub queue_workers_max: usize,
     pub queue_script: Option<PathBuf>,
     pub queue_slots: usize,
     pub scheduler_script: Option<PathBuf>,
@@ -353,6 +359,11 @@ impl FileConfig {
         } else {
             0
         };
+        let queue_workers_max = self
+            .queue
+            .workers_max
+            .unwrap_or(queue_workers)
+            .max(queue_workers);
 
         Ok(Resolved {
             config: Config {
@@ -388,6 +399,7 @@ impl FileConfig {
             paranoid: self.worker.paranoid,
             admin_listen,
             queue_workers,
+            queue_workers_max,
             queue_script: self.queue.script,
             queue_slots: self.queue.slots,
             scheduler_script: self.scheduler.script,

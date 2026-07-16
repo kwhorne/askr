@@ -112,7 +112,7 @@ fn status_json(info: &Info) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"workers":[{workers}],"pids":[{pids}]}}"#,
+        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"workers":[{workers}],"pids":[{pids}]}}"#,
         ver = env!("CARGO_PKG_VERSION"),
         listen = info.server_listen,
         mode = info.mode,
@@ -121,6 +121,10 @@ fn status_json(info: &Info) -> String {
         wa = s.workers_alive,
         rs = s.respawns,
         rss = rss_total,
+        qw = s.queue_workers,
+        qr = s.queue_ready,
+        qt = s.queue_total,
+        qo = s.queue_oldest_secs,
     )
 }
 
@@ -311,6 +315,15 @@ fn prometheus() -> Response<Full<Bytes>> {
         s,
         "# HELP askr_workers_alive Live worker processes.\n# TYPE askr_workers_alive gauge\naskr_workers_alive {}\n",
         st.workers_alive
+    );
+    // Queue backlog + autoscaled worker count (0 when the job queue is off).
+    let _ = write!(
+        s,
+        "# HELP askr_queue_workers Queue-worker processes (autoscaled).\n# TYPE askr_queue_workers gauge\naskr_queue_workers {}\n\
+         # HELP askr_queue_ready Ready jobs waiting for a worker.\n# TYPE askr_queue_ready gauge\naskr_queue_ready {}\n\
+         # HELP askr_queue_total Occupied job slots (incl. delayed/reserved).\n# TYPE askr_queue_total gauge\naskr_queue_total {}\n\
+         # HELP askr_queue_oldest_seconds Age of the oldest ready job.\n# TYPE askr_queue_oldest_seconds gauge\naskr_queue_oldest_seconds {}\n",
+        st.queue_workers, st.queue_ready, st.queue_total, st.queue_oldest_secs
     );
 
     // Latency histogram (cumulative buckets, seconds).

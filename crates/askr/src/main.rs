@@ -156,9 +156,17 @@ enum Command {
         paranoid: bool,
 
         /// Run N queue-worker processes alongside the web workers (requires
-        /// --queue-script). Supervised and respawned like web workers.
+        /// --queue-script). Supervised and respawned like web workers. With
+        /// --queue-max, N is the floor of an autoscaling range.
         #[arg(long, default_value = "0")]
         queue: usize,
+
+        /// Autoscaling ceiling for queue workers. When greater than --queue, the
+        /// supervisor scales the queue-worker pool between --queue and this value
+        /// based on the shared-memory backlog (Horizon `balance=auto`, no extra
+        /// daemon). Defaults to --queue (fixed count).
+        #[arg(long)]
+        queue_max: Option<usize>,
 
         /// Queue runner script (e.g. examples/askr-queue.php).
         #[arg(long)]
@@ -379,6 +387,7 @@ fn main() -> anyhow::Result<()> {
             max_body_size,
             paranoid,
             queue,
+            queue_max,
             queue_script,
             queue_slots,
             scheduler_script,
@@ -429,6 +438,7 @@ fn main() -> anyhow::Result<()> {
                 QUEUE_CAP.store(r.queue_slots, Ordering::SeqCst);
                 let sc = Sidecars {
                     queue: r.queue_workers,
+                    queue_max: r.queue_workers_max.max(r.queue_workers),
                     queue_script: r.queue_script,
                     scheduler_script: r.scheduler_script,
                     commands: r.sidecars,
@@ -496,8 +506,10 @@ fn main() -> anyhow::Result<()> {
                 WORKERS_MIN.store(wmin, Ordering::SeqCst);
                 WORKERS_MAX.store(wmax, Ordering::SeqCst);
                 QUEUE_CAP.store(queue_slots, Ordering::SeqCst);
+                let qw = if queue_script.is_some() { queue } else { 0 };
                 let sc = Sidecars {
-                    queue: if queue_script.is_some() { queue } else { 0 },
+                    queue: qw,
+                    queue_max: queue_max.unwrap_or(qw).max(qw),
                     queue_script,
                     scheduler_script,
                     commands: sidecar,
@@ -773,6 +785,8 @@ fn cpu_limit_from_cgroup_v2(cpu_max: &str) -> Option<usize> {
 // --- multi-process supervisor --------------------------------------------
 
 const MAX_WORKERS: usize = 512;
+// Queue autoscaling target: ~1 worker per this many ready (waiting) jobs.
+const QUEUE_BACKLOG_PER_WORKER: usize = 10;
 static CHILDREN: [AtomicI32; MAX_WORKERS] = [const { AtomicI32::new(0) }; MAX_WORKERS];
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -785,6 +799,9 @@ static RESPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
 // how many times it has fired (observability).
 static RECYCLE_SENT: [AtomicI32; MAX_WORKERS] = [const { AtomicI32::new(0) }; MAX_WORKERS];
 static MEM_RECYCLE_COUNT: AtomicUsize = AtomicUsize::new(0);
+// Queue-worker autoscaling: current desired count within [QUEUE_MIN, QUEUE_MAX],
+// driven by the shared-memory queue backlog.
+static QUEUE_DESIRED: AtomicUsize = AtomicUsize::new(0);
 // CoW autoscaling bounds + the current desired web-worker count.
 static WORKERS_MIN: AtomicUsize = AtomicUsize::new(1);
 static WORKERS_MAX: AtomicUsize = AtomicUsize::new(1);
@@ -824,6 +841,11 @@ pub struct Status {
     pub workers_alive: usize,
     pub respawns: usize,
     pub pids: Vec<i32>,
+    /// Queue autoscaling / backlog (0 when the job queue is disabled).
+    pub queue_workers: usize,
+    pub queue_ready: usize,
+    pub queue_total: usize,
+    pub queue_oldest_secs: u64,
 }
 
 pub fn status() -> Status {
@@ -832,12 +854,21 @@ pub fn status() -> Status {
         .map(|c| c.load(Ordering::SeqCst))
         .filter(|&p| p > 0)
         .collect();
+    let (queue_ready, queue_total, queue_oldest_ms) = if crate::squeue::enabled() {
+        crate::squeue::stats()
+    } else {
+        (0, 0, 0)
+    };
     Status {
         uptime_secs: now_secs().saturating_sub(START_TIME.load(Ordering::SeqCst)),
         workers_configured: WORKER_COUNT.load(Ordering::SeqCst),
         workers_alive: pids.len(),
         respawns: RESPAWN_COUNT.load(Ordering::SeqCst),
         pids,
+        queue_workers: QUEUE_DESIRED.load(Ordering::SeqCst),
+        queue_ready,
+        queue_total,
+        queue_oldest_secs: queue_oldest_ms / 1000,
     }
 }
 
@@ -853,7 +884,10 @@ pub fn trigger_reload() {
 /// Queue/scheduler sidecar processes supervised alongside the web workers.
 #[derive(Clone)]
 pub struct Sidecars {
+    /// Initial queue-worker count (= floor when autoscaling).
     pub queue: usize,
+    /// Autoscaling ceiling for queue workers (== `queue` when not autoscaling).
+    pub queue_max: usize,
     pub queue_script: Option<PathBuf>,
     pub scheduler_script: Option<PathBuf>,
     /// Arbitrary external commands supervised alongside the workers (e.g. an
@@ -933,7 +967,12 @@ fn supervise(
     sidecars: Sidecars,
 ) -> anyhow::Result<()> {
     let web = workers.max(1);
-    let queue = sidecars.queue;
+    // Queue workers autoscale in [queue_min, queue_max] on backlog. Reserve
+    // queue_max contiguous slots; only queue_min run at boot.
+    let queue_min = sidecars.queue;
+    let queue_max = sidecars.queue_max.max(queue_min);
+    let queue = queue_max;
+    QUEUE_DESIRED.store(queue_min, Ordering::SeqCst);
     let sched = if sidecars.scheduler_script.is_some() {
         1
     } else {
@@ -1024,6 +1063,11 @@ fn supervise(
     };
 
     for i in 0..workers {
+        // Only the floor number of queue workers start now; the autoscaler adds
+        // more (up to queue_max) when the backlog grows.
+        if kind_of(i) == Kind::Queue && (i - web) >= queue_min {
+            continue;
+        }
         spawn_slot(i);
     }
 
@@ -1061,6 +1105,7 @@ fn supervise(
     // reload) unless shutting down. A non-blocking poll lets us also drive the
     // canary health check and the leak-aware RSS check on a timer.
     let mut last_mem_check = std::time::Instant::now();
+    let mut last_queue_check = std::time::Instant::now();
     loop {
         // Reap everything that has exited.
         loop {
@@ -1074,6 +1119,11 @@ fn supervise(
                     child.store(0, Ordering::SeqCst);
                     if SHUTDOWN.load(Ordering::SeqCst) {
                         tracing::info!(pid, worker = i, "worker exited (shutdown)");
+                    } else if kind_of(i) == Kind::Queue
+                        && (i - web) >= QUEUE_DESIRED.load(Ordering::SeqCst)
+                    {
+                        // A queue worker scaled out of the desired set: let it go.
+                        tracing::info!(pid, worker = i, "queue worker scaled down");
                     } else {
                         tracing::info!(pid, worker = i, "worker exited; respawning");
                         RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -1118,6 +1168,38 @@ fn supervise(
         if config.max_rss_mb > 0 && last_mem_check.elapsed() >= std::time::Duration::from_secs(1) {
             last_mem_check = std::time::Instant::now();
             recycle_over_rss(config.max_rss_mb, web + queue);
+        }
+
+        // Queue autoscaling: size the queue-worker pool to the backlog. Askr owns
+        // both signals — the depth lives in shared memory (readable here) and the
+        // worker pool is ours to fork/drain — so this is Horizon `balance=auto`
+        // with no extra daemon. Scale up fast (jump to target), drain gently (one
+        // worker per tick) to avoid flapping after a burst clears.
+        if queue_max > queue_min
+            && crate::squeue::enabled()
+            && last_queue_check.elapsed() >= std::time::Duration::from_secs(2)
+        {
+            last_queue_check = std::time::Instant::now();
+            let (ready, _total, _oldest) = crate::squeue::stats();
+            let desired = QUEUE_DESIRED.load(Ordering::SeqCst);
+            let want = ready
+                .div_ceil(QUEUE_BACKLOG_PER_WORKER)
+                .clamp(queue_min, queue_max);
+            if want > desired {
+                for j in desired..want {
+                    spawn_slot(web + j);
+                }
+                QUEUE_DESIRED.store(want, Ordering::SeqCst);
+                tracing::info!(ready, from = desired, to = want, "queue: scaling up");
+            } else if want < desired {
+                let victim = desired - 1;
+                QUEUE_DESIRED.store(victim, Ordering::SeqCst); // set before SIGTERM
+                let pid = CHILDREN[web + victim].load(Ordering::SeqCst);
+                if pid > 0 {
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                }
+                tracing::info!(ready, from = desired, to = victim, "queue: scaling down");
+            }
         }
 
         if SHUTDOWN.load(Ordering::SeqCst) && CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0)
