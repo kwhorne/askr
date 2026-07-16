@@ -44,6 +44,15 @@ serde_json = "1"
 toml = { workspace = true }
 instant-acme = "0.8.5"
 
+# Optional L2 durable-queue backend (elyra-9): a SQL Anywhere / SQLite database
+# implementing docs/STORAGE_BACKEND.md against sql-anywhere's QUEUE_CONTRACT.md.
+# Off by default so the standard build and CI are unaffected.
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+
+[features]
+# Durable, replicated L2 storage backends over SQL Anywhere (queue first).
+sql-backend = ["dep:rusqlite"]
+
 # Linux-only hardening (seccomp syscall filter + Landlock filesystem sandbox).
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = "0.5"
