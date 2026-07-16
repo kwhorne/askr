@@ -25,6 +25,7 @@ requests against it, eliminating per-request framework bootstrap.
 | [CoW template](COW.md) | Boot once, fork workers (copy-on-write) — ~ms warm respawn + shared memory (experimental). |
 | [Shared cache](CACHE.md) | In-binary cache, atomic counters and rate limiting (no Redis); the Laravel driver. |
 | [Broadcasting](BROADCAST.md) | Live updates to browsers via SSE + `askr_broadcast()` (no Reverb/Pusher). |
+| [Storage backends](STORAGE_BACKEND.md) | L1 shared memory + L2 SQL Anywhere: durable, replicated, multi-box cache/queue/pub-sub (epic elyra-2). |
 | [Admin dashboard](ADMIN.md) | The built-in status/reload/metrics API and web dashboard. |
 | [Deployment](DEPLOYMENT.md) | Production: systemd, TLS, zero-downtime reload, recycling, scaling, hardening. |
 | [Ubuntu setup](UBUNTU.md) | **Recommended production install** on Ubuntu (release tarball, systemd, TLS, tuning). |
