@@ -7,11 +7,14 @@ response cache (`rcache.rs`) and SSE/Pusher broadcasting — no external broker.
 This document describes how those primitives gain a **durable, replicated,
 multi-box** tier by layering over SQL Anywhere, so the "Redis-free" story holds
 across a fleet and survives restarts. It is the runtime half of epic elyra-2; the
-substrate half is the SQL Anywhere **contracts**:
+substrate half is the SQL Anywhere **contracts**, which are now
+**conformance-tested** (executable specs, not just prose — see
+`sql-anywhere/sqlanywhere/tests/contract_conformance.rs`), so these drivers build
+against a proven substrate:
 
-- Queue → `sql-anywhere/docs/contracts/QUEUE_CONTRACT.md` (elyra-5)
-- Cache → `sql-anywhere/docs/contracts/CACHE_CONTRACT.md` (elyra-7)
-- Pub/sub → `sql-anywhere/docs/contracts/PUBSUB_CONTRACT.md` (elyra-6)
+- Queue → `sql-anywhere/docs/contracts/QUEUE_CONTRACT.md` (elyra-5) ✓ conformance-tested
+- Cache → `sql-anywhere/docs/contracts/CACHE_CONTRACT.md` (elyra-7) ✓ conformance-tested
+- Pub/sub → `sql-anywhere/docs/contracts/PUBSUB_CONTRACT.md` (elyra-6) ✓ conformance-tested
 
 ## The two tiers
 
@@ -59,5 +62,10 @@ node, with no Redis pub/sub.
 
 ## Status
 
-Contracts (elyra-5/6/7) are drafted. Drivers (elyra-8/9/10/13) and the Laravel
-surface (elyra-11/12) are pending; see epic elyra-2 for the plan and order.
+Contracts (elyra-5/6/7) are **stable and conformance-tested** on the substrate
+side (`sql-anywhere/sqlanywhere/tests/contract_conformance.rs`). Drivers
+(elyra-8/9/10/13) and the Laravel surface (elyra-11/12) are pending; see epic
+elyra-2 for the plan and order. Because the contract SQL is now proven, the
+durable-queue driver (elyra-9) can be implemented directly against
+`QUEUE_CONTRACT.md` §Operations with confidence that claim/ack/release/dead-letter
+behave as specified.
