@@ -2,7 +2,11 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.2 — 2026-07-16
+
+Optional durable L2 queue backend. The default build, its behaviour, and CI are
+unchanged — the SQL Anywhere tier is entirely opt-in (`--features sql-backend` +
+`ASKR_QUEUE_DB`).
 
 - **Feature (queue): L2 durable queue backend over SQL Anywhere (`sql-backend`, elyra-9).**
   An optional durable, replicated queue backend that implements the conformance-tested
