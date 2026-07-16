@@ -15,6 +15,7 @@ mod doctor;
 mod metrics;
 mod php;
 mod pusher;
+mod queue;
 mod rcache;
 mod record;
 mod sandbox;
@@ -22,6 +23,8 @@ mod server;
 mod shadow;
 mod shmlock;
 mod squeue;
+#[cfg(feature = "sql-backend")]
+mod squeue_sql;
 mod tls;
 mod upgrade;
 mod upload;
@@ -538,8 +541,11 @@ fn main() -> anyhow::Result<()> {
             if broadcast || config.pusher {
                 broadcast::init(); // the Pusher endpoints ride the broadcast ring
             }
+            queue::warn_if_unavailable();
             let queue_slots = QUEUE_CAP.load(Ordering::SeqCst);
-            if queue_slots > 0 {
+            // The L2 (SQL Anywhere) queue needs no shared-memory ring; it opens a
+            // per-process database connection when the bridge is registered.
+            if queue_slots > 0 && !queue::l2_enabled() {
                 squeue::init(queue_slots);
             }
 
@@ -1248,7 +1254,7 @@ fn run_cow(
     // the fork in cow_ready is safe).
     let _interp = askr_php::Interpreter::new().map_err(|e| anyhow::anyhow!("php init: {e}"))?;
     crate::cache::register_bridge();
-    crate::squeue::register_bridge();
+    crate::queue::register_bridge();
     crate::broadcast::register_bridge();
 
     let recycle_after = config.max_requests;

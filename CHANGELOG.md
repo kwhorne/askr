@@ -2,6 +2,22 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Feature (queue): L2 durable queue backend over SQL Anywhere (`sql-backend`, elyra-9).**
+  An optional durable, replicated queue backend that implements the conformance-tested
+  substrate contract (`sql-anywhere/docs/contracts/QUEUE_CONTRACT.md`) verbatim:
+  atomic `UPDATE … RETURNING` claim, at-least-once delivery with a visibility
+  timeout, delayed jobs, priority, and a dead-letter table. It exposes the exact
+  same `push`/`pop`/`delete`/`release`/`size` bridge as the L1 shared-memory
+  queue, so the PHP `askr_queue_*` API and the Laravel driver are unchanged —
+  only the backend differs. Selected at runtime with `ASKR_QUEUE_DB=/path/to.db`
+  (an embedded SQL Anywhere file, an embedded replica, or a `sqld`-managed file);
+  unset falls back to L1. Each process opens its own WAL connection, so the
+  pre-fork worker model needs no shared state. Built only with
+  `--features sql-backend`, so the standard build and CI are unaffected. New
+  module `squeue_sql.rs` (4 unit tests) + `queue.rs` backend dispatch.
+
 ## 0.9.1 — 2026-07-16
 
 Native queue-worker autoscaling — the piece that makes Askr's Redis-free stack

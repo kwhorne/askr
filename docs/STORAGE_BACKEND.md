@@ -28,17 +28,32 @@ Laravel drivers (elyra-11, elyra-12) are **unchanged**; only the backend differs
 L1 and L2 mirror the same semantics on purpose — that is why the contracts are
 written to match `squeue.rs` / `cache.rs`.
 
-## Queue (elyra-9)
+## Queue (elyra-9) — implemented
 
-The durable-queue driver claims against `askr_jobs` exactly as `squeue.rs::pop`
-reserves a slot: `UPDATE … RETURNING` with a subselect, a visibility timeout,
-`attempts` incremented at claim, ack = delete, release = re-arm with backoff,
-dead-letter on `attempts >= max_attempts`. See the queue contract for the SQL.
+The durable-queue driver (`crates/askr/src/squeue_sql.rs`, feature `sql-backend`)
+claims against `askr_jobs` exactly as `squeue.rs::pop` reserves a slot:
+`UPDATE … RETURNING` with a subselect, a visibility timeout, `attempts`
+incremented at claim, ack = delete, release = re-arm with backoff. It implements
+the conformance-tested `QUEUE_CONTRACT.md` SQL verbatim and exposes the *same*
+`push`/`pop`/`delete`/`release`/`size` bridge as L1, so `askr_queue_*` and the
+Laravel driver are unchanged — only the backend differs.
 
-- Connection pooling to SQL Anywhere (embedded API or server mode).
-- Visibility renewal (heartbeat) for long jobs; graceful drain on `SIGTERM`.
-- Choice of backend is config: keep L1 for ephemeral/low-latency; use L2 for
-  durable/replicated (`QUEUE_CONNECTION=sqlanywhere`, elyra-12).
+**Enable it** (build + run):
+
+```bash
+cargo build --release -p askr --features sql-backend
+ASKR_QUEUE_DB=/var/lib/askr/queue.db ./askr serve ...   # unset => L1 fallback
+```
+
+`ASKR_QUEUE_DB` points at an embedded SQL Anywhere file, an embedded replica, or
+a `sqld`-managed database. Each worker process opens its own WAL connection
+(safe multi-process access via SQLite file locking), so the pre-fork model needs
+no shared state; `queue.rs` dispatches L1 vs L2 once, at bridge registration.
+
+Still open (follow-ups): connection pooling knobs, visibility renewal/heartbeat
+for long jobs, dead-letter move wired into the worker loop
+(`attempts >= max_attempts`), and the Laravel `QUEUE_CONNECTION=sqlanywhere`
+surface (elyra-12).
 
 ## Autoscaling (elyra-8)
 
@@ -63,9 +78,8 @@ node, with no Redis pub/sub.
 ## Status
 
 Contracts (elyra-5/6/7) are **stable and conformance-tested** on the substrate
-side (`sql-anywhere/sqlanywhere/tests/contract_conformance.rs`). Drivers
-(elyra-8/9/10/13) and the Laravel surface (elyra-11/12) are pending; see epic
-elyra-2 for the plan and order. Because the contract SQL is now proven, the
-durable-queue driver (elyra-9) can be implemented directly against
-`QUEUE_CONTRACT.md` §Operations with confidence that claim/ack/release/dead-letter
-behave as specified.
+side (`sql-anywhere/sqlanywhere/tests/contract_conformance.rs`). The
+**durable-queue driver (elyra-9) is implemented** behind the `sql-backend`
+feature (`squeue_sql.rs`), built against that proven contract. The remaining
+drivers (elyra-8 autoscaling on L2, elyra-10 cache, elyra-13 broadcast) and the
+Laravel surface (elyra-11/12) are pending; see epic elyra-2 for the plan and order.
