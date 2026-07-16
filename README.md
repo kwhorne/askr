@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.9.0</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.9.1</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.9.0; ARCH=$(uname -m)
+VER=v0.9.1; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -78,7 +78,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Benchmarks](docs/BENCHMARKS.md) — vs FrankenPHP, FPM+nginx, RoadRunner (reproducible)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.9.0)
+## What works today (0.9.1)
 
 - Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
 - **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -147,6 +147,7 @@ Everything lives in [`docs/`](docs/README.md):
 | `askr-laravel` composer package: shared-memory session/cache/queue drivers | ✅ |
 | **0.8.4** — security/robustness: httpoxy filter, PID-aware shm lock, fork-safe admin start, upload temp-file RAII cleanup | ✅ |
 | **0.9.0** — stale-while-revalidate, leak-aware recycling (`--max-rss`), traffic shadowing (`--shadow-to`), compress-cache-once, atomic `askr_cache_touch` | ✅ |
+| **0.9.1** — backlog-driven queue-worker autoscaling (`--queue-max`, Horizon `balance=auto` with no extra daemon) + queue metrics | ✅ |
 | **Next** — HTTP/3 (QUIC), OTel traces. *(io_uring deprioritised: benchmarks show PHP is 99.5% of request time, I/O ~0.5%)* | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a

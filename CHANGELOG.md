@@ -2,7 +2,11 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.1 — 2026-07-16
+
+Native queue-worker autoscaling — the piece that makes Askr's Redis-free stack
+(data layer + runtime in one binary) do what Redis + Horizon needs a separate
+daemon for.
 
 - **Feature (queue): backlog-driven autoscaling of queue workers (`--queue-max`).**
   The supervisor reads the shared-memory job-queue backlog and scales the
