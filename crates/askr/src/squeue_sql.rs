@@ -39,7 +39,9 @@ thread_local! {
 
 /// Path to the L2 database, or `None` when the L2 backend is not selected.
 pub fn db_path() -> Option<String> {
-    std::env::var("ASKR_QUEUE_DB").ok().filter(|s| !s.is_empty())
+    std::env::var("ASKR_QUEUE_DB")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Whether the L2 queue backend is selected for this process.
