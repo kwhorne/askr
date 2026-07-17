@@ -61,6 +61,7 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
 
 Everything lives in [`docs/`](docs/README.md):
 
+- [**Laravel setup**](docs/LARAVEL.md) — **recommended Laravel guide**: `composer require kwhorne/askr-laravel`, `.env`, queue/scheduler/broadcasting, durable L2
 - [Ubuntu setup](docs/UBUNTU.md) — **recommended production install** (systemd, TLS, tuning)
 - [Architecture](docs/ARCHITECTURE.md) — how it works, and why processes not threads
 - [Building](docs/BUILDING.md) — `libphp` + `askr`, the extension matrix
