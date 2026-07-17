@@ -88,7 +88,9 @@ fn do_current_seq(conn: &Connection) -> rusqlite::Result<i64> {
 
 /// Tail events with seq in `(last, …]`, up to `BATCH`. Returns events + new cursor.
 fn do_read_from(conn: &Connection, last: i64) -> rusqlite::Result<(Vec<Delivered>, i64)> {
-    let mut stmt = conn.prepare(
+    // prepare_cached: the SSE fan-out tails this every ~50 ms; cache the compiled
+    // statement on the persistent connection instead of recompiling each tick.
+    let mut stmt = conn.prepare_cached(
         "SELECT seq, channel, payload FROM askr_events
          WHERE seq > ?1 ORDER BY seq LIMIT ?2",
     )?;

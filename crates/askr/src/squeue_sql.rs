@@ -89,7 +89,9 @@ fn do_push(conn: &Connection, queue: &[u8], payload: &[u8], delay: u64) -> rusql
 /// Atomically claim the next ready job for `visibility` seconds (the contract's
 /// `UPDATE … RETURNING` claim). Returns `None` when the queue is empty.
 fn do_pop(conn: &Connection, queue: &[u8], visibility: u64) -> rusqlite::Result<Option<Reserved>> {
-    conn.query_row(
+    // prepare_cached: the claim runs on every worker poll — cache the compiled
+    // statement on the (persistent, per-process) connection instead of recompiling.
+    conn.prepare_cached(
         "UPDATE askr_jobs
          SET reserved_until = unixepoch() + ?2, attempts = attempts + 1
          WHERE id = (
@@ -100,6 +102,8 @@ fn do_pop(conn: &Connection, queue: &[u8], visibility: u64) -> rusqlite::Result<
            ORDER BY priority DESC, available_at, id
            LIMIT 1)
          RETURNING id, payload, attempts",
+    )?
+    .query_row(
         params![String::from_utf8_lossy(queue), visibility as i64],
         |r| {
             Ok(Reserved {

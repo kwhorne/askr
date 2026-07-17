@@ -67,6 +67,23 @@ fn value_to_bytes(v: Value) -> Option<Vec<u8>> {
     }
 }
 
+/// Read value + remaining TTL (seconds; 0 = no expiry) for L1 population.
+fn do_get_with_ttl(conn: &Connection, key: &[u8]) -> rusqlite::Result<Option<(Vec<u8>, u64)>> {
+    conn.query_row(
+        "SELECT value,
+                CASE WHEN expires_at IS NULL THEN 0 ELSE max(expires_at - unixepoch(), 1) END
+         FROM askr_cache
+         WHERE key = ?1 AND (expires_at IS NULL OR expires_at > unixepoch())",
+        params![String::from_utf8_lossy(key)],
+        |r| {
+            let v: Value = r.get(0)?;
+            let ttl: i64 = r.get(1)?;
+            Ok((value_to_bytes(v).unwrap_or_default(), ttl.max(0) as u64))
+        },
+    )
+    .optional()
+}
+
 fn do_get(conn: &Connection, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
     let v: Option<Value> = conn
         .query_row(
@@ -171,29 +188,79 @@ fn with_conn<R>(f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> rusqlite:
     })
 }
 
+// Write-through L1->L2: when the L1 shared-memory cache is also enabled it acts
+// as a fast local read tier in front of the durable L2. Reads hit L1 first and
+// lazily populate it on a miss; writes go to L2 (the source of truth) and then
+// warm or invalidate L1. L1 is shared memory, so all worker processes on a box
+// see writes immediately (coherent within a box); cross-box staleness is bounded
+// by the entry TTL (instant cross-node invalidation is a pub/sub follow-up).
+fn l1() -> bool {
+    crate::cache::enabled()
+}
+
 pub fn get(key: &[u8]) -> Option<Vec<u8>> {
+    if l1() {
+        if let Some(v) = crate::cache::get(key) {
+            return Some(v); // hot L1 hit — no database round-trip
+        }
+        if let Some((v, ttl)) = with_conn(|c| do_get_with_ttl(c, key)).unwrap_or(None) {
+            crate::cache::set(key, &v, ttl); // populate L1 with the remaining TTL
+            return Some(v);
+        }
+        return None;
+    }
     with_conn(|c| do_get(c, key)).unwrap_or(None)
 }
 pub fn set(key: &[u8], val: &[u8], ttl: u64) -> bool {
-    with_conn(|c| do_set(c, key, val, ttl)).is_ok()
+    let ok = with_conn(|c| do_set(c, key, val, ttl)).is_ok();
+    if ok && l1() {
+        crate::cache::set(key, val, ttl); // warm L1
+    }
+    ok
 }
 pub fn add(key: &[u8], val: &[u8], ttl: u64) -> bool {
-    with_conn(|c| do_add(c, key, val, ttl)).unwrap_or(false)
+    let acquired = with_conn(|c| do_add(c, key, val, ttl)).unwrap_or(false);
+    if l1() {
+        if acquired {
+            crate::cache::set(key, val, ttl);
+        } else {
+            crate::cache::delete(key); // don't let L1 mask the held L2 value
+        }
+    }
+    acquired
 }
 pub fn delete(key: &[u8]) -> bool {
-    with_conn(|c| do_delete(c, key)).unwrap_or(false)
+    let ok = with_conn(|c| do_delete(c, key)).unwrap_or(false);
+    if l1() {
+        crate::cache::delete(key);
+    }
+    ok
 }
 pub fn increment(key: &[u8], delta: i64, ttl: u64) -> i64 {
-    with_conn(|c| do_increment(c, key, delta, ttl)).unwrap_or(0)
+    let v = with_conn(|c| do_increment(c, key, delta, ttl)).unwrap_or(0);
+    if l1() {
+        crate::cache::delete(key); // invalidate; next get repopulates from L2
+    }
+    v
 }
 pub fn touch(key: &[u8], ttl: u64) -> bool {
-    with_conn(|c| do_touch(c, key, ttl)).unwrap_or(false)
+    let ok = with_conn(|c| do_touch(c, key, ttl)).unwrap_or(false);
+    if l1() {
+        crate::cache::delete(key);
+    }
+    ok
 }
 pub fn flush() {
     let _ = with_conn(do_flush);
+    if l1() {
+        crate::cache::flush();
+    }
 }
 pub fn forget_tag(tag: &[u8]) {
     let _ = with_conn(|c| do_forget_tag(c, tag));
+    if l1() {
+        crate::cache::flush(); // L1 has no tag map — coarse but safe
+    }
 }
 
 // --- PHP bridge (identical shape to cache.rs) ---------------------------------
@@ -313,6 +380,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(do_get(&c, b"k").unwrap(), None);
+    }
+
+    #[test]
+    fn get_with_ttl_reports_remaining_for_l1_population() {
+        let c = db();
+        do_set(&c, b"perm", b"v", 0).unwrap();
+        do_set(&c, b"temp", b"v", 3600).unwrap();
+        let (_v, ttl_perm) = do_get_with_ttl(&c, b"perm").unwrap().unwrap();
+        assert_eq!(ttl_perm, 0, "no expiry => ttl 0 (forever)");
+        let (_v, ttl_temp) = do_get_with_ttl(&c, b"temp").unwrap().unwrap();
+        assert!(
+            ttl_temp > 3500 && ttl_temp <= 3600,
+            "remaining ttl, got {ttl_temp}"
+        );
+        // Expired -> not returned (so L1 won't be populated with a dead entry).
+        c.execute(
+            "UPDATE askr_cache SET expires_at = unixepoch() - 1 WHERE key='temp'",
+            [],
+        )
+        .unwrap();
+        assert!(do_get_with_ttl(&c, b"temp").unwrap().is_none());
     }
 
     #[test]
