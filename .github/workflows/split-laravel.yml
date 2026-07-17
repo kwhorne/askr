@@ -48,3 +48,18 @@ jobs:
             --title "askr-laravel ${TAG#v}" \
             --notes "Laravel drivers for Askr ${TAG#v}. See the main CHANGELOG: https://github.com/kwhorne/askr/blob/main/CHANGELOG.md" \
             || echo "release $TAG already exists — skipping"
+
+      # Belt-and-braces auto-update: ping Packagist after the split push, so the
+      # package refreshes even without a GitHub webhook / the Packagist app.
+      # Optional — needs PACKAGIST_USERNAME + PACKAGIST_TOKEN secrets.
+      - name: Notify Packagist
+        continue-on-error: true
+        env:
+          PU: ${{ secrets.PACKAGIST_USERNAME }}
+          PT: ${{ secrets.PACKAGIST_TOKEN }}
+        run: |
+          [ -n "$PT" ] || { echo "no PACKAGIST_TOKEN secret set — skipping"; exit 0; }
+          curl -sf -XPOST -H 'content-type:application/json' \
+            "https://packagist.org/api/update-package?username=${PU}&apiToken=${PT}" \
+            -d '{"repository":{"url":"https://github.com/kwhorne/askr-laravel"}}' \
+            && echo "Packagist notified"
