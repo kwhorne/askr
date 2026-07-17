@@ -79,12 +79,24 @@ Still open (follow-ups): write-through L1→L2 with lazy L1 population for a hot
 local tier, and instant cross-node tag invalidation signalled over the pub/sub
 topic.
 
-## Broadcasting / pub-sub (elyra-13)
+## Broadcasting / pub-sub (elyra-13) — implemented
 
-Askr tails the `askr_events` topic (local copy, woken by replication apply or the
-SQLite update hook) and fans out to connected SSE / Pusher-compatible WebSocket
-clients on that node — so a publish on the primary reaches Echo clients on any
-node, with no Redis pub/sub.
+The durable pub/sub driver (`crates/askr/src/broadcast_sql.rs`, feature
+`sql-backend`) implements `PUBSUB_CONTRACT.md`: publish = `INSERT` into the
+append-only `askr_events` topic, subscribe = tail rows past a cursor. It exposes
+the same `publish`/`current_seq`/`read_from` surface and `askr_broadcast()`
+bridge as the L1 ring, so the SSE fan-out task and the Pusher endpoint are
+unchanged — only the backend differs. Askr tails its **local copy** of
+`askr_events` and fans out to connected SSE / Pusher-compatible WebSocket clients
+on that node, so a publish on the primary reaches Echo clients on any node via
+the replication log — no Redis pub/sub.
+
+**Enable it** with `ASKR_BROADCAST_DB=/path/to.db` (unset => L1 ring), building
+with `--features sql-backend`.
+
+Still open (follow-ups): replace the 50 ms tail poll with an update-hook /
+replication-apply wakeup, and durable subscriber cursors (`askr_subscribers`) for
+resume-after-restart.
 
 ## Status
 

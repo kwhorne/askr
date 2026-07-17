@@ -7,6 +7,8 @@
 mod acme;
 mod admin;
 mod broadcast;
+#[cfg(feature = "sql-backend")]
+mod broadcast_sql;
 mod cache;
 #[cfg(feature = "sql-backend")]
 mod cache_sql;

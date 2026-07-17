@@ -65,6 +65,12 @@ pub fn init() {
 }
 
 pub fn enabled() -> bool {
+    // The L2 (durable, replicated) pub/sub backend counts as enabled even when
+    // the L1 shared-memory ring is not mapped (elyra-13).
+    #[cfg(feature = "sql-backend")]
+    if crate::broadcast_sql::enabled() {
+        return true;
+    }
     !RING_PTR.load(Ordering::SeqCst).is_null()
 }
 
@@ -79,6 +85,10 @@ fn ring() -> Option<*mut Ring> {
 
 /// Publish an event. Returns false if disabled or the event is too large.
 pub fn publish(chan: &[u8], payload: &[u8]) -> bool {
+    #[cfg(feature = "sql-backend")]
+    if crate::broadcast_sql::enabled() {
+        return crate::broadcast_sql::publish(chan, payload);
+    }
     let Some(r) = ring() else {
         return false;
     };
@@ -111,6 +121,10 @@ pub fn publish(chan: &[u8], payload: &[u8]) -> bool {
 
 /// The current write sequence — a subscriber starts here to skip history.
 pub fn current_seq() -> u64 {
+    #[cfg(feature = "sql-backend")]
+    if crate::broadcast_sql::enabled() {
+        return crate::broadcast_sql::current_seq();
+    }
     ring()
         .map(|r| unsafe { (*r).write_seq.load(Ordering::Acquire) })
         .unwrap_or(0)
@@ -119,6 +133,10 @@ pub fn current_seq() -> u64 {
 /// Read events with sequence in `(last, now]`. Returns the events and the new
 /// `last`. Events older than a full ring are dropped.
 pub fn read_from(last: u64) -> (Vec<Delivered>, u64) {
+    #[cfg(feature = "sql-backend")]
+    if crate::broadcast_sql::enabled() {
+        return crate::broadcast_sql::read_from(last);
+    }
     let Some(r) = ring() else {
         return (Vec::new(), last);
     };
@@ -168,6 +186,11 @@ extern "C" fn c_broadcast(
 
 /// Register the broadcast callback with the shim for this process.
 pub fn register_bridge() {
+    #[cfg(feature = "sql-backend")]
+    if crate::broadcast_sql::enabled() {
+        crate::broadcast_sql::register_bridge();
+        return;
+    }
     if !enabled() {
         return;
     }
