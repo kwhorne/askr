@@ -1,7 +1,7 @@
 {
     "name": "kwhorne/askr-laravel",
-    "description": "Laravel integration for the Askr application server: shared-memory session, cache, locks and queue drivers — Redis-free on a single box.",
-    "keywords": ["laravel", "askr", "session", "cache", "queue", "shared-memory"],
+    "description": "Laravel integration for the Askr application server: session, cache, locks, queue and broadcasting drivers — Redis-free, with an optional durable/replicated SQL Anywhere backend.",
+    "keywords": ["laravel", "askr", "session", "cache", "queue", "broadcasting", "shared-memory"],
     "homepage": "https://github.com/kwhorne/askr",
     "license": "MIT",
     "authors": [
