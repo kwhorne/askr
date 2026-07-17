@@ -2,7 +2,13 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.3 — 2026-07-17
+
+Rounds out the optional durable L2 tier: cache and pub/sub backends over SQL
+Anywhere, backlog autoscaling against the L2 queue, L1→L2 write-through, and a
+Laravel broadcasting driver — completing the Redis-free Laravel surface (session +
+cache + queue + broadcasting). All of it is behind `--features sql-backend` and
+opt-in via `ASKR_*_DB`; the default build, its behaviour, and CI are unchanged.
 
 - **Perf (cache): write-through L1→L2 for the durable cache backend (`sql-backend`).**
   When the L1 shared-memory cache is also enabled alongside the L2 SQL Anywhere
