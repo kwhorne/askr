@@ -4,6 +4,15 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (Laravel): broadcasting driver (`BROADCAST_CONNECTION=askr`, elyra-13 surface).**
+  The `packages/laravel` integration gains an `AskrBroadcaster` so Laravel Echo
+  works over Askr's in-binary pub/sub with no Redis and no separate WebSocket
+  server: `broadcast()` publishes a Pusher-shaped frame via `askr_broadcast()`,
+  and Askr's SSE / Pusher-compatible fan-out delivers it to Echo clients. Public
+  channels work fully; private/presence follow Laravel's standard channel
+  authorization. Auto-registered by `AskrServiceProvider`. Transparent across the
+  L1 and durable/replicated L2 backends. This completes the Laravel surface
+  (session + cache + queue + broadcasting) for the Redis-free stack.
 - **Feature (queue): backlog-driven worker autoscaling on the L2 queue (`sql-backend`, elyra-8).**
   The queue-worker autoscaler (`--queue` … `--queue-max`) and the
   `askr_queue_ready/total/oldest_seconds` metrics now read their backlog via a

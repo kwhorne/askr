@@ -105,8 +105,12 @@ resume-after-restart.
 ## Status
 
 Contracts (elyra-5/6/7) are **stable and conformance-tested** on the substrate
-side (`sql-anywhere/sqlanywhere/tests/contract_conformance.rs`). The
-**durable-queue driver (elyra-9) is implemented** behind the `sql-backend`
-feature (`squeue_sql.rs`), built against that proven contract. The remaining
-drivers (elyra-8 autoscaling on L2, elyra-10 cache, elyra-13 broadcast) and the
-Laravel surface (elyra-11/12) are pending; see epic elyra-2 for the plan and order.
+side (`sql-anywhere/sqlanywhere/tests/contract_conformance.rs`). All three L2
+drivers are **implemented** behind the `sql-backend` feature — queue (elyra-9,
+`squeue_sql.rs`), cache (elyra-10, `cache_sql.rs`) and broadcast (elyra-13,
+`broadcast_sql.rs`) — plus backlog-driven **autoscaling on L2** (elyra-8, via
+`queue::stats`). The **Laravel surface** (elyra-11/12/13) ships in
+`packages/laravel`: session, cache, queue and now **broadcasting**
+(`BROADCAST_CONNECTION=askr`) drivers, transparent across L1/L2. Epic elyra-2 is
+functionally complete; remaining work is optimization (update-hook wakeups,
+write-through L1→L2 cache) and hardening.

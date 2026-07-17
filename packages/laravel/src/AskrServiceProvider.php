@@ -4,17 +4,24 @@ declare(strict_types=1);
 
 namespace Askr\Laravel;
 
+use Askr\Laravel\Broadcasting\AskrBroadcaster;
 use Askr\Laravel\Cache\AskrStore;
 use Askr\Laravel\Queue\AskrConnector;
 use Askr\Laravel\Session\AskrSessionHandler;
+use Illuminate\Contracts\Broadcasting\Factory as BroadcastingFactory;
 use Illuminate\Support\ServiceProvider;
 
 /**
  * Wires Askr's in-binary, shared-memory services into Laravel's driver system:
  *
- *   SESSION_DRIVER=askr      — sessions in shared memory (no heap leak, no lock, no server)
- *   CACHE_STORE=askr         — cache, counters, rate limiting, Cache::lock()
- *   QUEUE_CONNECTION=askr     — a job queue with reserve/visibility/retry/delay
+ *   SESSION_DRIVER=askr        — sessions in shared memory (no heap leak, no lock, no server)
+ *   CACHE_STORE=askr           — cache, counters, rate limiting, Cache::lock()
+ *   QUEUE_CONNECTION=askr      — a job queue with reserve/visibility/retry/delay
+ *   BROADCAST_CONNECTION=askr  — pub/sub for Laravel Echo (SSE / Pusher-compatible)
+ *
+ * Each backend transparently gains a durable, replicated tier when the server
+ * runs with the L2 SQL Anywhere backend (`--features sql-backend` +
+ * `ASKR_{QUEUE,CACHE,BROADCAST}_DB`); the PHP-facing drivers are unchanged.
  *
  * Run Askr with the matching regions enabled:
  *
@@ -47,6 +54,16 @@ final class AskrServiceProvider extends ServiceProvider
         });
         if ($this->app->resolved('queue')) {
             $this->app->make('queue')->addConnector('askr', fn (): AskrConnector => new AskrConnector());
+        }
+
+        // Broadcasting: BROADCAST_CONNECTION=askr. Register the driver on the
+        // broadcast factory whenever it resolves (and now, if it already has).
+        $register = function ($factory): void {
+            $factory->extend('askr', fn (): AskrBroadcaster => new AskrBroadcaster());
+        };
+        $this->app->resolving(BroadcastingFactory::class, $register);
+        if ($this->app->resolved(BroadcastingFactory::class)) {
+            $register($this->app->make(BroadcastingFactory::class));
         }
     }
 }

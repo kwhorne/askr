@@ -9,6 +9,16 @@ driver system, so a single-box app needs **no Redis**:
 | `SESSION_DRIVER=askr` | Redis / DB / `file` sessions |
 | `CACHE_STORE=askr` | Redis cache, counters, rate limiting, `Cache::lock()` |
 | `QUEUE_CONNECTION=askr` | Redis / DB queues |
+| `BROADCAST_CONNECTION=askr` | Redis pub/sub + a WebSocket server (Laravel Echo) |
+
+### Durable, replicated (multi-box)
+
+The drivers above are unchanged whether the server uses the L1 shared-memory
+tier (single box, ephemeral) or the durable, replicated **L2 SQL Anywhere**
+tier. Run the server built with `--features sql-backend` and set
+`ASKR_QUEUE_DB` / `ASKR_CACHE_DB` / `ASKR_BROADCAST_DB` to a database path (an
+embedded file, an embedded replica, or a `sqld`-managed database) to get durable
+jobs, a shared/edge cache, and cross-node broadcasting — no app changes.
 
 ## Why the session driver matters
 
