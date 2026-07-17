@@ -8,6 +8,8 @@ mod acme;
 mod admin;
 mod broadcast;
 mod cache;
+#[cfg(feature = "sql-backend")]
+mod cache_sql;
 mod cgi;
 mod compress;
 mod config;

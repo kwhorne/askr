@@ -61,12 +61,23 @@ The existing backlog-driven autoscaler (`--queue` … `--queue-max`) reads the
 backlog query from the contract instead of the shared-memory ring, and reports
 `askr_queue_workers/ready/total/oldest_seconds` for the L2 backend.
 
-## Cache (elyra-10)
+## Cache (elyra-10) — implemented
 
-Write-through L1→L2 with lazy L1 population on read. Locks (`Cache::lock()`) and
-atomic counters use the contract's `add` (SETNX) and `increment` statements. Tag
-invalidation propagates across workers/boxes via the pub/sub topic when instant
-cross-node invalidation is required.
+The durable cache driver (`crates/askr/src/cache_sql.rs`, feature `sql-backend`)
+implements the conformance-tested `CACHE_CONTRACT.md` verbatim and exposes the
+*same* `get`/`set`/`add`/`delete`/`increment`/`touch`/`flush`/`forget_tag` bridge
+as L1, so `askr_cache_*`, the Laravel cache store and `Cache::lock()` are
+unchanged — only the backend differs. Locks use the contract's atomic `add`
+(SETNX with expired-lock steal); counters use the atomic `increment` (a counter
+stored as INTEGER still reads back as bytes, so `Cache::get` after `increment`
+behaves as PHP expects); tag invalidation removes every key carrying the tag.
+
+**Enable it** with `ASKR_CACHE_DB=/path/to.db` (unset => L1 fallback), building
+with `--features sql-backend`. Each worker process opens its own WAL connection.
+
+Still open (follow-ups): write-through L1→L2 with lazy L1 population for a hot
+local tier, and instant cross-node tag invalidation signalled over the pub/sub
+topic.
 
 ## Broadcasting / pub-sub (elyra-13)
 

@@ -543,6 +543,13 @@ extern "C" fn c_forget_tag(tag: *const c_char, tlen: usize) {
 /// Register the cache callbacks with the PHP shim for this process. Registered
 /// when either the kv cache or the response cache is enabled.
 pub fn register_bridge() {
+    // L2 (durable, replicated) cache backend takes over when ASKR_CACHE_DB is set
+    // and this build includes the `sql-backend` feature (elyra-10).
+    #[cfg(feature = "sql-backend")]
+    if crate::cache_sql::enabled() {
+        crate::cache_sql::register_bridge();
+        return;
+    }
     if !enabled() && !crate::rcache::enabled() {
         return;
     }
