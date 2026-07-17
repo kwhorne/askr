@@ -4,6 +4,16 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (broadcast): L2 durable pub/sub backend over SQL Anywhere (`sql-backend`, elyra-13).**
+  An optional durable, replicated pub/sub backend implementing `PUBSUB_CONTRACT.md`:
+  publish = `INSERT` into the append-only `askr_events` topic, subscribe = tail
+  rows past a cursor. Exposes the same `publish`/`current_seq`/`read_from` surface
+  and `askr_broadcast()` bridge as the L1 ring, so the SSE fan-out and the
+  Pusher-compatible endpoint are unchanged — only the backend differs. A publish
+  on the primary reaches Echo clients on any node via the replication log, with
+  no Redis pub/sub. Selected with `ASKR_BROADCAST_DB=/path/to.db` (unset falls
+  back to the L1 ring); `broadcast::{publish,current_seq,read_from,register_bridge}`
+  dispatch L1/L2. New module `broadcast_sql.rs` (3 unit tests).
 - **Feature (cache): L2 durable cache backend over SQL Anywhere (`sql-backend`, elyra-10).**
   An optional durable, replicated cache backend implementing the conformance-tested
   `CACHE_CONTRACT.md`: TTL get/set, atomic `increment` counters, atomic `add`
