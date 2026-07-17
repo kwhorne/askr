@@ -18,6 +18,26 @@ pub fn l2_enabled() -> bool {
     }
 }
 
+/// Whether *a* queue backend (L1 or L2) is active — used to decide whether to
+/// read backlog and run the worker autoscaler.
+pub fn enabled() -> bool {
+    #[cfg(feature = "sql-backend")]
+    if crate::squeue_sql::enabled() {
+        return true;
+    }
+    crate::squeue::enabled()
+}
+
+/// Backlog stats `(ready, total, oldest_ms)` from the active backend, for
+/// metrics and backlog-driven worker autoscaling (elyra-8).
+pub fn stats() -> (usize, usize, u64) {
+    #[cfg(feature = "sql-backend")]
+    if crate::squeue_sql::enabled() {
+        return crate::squeue_sql::stats();
+    }
+    crate::squeue::stats()
+}
+
 /// Register the PHP queue bridge with the appropriate backend.
 pub fn register_bridge() {
     #[cfg(feature = "sql-backend")]

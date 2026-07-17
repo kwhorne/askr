@@ -864,8 +864,8 @@ pub fn status() -> Status {
         .map(|c| c.load(Ordering::SeqCst))
         .filter(|&p| p > 0)
         .collect();
-    let (queue_ready, queue_total, queue_oldest_ms) = if crate::squeue::enabled() {
-        crate::squeue::stats()
+    let (queue_ready, queue_total, queue_oldest_ms) = if crate::queue::enabled() {
+        crate::queue::stats()
     } else {
         (0, 0, 0)
     };
@@ -1186,11 +1186,11 @@ fn supervise(
         // with no extra daemon. Scale up fast (jump to target), drain gently (one
         // worker per tick) to avoid flapping after a burst clears.
         if queue_max > queue_min
-            && crate::squeue::enabled()
+            && crate::queue::enabled()
             && last_queue_check.elapsed() >= std::time::Duration::from_secs(2)
         {
             last_queue_check = std::time::Instant::now();
-            let (ready, _total, _oldest) = crate::squeue::stats();
+            let (ready, _total, _oldest) = crate::queue::stats();
             let desired = QUEUE_DESIRED.load(Ordering::SeqCst);
             let want = ready
                 .div_ceil(QUEUE_BACKLOG_PER_WORKER)

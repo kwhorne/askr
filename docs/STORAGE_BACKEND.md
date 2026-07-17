@@ -55,11 +55,15 @@ for long jobs, dead-letter move wired into the worker loop
 (`attempts >= max_attempts`), and the Laravel `QUEUE_CONNECTION=sqlanywhere`
 surface (elyra-12).
 
-## Autoscaling (elyra-8)
+## Autoscaling (elyra-8) — implemented
 
-The existing backlog-driven autoscaler (`--queue` … `--queue-max`) reads the
-backlog query from the contract instead of the shared-memory ring, and reports
-`askr_queue_workers/ready/total/oldest_seconds` for the L2 backend.
+The backlog-driven autoscaler (`--queue` … `--queue-max`) now reads its backlog
+via `queue::stats()`, which dispatches to the L2 contract's `FILTER` backlog
+query (`squeue_sql::stats()`) when `ASKR_QUEUE_DB` is set, or the shared-memory
+ring otherwise. So the same `balance=auto` worker scaling and the
+`askr_queue_ready/total/oldest_seconds` metrics work against the durable L2 queue
+with no code change at the call sites — the master process reads the backlog from
+the database and forks/drains the worker pool exactly as before.
 
 ## Cache (elyra-10) — implemented
 
