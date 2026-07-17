@@ -4,6 +4,17 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Perf (cache): write-through L1→L2 for the durable cache backend (`sql-backend`).**
+  When the L1 shared-memory cache is also enabled alongside the L2 SQL Anywhere
+  backend, L1 becomes a fast local read tier: reads hit L1 first and lazily
+  populate it (with the remaining TTL) on a miss, so hot reads avoid a database
+  round-trip entirely; writes go to L2 (the source of truth) and warm or
+  invalidate L1. L1 is shared memory, so all worker processes on a box stay
+  coherent; cross-box staleness is bounded by TTL. Durable + fast, no app change.
+- **Perf (queue/broadcast): `prepare_cached` on the hot polling loops (`sql-backend`).**
+  The queue claim (`UPDATE … RETURNING`, run on every worker poll) and the
+  broadcast SSE tail query (run every ~50 ms) now cache their compiled statement
+  on the per-process connection instead of recompiling each call.
 - **Feature (Laravel): broadcasting driver (`BROADCAST_CONNECTION=askr`, elyra-13 surface).**
   The `packages/laravel` integration gains an `AskrBroadcaster` so Laravel Echo
   works over Askr's in-binary pub/sub with no Redis and no separate WebSocket

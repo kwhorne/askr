@@ -79,9 +79,13 @@ behaves as PHP expects); tag invalidation removes every key carrying the tag.
 **Enable it** with `ASKR_CACHE_DB=/path/to.db` (unset => L1 fallback), building
 with `--features sql-backend`. Each worker process opens its own WAL connection.
 
-Still open (follow-ups): write-through L1→L2 with lazy L1 population for a hot
-local tier, and instant cross-node tag invalidation signalled over the pub/sub
-topic.
+**Write-through L1→L2 (implemented):** when the L1 shared-memory cache is *also*
+enabled (`--cache-slots N`), it becomes a fast local read tier in front of the
+durable L2. Reads hit L1 first and lazily populate it (with the remaining TTL)
+on a miss; writes go to L2 (the source of truth) and warm or invalidate L1.
+Because L1 is shared memory, every worker process on a box sees writes
+immediately — coherent within a box. Cross-box staleness is bounded by the entry
+TTL; instant cross-node tag invalidation over the pub/sub topic is a follow-up.
 
 ## Broadcasting / pub-sub (elyra-13) — implemented
 
@@ -98,9 +102,13 @@ the replication log — no Redis pub/sub.
 **Enable it** with `ASKR_BROADCAST_DB=/path/to.db` (unset => L1 ring), building
 with `--features sql-backend`.
 
-Still open (follow-ups): replace the 50 ms tail poll with an update-hook /
-replication-apply wakeup, and durable subscriber cursors (`askr_subscribers`) for
-resume-after-restart.
+The tail query is `prepare_cached` (compiled once per connection) and returns a
+cheap indexed 0-row scan when nothing is new, so the 50 ms poll is inexpensive.
+Note a true SQLite `update_hook` wakeup only fires for writes on the *same*
+connection, so it cannot wake the reader on a cross-process publish — polling the
+local copy (woken naturally by replication apply on a replica) is the correct
+transport. Durable subscriber cursors (`askr_subscribers`) for resume-after-restart
+remain a follow-up.
 
 ## Status
 
