@@ -141,6 +141,31 @@ fn do_size(conn: &Connection, queue: &[u8]) -> rusqlite::Result<i64> {
     )
 }
 
+/// Backlog across all queues: (ready, total, oldest_ms) — the same shape as
+/// `squeue::stats()`, feeding the backlog-driven worker autoscaler (elyra-8).
+fn do_stats(conn: &Connection) -> rusqlite::Result<(usize, usize, u64)> {
+    conn.query_row(
+        "SELECT
+           count(*) FILTER (WHERE available_at <= unixepoch()
+                AND (reserved_until IS NULL OR reserved_until <= unixepoch())) AS ready,
+           count(*) AS total,
+           coalesce(unixepoch() - min(available_at) FILTER (WHERE available_at <= unixepoch()
+                AND (reserved_until IS NULL OR reserved_until <= unixepoch())), 0) AS oldest_secs
+         FROM askr_jobs",
+        [],
+        |r| {
+            let ready: i64 = r.get(0)?;
+            let total: i64 = r.get(1)?;
+            let oldest_secs: i64 = r.get(2)?;
+            Ok((
+                ready as usize,
+                total as usize,
+                (oldest_secs.max(0) as u64) * 1000,
+            ))
+        },
+    )
+}
+
 // --- per-thread connection + public API used by the C bridge ------------------
 
 fn open() -> Connection {
@@ -181,6 +206,11 @@ pub fn release(id: u64, delay: u64) -> bool {
 
 pub fn size(queue: &[u8]) -> u64 {
     with_conn(|c| do_size(c, queue)).unwrap_or(0) as u64
+}
+
+/// Backlog across all queues for the worker autoscaler: (ready, total, oldest_ms).
+pub fn stats() -> (usize, usize, u64) {
+    with_conn(do_stats).unwrap_or((0, 0, 0))
 }
 
 // --- PHP bridge (identical shape to squeue.rs) --------------------------------
@@ -316,6 +346,22 @@ mod tests {
         let second = do_pop(&c, b"q", 30).unwrap().unwrap();
         assert_eq!(second.id, first.id);
         assert_eq!(second.attempts, 2, "redelivery consumes another attempt");
+    }
+
+    #[test]
+    fn stats_reports_ready_total_oldest() {
+        let c = db();
+        do_push(&c, b"q", b"a", 0).unwrap();
+        do_push(&c, b"q", b"b", 0).unwrap();
+        do_push(&c, b"q", b"later", 3600).unwrap(); // delayed -> not ready
+        let (ready, total, _oldest_ms) = do_stats(&c).unwrap();
+        assert_eq!(total, 3, "all jobs counted");
+        assert_eq!(ready, 2, "delayed job is not ready");
+        // Reserve one; it should drop out of the ready count.
+        do_pop(&c, b"q", 30).unwrap().unwrap();
+        let (ready2, total2, _) = do_stats(&c).unwrap();
+        assert_eq!(total2, 3);
+        assert_eq!(ready2, 1, "reserved job is not ready");
     }
 
     #[test]

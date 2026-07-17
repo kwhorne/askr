@@ -4,6 +4,14 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (queue): backlog-driven worker autoscaling on the L2 queue (`sql-backend`, elyra-8).**
+  The queue-worker autoscaler (`--queue` … `--queue-max`) and the
+  `askr_queue_ready/total/oldest_seconds` metrics now read their backlog via a
+  backend dispatch (`queue::stats()`): the L2 contract's `FILTER` backlog query
+  when `ASKR_QUEUE_DB` is set, or the shared-memory ring otherwise. `balance=auto`
+  worker scaling works against the durable L2 queue with no call-site changes
+  — the master reads the backlog from the database and forks/drains as before.
+  New `squeue_sql::stats()` (unit-tested).
 - **Feature (broadcast): L2 durable pub/sub backend over SQL Anywhere (`sql-backend`, elyra-13).**
   An optional durable, replicated pub/sub backend implementing `PUBSUB_CONTRACT.md`:
   publish = `INSERT` into the append-only `askr_events` topic, subscribe = tail
