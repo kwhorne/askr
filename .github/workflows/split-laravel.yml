@@ -1,0 +1,50 @@
+name: Split askr-laravel
+
+# Mirror packages/laravel/ to the standalone kwhorne/askr-laravel repo that
+# Packagist watches. Runs on every push to main that touches the package, and on
+# version tags (which also create a matching release on the split repo).
+#
+# One-time setup: add a repo secret ASKR_LARAVEL_SPLIT_TOKEN — a fine-grained PAT
+# with Contents: read/write on kwhorne/askr-laravel.
+
+on:
+  push:
+    branches: [main]
+    paths: ['packages/laravel/**', '.github/workflows/split-laravel.yml']
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Subtree split + push to standalone main
+        env:
+          TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          git subtree split --prefix=packages/laravel -b split
+          git push --force \
+            "https://x-access-token:${TOKEN}@github.com/kwhorne/askr-laravel.git" \
+            split:main
+          echo "SPLIT_SHA=$(git rev-parse split)" >> "$GITHUB_ENV"
+
+      - name: Tag + release the split repo (on version tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" \
+            --repo kwhorne/askr-laravel \
+            --target "$SPLIT_SHA" \
+            --title "askr-laravel ${TAG#v}" \
+            --notes "Laravel drivers for Askr ${TAG#v}. See the main CHANGELOG: https://github.com/kwhorne/askr/blob/main/CHANGELOG.md" \
+            || echo "release $TAG already exists — skipping"
