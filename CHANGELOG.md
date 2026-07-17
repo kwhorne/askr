@@ -2,6 +2,20 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Feature (cache): L2 durable cache backend over SQL Anywhere (`sql-backend`, elyra-10).**
+  An optional durable, replicated cache backend implementing the conformance-tested
+  `CACHE_CONTRACT.md`: TTL get/set, atomic `increment` counters, atomic `add`
+  (SETNX / `Cache::lock()` with expired-lock steal), `touch`, tag invalidation and
+  flush. Exposes the exact same `get`/`set`/`add`/`delete`/`increment`/`touch`/
+  `flush`/`forget_tag` bridge as the L1 shared-memory cache, so `askr_cache_*`,
+  the Laravel cache store and `Cache::lock()` are unchanged — only the backend
+  differs. A counter stored as INTEGER reads back as bytes, so `Cache::get` after
+  `increment` behaves as PHP expects. Selected with `ASKR_CACHE_DB=/path/to.db`
+  (unset falls back to L1); `cache::register_bridge` dispatches L1/L2. New module
+  `cache_sql.rs` (4 unit tests). Built only with `--features sql-backend`.
+
 ## 0.9.2 — 2026-07-16
 
 Optional durable L2 queue backend. The default build, its behaviour, and CI are
