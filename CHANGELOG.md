@@ -2,7 +2,11 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.7 — 2026-07-18
+
+HTTP/3 is now *real and measured*: responses stream over QUIC, the traces show it
+per request, and there's an honest under-loss benchmark. Plus the 1.0 compatibility
+contract — this is the last feature release before a 1.0 that is a pure freeze.
 
 - **Feature (transport): HTTP/3 responses now stream (`--features http3`).** The
   h3 path streams the response body frame by frame instead of buffering it — so a
