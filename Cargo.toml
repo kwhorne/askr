@@ -4,6 +4,9 @@ members = [
     "crates/askr-php",
     "crates/askr",
 ]
+# scripts/h3bench is a standalone benchmark tool (own deps, own workspace); it is
+# not part of the build or CI.
+exclude = ["scripts/h3bench"]
 
 [workspace.package]
 version = "0.9.6"

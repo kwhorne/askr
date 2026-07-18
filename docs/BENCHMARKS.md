@@ -162,6 +162,58 @@ The takeaways:
 
 No panics, no segfaults, no flood. A leaking app degrades *gracefully*.
 
+## HTTP/3 vs HTTP/2 under packet loss
+
+HTTP/3's whole reason to exist is *transport* head-of-line blocking: HTTP/2
+multiplexes many streams over one TCP connection, so a single lost segment stalls
+**every** stream until TCP retransmits. QUIC recovers per-stream, so one lost
+packet only stalls the one stream that needed it. To see whether that's real (and
+not marketing), we measured it.
+
+**Method.** One Ubuntu 24.04 container, `askr 0.9.6-full --http3 --workers 4`
+serving a ~1 KB dynamic PHP response over TLS on loopback. A small native Rust load
+client (`scripts/h3bench`, built on Askr's own quinn/h3 + hyper stack) opens **one**
+connection (TCP+TLS for h2, QUIC for h3) and drives **50 multiplexed streams**, each
+issuing 100 sequential GETs = 5 000 requests/run. Every response is validated
+(status 200 + non-empty body); **every run below completed with `err=0`**. Network
+impairment is applied identically to both protocols with `tc netem` on `lo`. Numbers
+are representative of two runs (loss is random, so the loss rows vary a little).
+
+| Impairment | h2 rps | h2 p95 | h3 rps | h3 p95 | h3 advantage |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline (none) | ~25 000 | ~1.5 ms | ~78 000 | ~1.2 ms | ~3× |
+| delay 30 ms | ~375 | ~146 ms | ~710 | ~91 ms | ~1.9× |
+| **loss 1 %** | ~1 700 | **~209 ms** | ~69 000 | **~1.3 ms** | **~40×** |
+| **loss 3 %** | ~785 | **~222 ms** | ~57 000 | **~1.2 ms** | **~70×** |
+| loss 2 % + delay 30 ms | ~345 | ~250 ms | ~390 | ~260 ms | ~1.1× |
+| loss 5 % + delay 20 ms | ~335 | ~388 ms | ~350 | ~315 ms | ~1.05× |
+
+The takeaways, honestly:
+
+- **On a low-RTT link with loss, HTTP/3 is dramatically faster — 40–70×.** Look at
+  the h2 p95: it pins to **~210 ms** across every loss row. That's the fingerprint of
+  Linux's **200 ms minimum TCP retransmit timeout (RTOmin)**: on a fast link, a
+  single lost packet stalls the whole multiplexed connection for a fixed ~200 ms,
+  and *all 50 streams* wait behind it. QUIC has no such floor and recovers
+  per-stream, so its p95 stays ~1 ms — barely distinguishable from baseline.
+- **When RTT dominates, the gap narrows.** Add 20–30 ms of base delay and both
+  protocols are governed by round-trips, not the RTO floor; h3's edge shrinks to
+  ~1.1–2× (and the loss rows with delay roughly tie). The 40–70× headline is
+  specific to **low-latency, lossy** paths — a congested LAN, flaky Wi-Fi, an
+  overloaded datacenter fabric — not a high-RTT WAN.
+- **Even with no loss, h3 was faster here (~2–3×)** on this loopback test — but that
+  part is the least trustworthy number (userspace QUIC vs kernel TCP on `lo` is not
+  representative of a real NIC), so don't over-read it.
+
+The point isn't a single trophy multiplier; it's the *shape*: **HTTP/2 collapses
+under loss on a fast link, HTTP/3 shrugs it off.** For mobile users, spotty Wi-Fi,
+and lossy last miles, `--http3` is a real latency win — and it's the same PHP app,
+unchanged (see `--http3` in [CLI.md](CLI.md)).
+
+Reproduce: `scripts/h3bench/run-in-docker.sh` (runs the whole sweep in one
+container). Caveats: loopback + `netem` (not a real NIC), synthetic ~1 KB payload,
+arm64, single 4-worker server — treat these as *shapes*, not lab absolutes.
+
 ## Honest caveats
 
 1. **Shared dev VM.** Run-to-run variance was real (one Askr-CoW sample came in

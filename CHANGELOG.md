@@ -24,6 +24,13 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
   `Askr-Cache`/`X-Askr-Cache`, `Alt-Svc`), and the build features — what is
   explicitly *not* stable (internal crates, shared-memory layout, log prose), and
   the add→alias+warn→remove deprecation policy.
+- **Docs (benchmarks): honest HTTP/3-vs-HTTP/2-under-loss numbers.** Added a
+  `tc netem` sweep ([BENCHMARKS.md](docs/BENCHMARKS.md)) driven by a small native
+  Rust load client (`scripts/h3bench`, one connection × 50 multiplexed streams, every
+  response validated, `err=0`): on a low-RTT lossy link HTTP/3 is **~40–70× faster**
+  than HTTP/2 (TCP's 200 ms RTO floor stalls the whole multiplexed connection while
+  QUIC recovers per-stream), narrowing to ~1–2× when base RTT dominates. Reproducible
+  via `scripts/h3bench/run-in-docker.sh`.
 - **CLI: `--acme-directory` renamed to `--acme-directory-url`** (so it's no longer a
   one-letter typo away from `--acme-dir`, the local cert-cache directory). The old
   spelling still works as a hidden alias — the first application of the deprecation
