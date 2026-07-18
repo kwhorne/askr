@@ -19,6 +19,8 @@ mod doctor;
 mod metrics;
 #[cfg(feature = "observ")]
 mod observ_sql;
+#[cfg(feature = "otel")]
+mod otel;
 mod php;
 mod pusher;
 mod queue;

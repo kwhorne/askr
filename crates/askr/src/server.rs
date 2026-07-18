@@ -129,6 +129,8 @@ struct Runtime {
     shadow: Option<crate::shadow::Shadow>,
     #[cfg(feature = "observ")]
     observ: Option<crate::observ_sql::TelemetrySink>,
+    #[cfg(feature = "otel")]
+    otel: Option<crate::otel::Otel>,
 }
 
 impl Runtime {
@@ -290,6 +292,8 @@ pub async fn run(
         shadow,
         #[cfg(feature = "observ")]
         observ: crate::observ_sql::TelemetrySink::from_env(),
+        #[cfg(feature = "otel")]
+        otel: crate::otel::Otel::from_env(),
     });
 
     // Tail the shared broadcast ring and fan events out to local SSE subscribers
@@ -421,6 +425,8 @@ async fn handle(
     peer: SocketAddr,
 ) -> Result<Response<ResBody>, Infallible> {
     let t_start = Instant::now();
+    #[cfg(feature = "otel")]
+    let t_start_wall = std::time::SystemTime::now();
     let config = &rt.config;
     let port = config.listen.port();
     let accept_encoding = req
@@ -699,6 +705,22 @@ async fn handle(
         if let (Some(dir), Some(req)) = (&config.record_dir, &record_copy) {
             crate::record::record_failure(dir, req, response.status().as_u16());
         }
+    }
+
+    // OpenTelemetry: export this PHP request as root http.request + child
+    // php.execute, with exact wall-clock windows (feature `otel`).
+    #[cfg(feature = "otel")]
+    if let Some(o) = &rt.otel {
+        o.record(crate::otel::RequestSpan {
+            method: parts.method.to_string(),
+            path: parts.uri.path().to_string(),
+            status: response.status().as_u16(),
+            start_wall: t_start_wall,
+            total: t_start.elapsed(),
+            php_offset: php_start.saturating_duration_since(t_start),
+            php: std::time::Duration::from_micros(php_us),
+            cache: if rcache::enabled() { "MISS" } else { "" },
+        });
     }
 
     finish(&rt, &response, t_start, php_us);

@@ -2,7 +2,18 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## 0.9.5 — 2026-07-18
+## Unreleased
+
+- **Feature (observability): OpenTelemetry trace export (`--features otel`,
+  `ASKR_OTEL_ENDPOINT`).** Askr owns the whole request boundary, so it exports a
+  trace that splits the time PHP-FPM/Octane can't see: a root `http.request` span
+  (with `http.request.method`, `url.path`, `http.response.status_code`,
+  `askr.cache`) and a child **`php.execute`** span timed to the exact PHP window —
+  making "PHP is ~99.5 % of the request" visible per request. Exported over
+  OTLP/gRPC on a background batch processor (never touches request latency);
+  point it at Jaeger/Tempo/the OTel Collector. Off by default and behind the
+  feature (so the default build/CI are unchanged); included in the `-full`
+  image/tarball. New module `otel.rs`; verified end-to-end against Jaeger.
 
 Makes the optional tiers consumable without building from source.
 

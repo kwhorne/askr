@@ -54,11 +54,20 @@ rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 # unaffected; enable with `--features observ`.
 mysql_async = { version = "0.37", default-features = false, features = ["minimal"], optional = true }
 
+# Optional OpenTelemetry trace export (docs/OBSERVABILITY.md). Exports a span per
+# request — root `http.request` + child `php.execute` — over OTLP/gRPC. Off by
+# default; enable with `--features otel`.
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
+
 [features]
 # Durable, replicated L2 storage backends over SQL Anywhere (queue first).
 sql-backend = ["dep:rusqlite"]
 # Observability telemetry sink to ElyraSQL.
 observ = ["dep:mysql_async"]
+# OpenTelemetry trace export over OTLP.
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 
 # Linux-only hardening (seccomp syscall filter + Landlock filesystem sandbox).
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -174,6 +174,7 @@ listen = "127.0.0.1:9000"
 | `RUST_LOG` | Log filter, e.g. `askr=debug`. Default `askr=info`. |
 | `ASKR_CACHE_DB` / `ASKR_QUEUE_DB` / `ASKR_BROADCAST_DB` | Durable L2 backend paths (`--features sql-backend`; unset = L1 shared memory). See [Storage backends](STORAGE_BACKEND.md). |
 | `ASKR_OBSERV_DSN` (+ `ASKR_OBSERV_SERVICE`/`HOST`/`BATCH`/`FLUSH_MS`/`QUEUE`) | Ship per-request logs to a MySQL-wire database (`--features observ`). See [Observability](OBSERVABILITY.md). |
+| `ASKR_OTEL_ENDPOINT` (+ `ASKR_OTEL_SERVICE`) | Export OpenTelemetry traces (root `http.request` + child `php.execute`) over OTLP/gRPC (`--features otel`). See [Observability](OBSERVABILITY.md#traces-opentelemetry). |
 
 ### opcache
 

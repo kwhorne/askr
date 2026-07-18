@@ -17,8 +17,9 @@ central telemetry database. It is **opt-in twice over** — compiled only with
 `--features observ`, and inert at runtime unless `ASKR_OBSERV_DSN` is set — so the
 default build, its behaviour, and CI are unaffected.
 
-> **Status:** request logs ship today. A metrics-rollup table and trace/span
-> export are on the [roadmap](#roadmap) below.
+> **Status:** request **logs** (below) and OpenTelemetry **traces**
+> ([Traces](#traces-opentelemetry)) ship today. A metrics-rollup table is on the
+> [roadmap](#roadmap).
 
 ---
 
@@ -161,6 +162,44 @@ WHERE MATCH(message) AGAINST('orders')
 
 ---
 
+## Traces (OpenTelemetry)
+
+Askr owns the whole request boundary, so it can export a trace that splits the
+time PHP-FPM and Octane are blind to. Build with `--features otel` (it's in the
+[`-full`](DOCKER.md#-full-variant) image/tarball) and point it at an OTLP/gRPC
+collector — Jaeger, Tempo, Grafana Agent, the OTel Collector:
+
+```dotenv
+ASKR_OTEL_ENDPOINT=http://127.0.0.1:4317   # enables trace export (OTLP/gRPC)
+ASKR_OTEL_SERVICE=askr                      # service.name (default "askr")
+```
+
+Each PHP request becomes **two spans**:
+
+```
+http.request   ── GET /orders/42 · status=200 · cache=MISS · 19.1 ms
+└─ php.execute ── 19.0 ms                          ← the PHP-vs-everything split
+```
+
+The root `http.request` span carries `http.request.method`, `url.path`,
+`http.response.status_code` and `askr.cache` (`HIT`/`MISS`/`STALE`); the child
+`php.execute` span is the exact PHP execution window. That nesting makes the
+"PHP is ~99.5 % of the request" reality visible per request — something a FastCGI
+split can't show, because it never sees the PHP boundary.
+
+Try it in 30 seconds:
+
+```bash
+docker run -d --name jaeger -e COLLECTOR_OTLP_ENABLED=true \
+  -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one
+ASKR_OTEL_ENDPOINT=http://127.0.0.1:4317 askr serve --root public …
+# then open http://localhost:16686 and pick service "askr"
+```
+
+> Spans are exported on a background batch processor, so they never touch request
+> latency. v1 traces PHP requests; cache-HIT / static fast paths (sub-ms) show on
+> `/metrics` instead.
+
 ## Retention
 
 Keep the table bounded out of band — a scheduled job is enough. If you partition
@@ -178,14 +217,16 @@ schedule (`INSERT … SELECT … GROUP BY service, <minute bucket>`).
 
 ## Roadmap
 
-Shipped now: **request logs**. Planned:
+Shipped now: **request logs** and **OpenTelemetry traces** (root + `php.execute`).
+Planned:
 
 - **Metrics table** — a periodic snapshot of `metrics::Metrics` (requests, errors,
   bytes, p50/p95/p99, inflight) as one row per interval, so rate/latency panels
   don't have to scan raw `logs`.
-- **Trace/span export** — OpenTelemetry-style spans (`php_cpu` vs `cache` vs
-  `compress` vs `coalesce`), which Askr can split because it owns the boundary.
-- **Richer `attrs`** — request id, authenticated user, trace id.
+- **Finer spans** — child spans for `cache`, `compress` and `coalesce` alongside
+  `php.execute`, plus trace/request ids threaded into `attrs`.
+- **Trace the fast paths** — cache-HIT / static responses (v1 traces PHP requests
+  only).
 
 ---
 
