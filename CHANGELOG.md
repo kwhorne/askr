@@ -2,7 +2,12 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.6 — 2026-07-18
+
+HTTP/3, differentiated OpenTelemetry traces (with a `response.build` child span),
+and a metrics rollup — the last big transport gap plus a complete observability
+story. All opt-in (feature-gated) and compiled into the `-full` build; the default
+build, its behaviour, and CI are unchanged.
 
 - **Feature (transport): HTTP/3 (QUIC) (`--http3`, `--features http3`).** Serve
   HTTP/3 over QUIC on the TLS port alongside HTTP/1.1+HTTP/2, sharing the same
@@ -28,6 +33,18 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
   Collector. Root span also carries `http.response.body.size`. Off by default and
   behind the feature (so the default build/CI are unchanged); included in the
   `-full` image/tarball. New module `otel.rs`; verified end-to-end against Jaeger.
+- **Feature (observability): metrics rollup table.** The observability sink now
+  also writes a periodic rollup (one row per `ASKR_OBSERV_METRICS_MS`, default
+  10 s) into a `metrics` table — per-window request/error/bytes deltas plus
+  windowed p50/p95/p99 latency and inflight — so dashboards needn't scan raw
+  `logs`. The shared metrics are global across a box, so **exactly one process**
+  writes the rollup, elected via a shared-memory PID (re-elected if it dies) to
+  avoid double-counting. Added `ASKR_OBSERV_TLS` (and `?tls=1`) for
+  `caching_sha2_password` servers (MySQL 8+/MariaDB 11+); the sink targets
+  ElyraSQL and other `mysql_native_password` MySQL-wire databases. Behind
+  `--features observ`; default build/CI unchanged.
+
+## 0.9.5 — 2026-07-18
 
 Makes the optional tiers consumable without building from source.
 
@@ -56,18 +73,8 @@ Makes the optional tiers consumable without building from source.
   `ASKR_OBSERV_{SERVICE,HOST,BATCH,FLUSH_MS,QUEUE}`. Off by default and behind
   `--features observ` (new optional `mysql_async` dependency), so the standard
   build, its behaviour, and CI are unchanged. New module `observ_sql.rs`;
-  `docs/OBSERVABILITY.md`. (Metrics-rollup table + trace/span export are on the
-  roadmap.)
-- **Feature (observability): metrics rollup table.** The observability sink now
-  also writes a periodic rollup (one row per `ASKR_OBSERV_METRICS_MS`, default
-  10 s) into a `metrics` table — per-window request/error/bytes deltas plus
-  windowed p50/p95/p99 latency and inflight — so dashboards needn't scan raw
-  `logs`. The shared metrics are global across a box, so **exactly one process**
-  writes the rollup, elected via a shared-memory PID (re-elected if it dies) to
-  avoid double-counting. Added `ASKR_OBSERV_TLS` (and `?tls=1`) for
-  `caching_sha2_password` servers (MySQL 8+/MariaDB 11+); the sink targets
-  ElyraSQL and other `mysql_native_password` MySQL-wire databases. Behind
-  `--features observ`; default build/CI unchanged.
+  `docs/OBSERVABILITY.md`. (Metrics-rollup table + trace/span export shipped in
+  0.9.6.)
 - **Docs: a thorough Laravel setup guide (`docs/LARAVEL.md`)** — the recommended
   end-to-end path for `composer require kwhorne/askr-laravel`: `.env`, store/
   connection config, runner scripts, dev + production run commands, region sizing,
