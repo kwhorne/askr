@@ -124,17 +124,32 @@ where
         .await
         .map_err(|e| anyhow::anyhow!("handle: {e:?}"))?;
 
-    let (parts, resp_body) = resp.into_parts();
+    let (parts, mut resp_body) = resp.into_parts();
     stream
         .send_response(hyper::Response::from_parts(parts, ()))
         .await?;
-    let bytes = resp_body
-        .collect()
-        .await
-        .map(|c| c.to_bytes())
-        .unwrap_or_default();
-    if !bytes.is_empty() {
-        stream.send_data(bytes).await?;
+
+    // Stream the body frame by frame instead of buffering it: each chunk PHP (or
+    // the static-file streamer, or an SSE broadcast) produces is flushed to the
+    // client as it arrives. This is what makes streaming responses — a
+    // never-ending `/askr/events` SSE stream, a large file, a chunked JSON API —
+    // work over HTTP/3 without buffering the whole thing in memory (and without
+    // hanging forever waiting for an SSE stream to "end").
+    while let Some(frame) = resp_body.frame().await {
+        let frame = frame?;
+        match frame.into_data() {
+            Ok(data) => {
+                if !data.is_empty() {
+                    stream.send_data(data).await?;
+                }
+            }
+            Err(frame) => {
+                // A trailers frame (rare for PHP apps); forward it if present.
+                if let Ok(trailers) = frame.into_trailers() {
+                    stream.send_trailers(trailers).await?;
+                }
+            }
+        }
     }
     stream.finish().await?;
     Ok(())

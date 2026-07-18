@@ -529,10 +529,23 @@ where
         if let Some(c) = rcache::get(key) {
             // Stale-while-revalidate: serve the stale body now, and trigger one
             // background refresh (coalesced) so PHP runs off the request path.
+            #[cfg(feature = "otel")]
+            let cache_state = if c.stale { "STALE" } else { "HIT" };
             if c.stale {
                 spawn_swr_refresh(&rt, key, &req, peer);
             }
             let response = cached_response(c);
+            #[cfg(feature = "otel")]
+            otel_fast(
+                &rt,
+                req.method(),
+                req.uri(),
+                req.version(),
+                t_start_wall,
+                t_start,
+                &response,
+                cache_state,
+            );
             finish(&rt, &response, t_start, 0);
             return Ok(response);
         }
@@ -561,6 +574,17 @@ where
                 if let Some(c) = served {
                     rcache::note_coalesced();
                     let response = cached_response(c);
+                    #[cfg(feature = "otel")]
+                    otel_fast(
+                        &rt,
+                        req.method(),
+                        req.uri(),
+                        req.version(),
+                        t_start_wall,
+                        t_start,
+                        &response,
+                        "HIT",
+                    );
                     finish(&rt, &response, t_start, 0);
                     return Ok(response);
                 }
@@ -572,6 +596,8 @@ where
     let script = config.docroot.join(&config.front_controller);
     let script_name = format!("/{}", config.front_controller.display());
 
+    #[cfg(feature = "otel")]
+    let read_t0 = Instant::now();
     let (parts, body) = req.into_parts();
     let max = config.max_body_size;
 
@@ -670,6 +696,13 @@ where
         );
         (request, crate::upload::TempFiles::default())
     };
+
+    #[cfg(feature = "otel")]
+    otel_phases.push(crate::otel::Phase {
+        name: "request.read",
+        offset: read_t0.saturating_duration_since(t_start),
+        dur: read_t0.elapsed(),
+    });
 
     // Keep a copy of the request iff we may need to record it on a 5xx (#5).
     let record_copy = config.record_dir.as_ref().map(|_| request.clone());
@@ -770,12 +803,56 @@ where
             total: t_start.elapsed(),
             cache: if rcache::enabled() { "MISS" } else { "" },
             bytes: response.body().size_hint().exact().unwrap_or(0),
+            proto: proto_str(parts.version),
+            query: parts.uri.query().unwrap_or("").to_string(),
             phases: std::mem::take(&mut otel_phases),
         });
     }
 
     finish(&rt, &response, t_start, php_us);
     Ok(response)
+}
+
+/// Map a hyper protocol version to an OTel `network.protocol.version` value.
+#[cfg(feature = "otel")]
+fn proto_str(v: hyper::Version) -> &'static str {
+    match v {
+        hyper::Version::HTTP_3 => "3",
+        hyper::Version::HTTP_2 => "2",
+        hyper::Version::HTTP_10 => "1.0",
+        _ => "1.1",
+    }
+}
+
+/// Emit a phase-less root span for a fast return path (cache HIT/STALE, a
+/// coalesced follower) so cached requests are visible in the trace view too —
+/// not just the misses that reach PHP.
+#[cfg(feature = "otel")]
+#[allow(clippy::too_many_arguments)]
+fn otel_fast(
+    rt: &Runtime,
+    method: &Method,
+    uri: &hyper::Uri,
+    version: hyper::Version,
+    start_wall: std::time::SystemTime,
+    t_start: Instant,
+    resp: &Response<ResBody>,
+    cache: &'static str,
+) {
+    if let Some(o) = &rt.otel {
+        o.record(crate::otel::RequestSpan {
+            method: method.to_string(),
+            path: uri.path().to_string(),
+            status: resp.status().as_u16(),
+            start_wall,
+            total: t_start.elapsed(),
+            cache,
+            bytes: resp.body().size_hint().exact().unwrap_or(0),
+            proto: proto_str(version),
+            query: uri.query().unwrap_or("").to_string(),
+            phases: Vec::new(),
+        });
+    }
 }
 
 /// Record metrics and advance the recycle counter for a finished request.

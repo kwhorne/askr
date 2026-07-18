@@ -2,6 +2,23 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Feature (transport): HTTP/3 responses now stream (`--features http3`).** The
+  h3 path streams the response body frame by frame instead of buffering it — so a
+  never-ending `/askr/events` SSE stream, a large static file (served in 64 KB
+  chunks), or a chunked JSON API all work over HTTP/3 without buffering the whole
+  body in memory (and without hanging forever waiting for an SSE stream to "end").
+  Verified end-to-end: a 5 MB file arrives byte-exact over multiple QUIC frames,
+  and a live SSE broadcast is delivered incrementally over h3.
+- **Observability: finer trace spans + fast-path traces (`--features otel`).** Each
+  request trace now also carries a **`request.read`** child span (body read/parse)
+  alongside `php.execute` and `response.build`, and the root span records
+  **`network.protocol.version`** (so you can see h1 vs h2 vs **h3** per request) and
+  `url.query`. Cached requests are now traced too: a cache **HIT**/**STALE** and a
+  coalesced follower each emit a (phase-less) root span, so the fast paths are
+  visible in the trace view — not just the misses that reach PHP.
+
 ## 0.9.6 — 2026-07-18
 
 HTTP/3, differentiated OpenTelemetry traces (with a `response.build` child span),

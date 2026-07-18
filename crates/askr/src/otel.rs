@@ -42,7 +42,11 @@ pub struct RequestSpan {
     pub cache: &'static str,
     /// Bytes written to the client.
     pub bytes: u64,
-    /// Child spans (php.execute, cache.lookup, response.build, …), in any order.
+    /// Negotiated protocol: "1.1" | "2" | "3".
+    pub proto: &'static str,
+    /// URL query string (without the leading `?`); empty if none.
+    pub query: String,
+    /// Child spans (php.execute, request.read, response.build, …), in any order.
     pub phases: Vec<Phase>,
 }
 
@@ -86,18 +90,23 @@ impl Otel {
     /// the reconstructed wall-clock windows.
     pub fn record(&self, r: RequestSpan) {
         let end = r.start_wall + r.total;
+        let mut attrs = vec![
+            KeyValue::new("http.request.method", r.method),
+            KeyValue::new("url.path", r.path),
+            KeyValue::new("http.response.status_code", r.status as i64),
+            KeyValue::new("http.response.body.size", r.bytes as i64),
+            KeyValue::new("network.protocol.version", r.proto),
+            KeyValue::new("askr.cache", r.cache),
+        ];
+        if !r.query.is_empty() {
+            attrs.push(KeyValue::new("url.query", r.query));
+        }
         let root = self
             .tracer
             .span_builder("http.request")
             .with_kind(SpanKind::Server)
             .with_start_time(r.start_wall)
-            .with_attributes([
-                KeyValue::new("http.request.method", r.method),
-                KeyValue::new("url.path", r.path),
-                KeyValue::new("http.response.status_code", r.status as i64),
-                KeyValue::new("http.response.body.size", r.bytes as i64),
-                KeyValue::new("askr.cache", r.cache),
-            ])
+            .with_attributes(attrs)
             .start(&self.tracer);
 
         let cx = Context::current_with_span(root);
