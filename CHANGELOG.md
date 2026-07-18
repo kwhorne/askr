@@ -46,6 +46,16 @@ Makes the optional tiers consumable without building from source.
   build, its behaviour, and CI are unchanged. New module `observ_sql.rs`;
   `docs/OBSERVABILITY.md`. (Metrics-rollup table + trace/span export are on the
   roadmap.)
+- **Feature (observability): metrics rollup table.** The observability sink now
+  also writes a periodic rollup (one row per `ASKR_OBSERV_METRICS_MS`, default
+  10 s) into a `metrics` table — per-window request/error/bytes deltas plus
+  windowed p50/p95/p99 latency and inflight — so dashboards needn't scan raw
+  `logs`. The shared metrics are global across a box, so **exactly one process**
+  writes the rollup, elected via a shared-memory PID (re-elected if it dies) to
+  avoid double-counting. Added `ASKR_OBSERV_TLS` (and `?tls=1`) for
+  `caching_sha2_password` servers (MySQL 8+/MariaDB 11+); the sink targets
+  ElyraSQL and other `mysql_native_password` MySQL-wire databases. Behind
+  `--features observ`; default build/CI unchanged.
 - **Docs: a thorough Laravel setup guide (`docs/LARAVEL.md`)** — the recommended
   end-to-end path for `composer require kwhorne/askr-laravel`: `.env`, store/
   connection config, runner scripts, dev + production run commands, region sizing,

@@ -52,7 +52,7 @@ rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 # Optional observability sink: ship logs/metrics to ElyraSQL over the MySQL wire
 # protocol (docs/OBSERVABILITY.md). Off by default so the standard build/CI are
 # unaffected; enable with `--features observ`.
-mysql_async = { version = "0.37", default-features = false, features = ["minimal"], optional = true }
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"], optional = true }
 
 # Optional OpenTelemetry trace export (docs/OBSERVABILITY.md). Exports a span per
 # request — root `http.request` + child `php.execute` — over OTLP/gRPC. Off by

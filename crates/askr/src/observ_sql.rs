@@ -78,6 +78,22 @@ impl TelemetrySink {
             flush: Duration::from_millis(env_usize("ASKR_OBSERV_FLUSH_MS", 1000) as u64),
             queue: env_usize("ASKR_OBSERV_QUEUE", 65536).max(64),
         };
+        // Metrics rollup: exactly one process snapshots the *shared* metrics into
+        // the `metrics` table (all workers write the same global counters, so
+        // duplicate writers would double-count). Elect a leader via a shared PID.
+        if claim_metrics_leader() {
+            let interval =
+                Duration::from_millis(env_usize("ASKR_OBSERV_METRICS_MS", 10_000).max(1000) as u64);
+            let mcfg = MetricsCfg {
+                dsn: cfg.dsn.clone(),
+                service: cfg.service.clone(),
+                host: cfg.host.clone(),
+                interval,
+            };
+            tokio::spawn(run_metrics_sink(mcfg));
+            tracing::info!("observability: metrics rollup writer elected");
+        }
+
         let (tx, rx) = mpsc::channel(cfg.queue);
         tokio::spawn(run_sink(cfg, rx));
         tracing::info!("observability: telemetry sink → ElyraSQL enabled");
@@ -153,8 +169,30 @@ async fn flush(cfg: &Cfg, conn: &mut Option<mysql_async::Conn>, buf: &mut Vec<Lo
     buf.clear();
 }
 
+/// Parse the DSN into connection options. When `ASKR_OBSERV_TLS` is set (or the
+/// DSN has `?tls=1`), enable TLS — required by MySQL 8 / MariaDB 11 defaults
+/// (`caching_sha2_password`), which can't complete auth over a plain socket.
+/// Invalid/self-signed certs are accepted (telemetry, not a trust boundary).
+fn dsn_opts(dsn: &str) -> Result<mysql_async::Opts, mysql_async::Error> {
+    let tls = std::env::var("ASKR_OBSERV_TLS")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+        || dsn.contains("tls=1");
+    let clean = dsn.split("?tls=1").next().unwrap_or(dsn);
+    let opts = mysql_async::Opts::from_url(clean)?;
+    if !tls {
+        return Ok(opts);
+    }
+    let ssl = mysql_async::SslOpts::default()
+        .with_danger_accept_invalid_certs(true)
+        .with_danger_skip_domain_validation(true);
+    Ok(mysql_async::OptsBuilder::from_opts(opts)
+        .ssl_opts(ssl)
+        .into())
+}
+
 async fn connect(cfg: &Cfg) -> Result<mysql_async::Conn, mysql_async::Error> {
-    let opts = mysql_async::Opts::from_url(&cfg.dsn)?;
+    let opts = dsn_opts(&cfg.dsn)?;
     let mut conn = mysql_async::Conn::new(opts).await?;
     // Idempotent schema setup (day-partition + retention handled out of band).
     conn.query_drop(
@@ -230,4 +268,169 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     (y + i64::from(m <= 2), m, d)
+}
+
+// --- metrics rollup (elected single writer) -------------------------------
+
+struct MetricsCfg {
+    dsn: String,
+    service: String,
+    host: String,
+    interval: Duration,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Snap {
+    requests: u64,
+    errors: u64,
+    bytes: u64,
+    buckets: [u64; 13],
+}
+
+/// Become the metrics-rollup writer iff the slot is free or the recorded leader
+/// PID is dead — one winner per box (the shared metrics are global).
+fn claim_metrics_leader() -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(m) = crate::metrics::Metrics::get() else {
+        return false;
+    };
+    let me = (unsafe { libc::getpid() }) as u32;
+    loop {
+        let cur = m.metrics_leader.load(Ordering::Acquire);
+        if cur == me {
+            return true;
+        }
+        if cur == 0 || !pid_alive(cur) {
+            if m.metrics_leader
+                .compare_exchange(cur, me, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+            continue;
+        }
+        return false;
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Snapshot the shared metrics into the `metrics` table every `interval`, as
+/// per-window deltas + windowed latency percentiles.
+async fn run_metrics_sink(cfg: MetricsCfg) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut conn: Option<mysql_async::Conn> = None;
+    let mut prev = Snap::default();
+    let mut first = true;
+    let mut tick = tokio::time::interval(cfg.interval);
+    loop {
+        tick.tick().await;
+        let Some(m) = crate::metrics::Metrics::get() else {
+            continue;
+        };
+        let cur = Snap {
+            requests: m.requests.load(Relaxed),
+            errors: m.errors.load(Relaxed),
+            bytes: m.bytes_out.load(Relaxed),
+            buckets: m.bucket_counts(),
+        };
+        let inflight = m.inflight.load(Relaxed);
+        if first {
+            first = false;
+            prev = cur;
+            continue; // baseline before the first delta
+        }
+        let d_req = cur.requests.wrapping_sub(prev.requests);
+        let d_err = cur.errors.wrapping_sub(prev.errors);
+        let d_bytes = cur.bytes.wrapping_sub(prev.bytes);
+        let mut d_buckets = [0u64; 13];
+        for (d, (c, p)) in d_buckets
+            .iter_mut()
+            .zip(cur.buckets.iter().zip(prev.buckets.iter()))
+        {
+            *d = c.wrapping_sub(*p);
+        }
+        prev = cur;
+        let total: u64 = d_buckets.iter().sum();
+
+        if conn.is_none() {
+            match connect_metrics(&cfg.dsn).await {
+                Ok(c) => conn = Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, "observability: metrics connect failed");
+                    continue;
+                }
+            }
+        }
+        let c = conn.as_mut().unwrap();
+        let params: Vec<MyValue> = vec![
+            MyValue::from(fmt_ts(now_us())),
+            MyValue::from(cfg.service.as_str()),
+            MyValue::from(cfg.host.as_str()),
+            MyValue::from(d_req),
+            MyValue::from(d_err),
+            MyValue::from(d_bytes),
+            MyValue::from(percentile(&d_buckets, total, 0.50)),
+            MyValue::from(percentile(&d_buckets, total, 0.95)),
+            MyValue::from(percentile(&d_buckets, total, 0.99)),
+            MyValue::from(inflight),
+        ];
+        let sql = "INSERT INTO metrics (ts,service,host,requests,errors,bytes_out,p50_ms,p95_ms,p99_ms,inflight) \
+                   VALUES (?,?,?,?,?,?,?,?,?,?)";
+        if let Err(e) = c.exec_drop(sql, params).await {
+            tracing::warn!(error = %e, "observability: metrics insert failed; reconnecting");
+            conn = None;
+        }
+    }
+}
+
+async fn connect_metrics(dsn: &str) -> Result<mysql_async::Conn, mysql_async::Error> {
+    let opts = dsn_opts(dsn)?;
+    let mut conn = mysql_async::Conn::new(opts).await?;
+    conn.query_drop(
+        "CREATE TABLE IF NOT EXISTS metrics (\
+         id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT, \
+         ts DATETIME(6) NOT NULL, \
+         service VARCHAR(64) NOT NULL, \
+         host VARCHAR(64) NOT NULL, \
+         requests BIGINT, errors BIGINT, bytes_out BIGINT, \
+         p50_ms DOUBLE, p95_ms DOUBLE, p99_ms DOUBLE, \
+         inflight INT)",
+    )
+    .await?;
+    Ok(conn)
+}
+
+/// Windowed percentile from the latency histogram deltas: the upper bound (ms) of
+/// the bucket where the cumulative count crosses `q`.
+fn percentile(buckets: &[u64; 13], total: u64, q: f64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let bounds = &crate::metrics::BUCKET_BOUNDS_MS;
+    let overflow = (bounds[bounds.len() - 1] as f64) * 2.0;
+    let target = (q * total as f64).ceil() as u64;
+    let mut cum = 0u64;
+    for (i, &c) in buckets.iter().enumerate() {
+        cum += c;
+        if cum >= target {
+            return bounds.get(i).map(|&b| b as f64).unwrap_or(overflow);
+        }
+    }
+    overflow
+}
+
+fn now_us() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
 }

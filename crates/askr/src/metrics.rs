@@ -10,7 +10,7 @@
 //! see: how much of each request is **PHP** vs **TLS/I/O**.
 
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 /// Latency histogram bucket upper bounds, in milliseconds (last is overflow).
 pub const BUCKET_BOUNDS_MS: [u64; 12] = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
@@ -40,6 +40,9 @@ pub struct Metrics {
     pub shadow_match: AtomicU64,
     pub shadow_mismatch: AtomicU64,
     pub shadow_error: AtomicU64,
+    /// PID of the elected metrics-rollup writer (0 = none). One process snapshots
+    /// the shared metrics to the observability `metrics` table; the rest defer.
+    pub metrics_leader: AtomicU32,
 }
 
 static METRICS_PTR: AtomicPtr<Metrics> = AtomicPtr::new(ptr::null_mut());

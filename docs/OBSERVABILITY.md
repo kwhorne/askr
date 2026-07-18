@@ -17,9 +17,13 @@ central telemetry database. It is **opt-in twice over** — compiled only with
 `--features observ`, and inert at runtime unless `ASKR_OBSERV_DSN` is set — so the
 default build, its behaviour, and CI are unaffected.
 
-> **Status:** request **logs** (below) and OpenTelemetry **traces**
-> ([Traces](#traces-opentelemetry)) ship today. A metrics-rollup table is on the
-> [roadmap](#roadmap).
+> **Status:** request **logs** (below), a **metrics rollup**
+> ([Metrics rollup](#metrics-rollup)) and OpenTelemetry **traces**
+> ([Traces](#traces-opentelemetry)) all ship today.
+>
+> **Target:** [ElyraSQL](https://github.com/kwhorne/sql-anywhere) and other
+> MySQL-wire databases that use `mysql_native_password`. Servers whose *default*
+> is `caching_sha2_password` (MySQL 8+, MariaDB 11+) need `ASKR_OBSERV_TLS=1`.
 
 ---
 
@@ -65,6 +69,8 @@ All via environment variables (unset `ASKR_OBSERV_DSN` = feature off):
 | `ASKR_OBSERV_BATCH` | `1000` | Rows per `INSERT`. |
 | `ASKR_OBSERV_FLUSH_MS` | `1000` | Max buffering latency before a partial batch is flushed. |
 | `ASKR_OBSERV_QUEUE` | `65536` | Bounded in-memory queue capacity (per worker). |
+| `ASKR_OBSERV_METRICS_MS` | `10000` | Metrics-rollup interval (see [Metrics rollup](#metrics-rollup)). |
+| `ASKR_OBSERV_TLS` | off | Connect over TLS (required by `caching_sha2_password` servers). Also `?tls=1` in the DSN. |
 
 Higher `BATCH`/`FLUSH_MS` = fewer, larger inserts (more throughput, more latency
 before rows appear). Larger `QUEUE` tolerates longer database stalls before the
@@ -162,6 +168,29 @@ WHERE MATCH(message) AGAINST('orders')
 
 ---
 
+## Metrics rollup
+
+Alongside the raw `logs`, Askr writes a periodic rollup to a `metrics` table, so
+rate/latency dashboards don't have to scan every request. One row every
+`ASKR_OBSERV_METRICS_MS` (default 10 s):
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics (
+  id         BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  ts         DATETIME(6) NOT NULL,
+  service    VARCHAR(64) NOT NULL,
+  host       VARCHAR(64) NOT NULL,
+  requests   BIGINT,   errors BIGINT,   bytes_out BIGINT,   -- deltas over the window
+  p50_ms     DOUBLE,   p95_ms DOUBLE,   p99_ms DOUBLE,      -- windowed latency percentiles
+  inflight   INT
+);
+```
+
+`requests`/`errors`/`bytes_out` are **per-window deltas**; the percentiles come
+from the windowed latency histogram. Because the shared metrics are global across
+all workers on a box, **exactly one process** writes the rollup — elected via a
+shared-memory PID (re-elected if it dies), so there's no double-counting.
+
 ## Traces (OpenTelemetry)
 
 Askr owns the whole request boundary, so it can export a trace that splits the
@@ -219,16 +248,14 @@ schedule (`INSERT … SELECT … GROUP BY service, <minute bucket>`).
 
 ## Roadmap
 
-Shipped now: **request logs** and **OpenTelemetry traces** (root + `php.execute`).
-Planned:
+Shipped now: **request logs**, **metrics rollup**, and **OpenTelemetry traces**
+(root + `php.execute` + `response.build`). Planned:
 
-- **Metrics table** — a periodic snapshot of `metrics::Metrics` (requests, errors,
-  bytes, p50/p95/p99, inflight) as one row per interval, so rate/latency panels
-  don't have to scan raw `logs`.
-- **Finer spans** — child spans for `cache`, `compress` and `coalesce` alongside
-  `php.execute`, plus trace/request ids threaded into `attrs`.
+- **Finer spans** — child spans for `cache` and `coalesce` alongside
+  `php.execute`/`response.build`, plus trace/request ids threaded into `attrs`.
 - **Trace the fast paths** — cache-HIT / static responses (v1 traces PHP requests
   only).
+- **caching_sha2 over plain sockets** — currently needs `ASKR_OBSERV_TLS=1`.
 
 ---
 
