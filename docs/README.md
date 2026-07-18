@@ -15,6 +15,7 @@ requests against it, eliminating per-request framework bootstrap.
 | [Building](BUILDING.md) | Building `libphp` (macOS & Ubuntu) and the `askr` binary; the extension matrix. |
 | [Configuration](CONFIGURATION.md) | The `askr.toml` reference, CLI flags, and environment variables. |
 | [CLI reference](CLI.md) | Every command and flag (`serve`, `doctor`, `config-check`). |
+| [Stability & compatibility](STABILITY.md) | The 1.0 compatibility contract: stable surfaces + deprecation policy. |
 | [**Laravel setup**](LARAVEL.md) | **Recommended Laravel guide** — `composer require kwhorne/askr-laravel`, `.env`, runner scripts, queue/scheduler/broadcasting, durable L2, production checklist. |
 | [Worker mode](WORKER_MODE.md) | Boot-once-serve-many, the Laravel worker script, per-request state reset, writing your own worker. |
 | [Power features](FEATURES.md) | Response cache + tag invalidation, coalescing, Pusher WS, `askr_defer`, CoW autoscaling, record/replay, fork test runner. |

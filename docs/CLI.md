@@ -66,7 +66,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--acme-dir <DIR>` | `/var/lib/askr/acme` | Account + cert cache. |
 | `--acme-staging` | off | Let's Encrypt staging. |
 | `--acme-http <ADDR>` | `0.0.0.0:80` | Where to answer HTTP-01 challenges. |
-| `--acme-directory <URL>` / `--acme-ca-root <PEM>` | — | Custom ACME directory / CA (Pebble, private CA). |
+| `--acme-directory-url <URL>` / `--acme-ca-root <PEM>` | — | Custom ACME directory / CA (Pebble, private CA). |
 
 ### Sidecars (same process tree)
 

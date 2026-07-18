@@ -269,8 +269,9 @@ enum Command {
         #[arg(long)]
         acme_staging: bool,
 
-        /// Custom ACME directory URL (e.g. a Pebble test server).
-        #[arg(long)]
+        /// Custom ACME directory URL (e.g. a Pebble test server). Distinct from
+        /// `--acme-dir`, which is the local cert-cache directory.
+        #[arg(long = "acme-directory-url", alias = "acme-directory")]
         acme_directory: Option<String>,
 
         /// Address to answer HTTP-01 challenges on.

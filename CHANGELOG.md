@@ -18,6 +18,16 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
   `url.query`. Cached requests are now traced too: a cache **HIT**/**STALE** and a
   coalesced follower each emit a (phase-less) root span, so the fast paths are
   visible in the trace view — not just the misses that reach PHP.
+- **Stability: a compatibility contract (`docs/STABILITY.md`).** Documents exactly
+  which surfaces 1.0 will freeze — CLI subcommands/flags, `askr.toml` keys, `ASKR_*`
+  env vars, the `askr_*` PHP bridge, the reserved HTTP surface (`/askr/*`,
+  `Askr-Cache`/`X-Askr-Cache`, `Alt-Svc`), and the build features — what is
+  explicitly *not* stable (internal crates, shared-memory layout, log prose), and
+  the add→alias+warn→remove deprecation policy.
+- **CLI: `--acme-directory` renamed to `--acme-directory-url`** (so it's no longer a
+  one-letter typo away from `--acme-dir`, the local cert-cache directory). The old
+  spelling still works as a hidden alias — the first application of the deprecation
+  policy above.
 
 ## 0.9.6 — 2026-07-18
 

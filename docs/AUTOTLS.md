@@ -49,7 +49,7 @@ marker. Keep it on a persistent volume.
 | `--acme-dir <path>` | Account + cert cache (persist this) |
 | `--acme-staging` | Use Let's Encrypt **staging** (high rate limits; untrusted) — use while testing |
 | `--acme-http <addr>` | Where to answer HTTP-01 challenges (default `0.0.0.0:80`) |
-| `--acme-directory <url>` | Custom ACME directory (e.g. a private CA / Pebble) |
+| `--acme-directory-url <url>` | Custom ACME directory (e.g. a private CA / Pebble) |
 | `--acme-ca-root <pem>` | Trust this CA root for the ACME directory (testing) |
 
 > Start with `--acme-staging` to avoid Let's Encrypt's strict production rate
@@ -71,7 +71,7 @@ docker cp pebble:/test /tmp/pebble-test   # grab /tmp/pebble-test/certs/pebble.m
 # 2. obtain against Pebble
 askr serve --root ./public --listen 127.0.0.1:8443 --workers 1 \
   --acme --acme-domain askr.test --acme-email me@askr.test \
-  --acme-dir /tmp/acme --acme-directory https://localhost:14000/dir \
+  --acme-dir /tmp/acme --acme-directory-url https://localhost:14000/dir \
   --acme-ca-root /tmp/pebble-test/certs/pebble.minica.pem --acme-http 127.0.0.1:5002
 
 # → /tmp/acme/cert.pem issued by "Pebble Intermediate CA", HTTPS served with it

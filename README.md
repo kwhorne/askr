@@ -67,6 +67,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Building](docs/BUILDING.md) — `libphp` + `askr`, the extension matrix
 - [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
 - [CLI reference](docs/CLI.md) — every command and flag
+- [Stability & compatibility](docs/STABILITY.md) — the 1.0 contract + deprecation policy
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
 - [Docker](docs/DOCKER.md) — one container replaces app+nginx+redis+queue+cron (GHCR, multi-arch)
 - [Power features](docs/FEATURES.md) — response cache + tags, coalescing, Pusher WS, defer, autoscaling, record/replay, test runner
