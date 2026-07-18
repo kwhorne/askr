@@ -4,6 +4,18 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (transport): HTTP/3 (QUIC) (`--http3`, `--features http3`).** Serve
+  HTTP/3 over QUIC on the TLS port alongside HTTP/1.1+HTTP/2, sharing the same
+  rustls (ring) certificate and the **same request handler** — so PHP sees
+  `SERVER_PROTOCOL=HTTP/3.0` with no app change. TCP responses advertise it via
+  `Alt-Svc: h3=":<port>"` so clients upgrade. Built on `quinn` + `h3`, with a
+  `SO_REUSEPORT` UDP socket per prefork worker (the kernel steers each QUIC
+  connection to one worker). Requires `--tls-cert`/`--tls-key`; off by default and
+  behind `--features http3` (included in the `-full` build), so the default build,
+  its behaviour, and CI are unchanged. The request handler was made generic over
+  the body type to serve both transports. Verified end-to-end with a real HTTP/3
+  client (`curl --http3`): `[HTTP-version=3]`. *(Note: SSE/streaming responses over
+  h3 are buffered in this first cut; expose a UDP port for the QUIC listener.)*
 - **Feature (observability): OpenTelemetry trace export (`--features otel`,
   `ASKR_OTEL_ENDPOINT`).** Askr owns the whole request boundary, so it exports a
   trace that splits the time PHP-FPM/Octane can't see: a root `http.request` span

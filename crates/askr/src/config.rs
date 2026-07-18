@@ -90,6 +90,9 @@ pub struct ServerSection {
     pub https: bool,
     /// Structured (JSON) access log destination: a file path, or "-" for stdout.
     pub access_log: Option<PathBuf>,
+    /// Serve HTTP/3 (QUIC) on the TLS port (requires TLS; build with `http3`).
+    #[serde(default)]
+    pub http3: bool,
     /// Harden workers on Linux (seccomp no-exec).
     #[serde(default)]
     pub sandbox: bool,
@@ -221,6 +224,7 @@ impl Default for ServerSection {
             max_body_size: default_body(),
             https: false,
             access_log: None,
+            http3: false,
             sandbox: false,
             sandbox_write: Vec::new(),
         }
@@ -386,6 +390,7 @@ impl FileConfig {
                 sandbox_write: self.server.sandbox_write,
                 shadow_to: self.server.shadow_to,
                 shadow_sample: self.server.shadow_sample,
+                http3: self.server.http3,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

@@ -35,6 +35,7 @@ typos fail fast in `config-check`.
 | `workers_min` | int | = `workers` | CoW autoscaling floor (with `--cow`). |
 | `workers_max` | int | = `workers` | CoW autoscaling ceiling (> min enables autoscaling). |
 | `access_log` | path | — | JSON access log per request; `-` for stdout. Off if unset. |
+| `http3` | bool | `false` | Serve HTTP/3 (QUIC) on the TLS port (requires TLS; build with `--features http3`). |
 | `sandbox` | bool | `false` | Linux hardening: seccomp no-exec. See [Sandbox](SANDBOX.md). |
 | `sandbox_write` | path[] | `[]` | Landlock: writes allowed only under these paths (enables the FS restriction). |
 

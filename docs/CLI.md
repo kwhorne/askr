@@ -59,6 +59,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | --- | --- | --- |
 | `--tls-cert <PEM>` / `--tls-key <PEM>` | — | Serve HTTPS from a cert + key (ALPN h2/http1.1). |
 | `--tls-self-signed` | off | Generate a self-signed cert on startup (dev). |
+| `--http3` | off | Serve HTTP/3 (QUIC) on the TLS port alongside h1/h2, advertised via `Alt-Svc`. Requires `--tls-cert`/`--tls-key`; build with `--features http3` (in the `-full` image). |
 | `--acme` | off | Auto-TLS via ACME/Let's Encrypt (HTTP-01). See [AUTOTLS](AUTOTLS.md). |
 | `--acme-domain <D>` | — | Domain(s) (repeatable). Required with `--acme`. |
 | `--acme-email <E>` | — | ACME account contact. |

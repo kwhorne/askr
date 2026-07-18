@@ -16,6 +16,8 @@ mod cgi;
 mod compress;
 mod config;
 mod doctor;
+#[cfg(feature = "http3")]
+mod http3;
 mod metrics;
 #[cfg(feature = "observ")]
 mod observ_sql;
@@ -143,6 +145,12 @@ enum Command {
         /// Percent (1..=100) of eligible requests to mirror to `--shadow-to`.
         #[arg(long, default_value = "100")]
         shadow_sample: u8,
+
+        /// Serve HTTP/3 (QUIC) on the TLS port alongside HTTP/1.1+2, advertised
+        /// via Alt-Svc. Requires `--tls-cert`/`--tls-key`. (Build with
+        /// `--features http3`.)
+        #[arg(long)]
+        http3: bool,
 
         /// TLS certificate chain (PEM). Enables HTTPS (ALPN: h2, http/1.1).
         #[arg(long, requires = "tls_key")]
@@ -392,6 +400,7 @@ fn main() -> anyhow::Result<()> {
             max_rss,
             shadow_to,
             shadow_sample,
+            http3,
             tls_cert,
             tls_key,
             tls_self_signed,
@@ -510,6 +519,7 @@ fn main() -> anyhow::Result<()> {
                     sandbox_write,
                     shadow_to,
                     shadow_sample,
+                    http3,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

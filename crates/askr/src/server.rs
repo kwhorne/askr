@@ -40,7 +40,7 @@ use crate::pusher::{self, PusherHub};
 use crate::rcache;
 
 /// Response body: buffered (Full) or streaming (SSE / files), unified as a box.
-type ResBody = BoxBody<Bytes, std::io::Error>;
+pub(crate) type ResBody = BoxBody<Bytes, std::io::Error>;
 
 /// Max simultaneous connections per worker — a backstop against connection
 /// exhaustion (slowloris); combined with the handshake/header timeouts, idle
@@ -111,10 +111,13 @@ pub struct Config {
     pub shadow_to: Option<String>,
     /// Percent (1..=100) of eligible requests to mirror.
     pub shadow_sample: u8,
+    /// Serve HTTP/3 (QUIC) alongside TCP on the TLS port (requires TLS).
+    #[cfg_attr(not(feature = "http3"), allow(dead_code))]
+    pub http3: bool,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
-struct Runtime {
+pub(crate) struct Runtime {
     config: Arc<Config>,
     php: Php,
     served: AtomicUsize,
@@ -296,6 +299,23 @@ pub async fn run(
         otel: crate::otel::Otel::from_env(),
     });
 
+    // HTTP/3 (QUIC) alongside the TCP listener, on the same TLS port.
+    #[cfg(feature = "http3")]
+    if rt.config.http3 {
+        match (rt.config.tls_cert.clone(), rt.config.tls_key.clone()) {
+            (Some(cert), Some(key)) => {
+                match crate::http3::endpoint(&cert, &key, rt.config.listen) {
+                    Ok(ep) => {
+                        tracing::info!(listen = %rt.config.listen, "HTTP/3 (QUIC) listening");
+                        tokio::spawn(crate::http3::serve(ep, rt.clone()));
+                    }
+                    Err(e) => tracing::error!(error = %e, "HTTP/3 setup failed"),
+                }
+            }
+            _ => tracing::warn!("--http3 requires --tls-cert/--tls-key; HTTP/3 off"),
+        }
+    }
+
     // Tail the shared broadcast ring and fan events out to local SSE subscribers
     // and Pusher WebSocket connections (a publish from any process reaches all).
     if crate::broadcast::enabled() {
@@ -419,11 +439,15 @@ where
     }
 }
 
-async fn handle(
-    mut req: Request<Incoming>,
+pub(crate) async fn handle<B>(
+    mut req: Request<B>,
     rt: Arc<Runtime>,
     peer: SocketAddr,
-) -> Result<Response<ResBody>, Infallible> {
+) -> Result<Response<ResBody>, Infallible>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     let t_start = Instant::now();
     #[cfg(feature = "otel")]
     let t_start_wall = std::time::SystemTime::now();
@@ -668,7 +692,8 @@ async fn handle(
         dur: std::time::Duration::from_micros(php_us),
     });
 
-    let response = match php_result {
+    #[allow(unused_mut)]
+    let mut response = match php_result {
         Ok(resp) => {
             // Cache store: the app opts in per-response with an `Askr-Cache`
             // header (which we consume, never forwarding it to the client).
@@ -705,6 +730,15 @@ async fn handle(
             text(StatusCode::BAD_GATEWAY, &format!("askr: {e}"))
         }
     };
+
+    // Advertise HTTP/3 so TCP (h1/h2) clients can upgrade to QUIC.
+    #[cfg(feature = "http3")]
+    if config.http3 {
+        if let Ok(v) = hyper::header::HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", port))
+        {
+            response.headers_mut().insert(hyper::header::ALT_SVC, v);
+        }
+    }
 
     // Release any followers waiting on this key (the cache is now populated, or
     // this response wasn't cacheable and they should run PHP themselves).
@@ -760,7 +794,7 @@ fn finish(rt: &Runtime, response: &Response<ResBody>, t_start: Instant, php_us: 
 }
 
 /// Cache key: `METHOD \0 host \0 path?query`.
-fn response_cache_key(req: &Request<Incoming>) -> Vec<u8> {
+fn response_cache_key<B>(req: &Request<B>) -> Vec<u8> {
     let host = req
         .headers()
         .get(hyper::header::HOST)
@@ -880,7 +914,7 @@ fn parse_cache_directive(v: &str) -> Option<(u64, u64, Vec<Vec<u8>>)> {
 /// Trigger a single background refresh of a stale cache entry so a page in its
 /// stale-while-revalidate window is recomputed *off* the request path. Coalesced
 /// through the inflight table: at most one refresh per key runs at a time.
-fn spawn_swr_refresh(rt: &Arc<Runtime>, key: &[u8], req: &Request<Incoming>, peer: SocketAddr) {
+fn spawn_swr_refresh<B>(rt: &Arc<Runtime>, key: &[u8], req: &Request<B>, peer: SocketAddr) {
     if !matches!(rcache::begin(key), rcache::Lead::Leader) {
         return; // a refresh (or a live leader) already owns this key
     }

@@ -61,6 +61,12 @@ opentelemetry = { version = "0.27", optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
 
+# Optional HTTP/3 (QUIC) listener via quinn + h3, sharing the rustls (ring) cert.
+# Off by default; enable with `--features http3`. Requires TLS/ACME.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"], optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+
 [features]
 # Durable, replicated L2 storage backends over SQL Anywhere (queue first).
 sql-backend = ["dep:rusqlite"]
@@ -68,6 +74,8 @@ sql-backend = ["dep:rusqlite"]
 observ = ["dep:mysql_async"]
 # OpenTelemetry trace export over OTLP.
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+# HTTP/3 (QUIC) listener.
+http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 
 # Linux-only hardening (seccomp syscall filter + Landlock filesystem sandbox).
 [target.'cfg(target_os = "linux")'.dependencies]

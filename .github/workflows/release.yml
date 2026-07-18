@@ -61,8 +61,8 @@ jobs:
       # A second, opt-in-features build so users get the durable L2 (SQL Anywhere)
       # and observability tiers without compiling from source. The default tarball
       # above is unchanged.
-      - name: Build askr (full — sql-backend + observ + otel)
-        run: cargo build --release --features "sql-backend observ otel"
+      - name: Build askr (full — sql-backend + observ + otel + http3)
+        run: cargo build --release --features "sql-backend observ otel http3"
 
       - name: Package full tarball
         run: SUFFIX=-full ./scripts/package-release.sh
