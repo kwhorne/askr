@@ -17,6 +17,8 @@ mod compress;
 mod config;
 mod doctor;
 mod metrics;
+#[cfg(feature = "observ")]
+mod observ_sql;
 mod php;
 mod pusher;
 mod queue;

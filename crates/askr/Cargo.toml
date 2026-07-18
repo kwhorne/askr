@@ -49,9 +49,16 @@ instant-acme = "0.8.5"
 # Off by default so the standard build and CI are unaffected.
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 
+# Optional observability sink: ship logs/metrics to ElyraSQL over the MySQL wire
+# protocol (docs/OBSERVABILITY.md). Off by default so the standard build/CI are
+# unaffected; enable with `--features observ`.
+mysql_async = { version = "0.37", default-features = false, features = ["minimal"], optional = true }
+
 [features]
 # Durable, replicated L2 storage backends over SQL Anywhere (queue first).
 sql-backend = ["dep:rusqlite"]
+# Observability telemetry sink to ElyraSQL.
+observ = ["dep:mysql_async"]
 
 # Linux-only hardening (seccomp syscall filter + Landlock filesystem sandbox).
 [target.'cfg(target_os = "linux")'.dependencies]

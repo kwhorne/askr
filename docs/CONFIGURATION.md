@@ -172,6 +172,8 @@ listen = "127.0.0.1:9000"
 | `ASKR_APP_BASE` | Application base path for the worker script (set automatically from `[worker] app_base`, or export it yourself in flag mode). |
 | `ASKR_PHP_CONFIG` | Path to a `php-config` for a specific embed-enabled, non-ZTS PHP install (used at **build** time). |
 | `RUST_LOG` | Log filter, e.g. `askr=debug`. Default `askr=info`. |
+| `ASKR_CACHE_DB` / `ASKR_QUEUE_DB` / `ASKR_BROADCAST_DB` | Durable L2 backend paths (`--features sql-backend`; unset = L1 shared memory). See [Storage backends](STORAGE_BACKEND.md). |
+| `ASKR_OBSERV_DSN` (+ `ASKR_OBSERV_SERVICE`/`HOST`/`BATCH`/`FLUSH_MS`/`QUEUE`) | Ship per-request logs to a MySQL-wire database (`--features observ`). See [Observability](OBSERVABILITY.md). |
 
 ### opcache
 

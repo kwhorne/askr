@@ -127,6 +127,8 @@ struct Runtime {
     pusher_enabled: bool,
     access: Option<Mutex<Box<dyn std::io::Write + Send>>>,
     shadow: Option<crate::shadow::Shadow>,
+    #[cfg(feature = "observ")]
+    observ: Option<crate::observ_sql::TelemetrySink>,
 }
 
 impl Runtime {
@@ -140,6 +142,32 @@ impl Runtime {
         dur: Duration,
         peer: SocketAddr,
     ) {
+        // Ship to the ElyraSQL telemetry sink (non-blocking; independent of the
+        // file access log). Off unless built with `--features observ` and
+        // configured via ASKR_OBSERV_DSN.
+        #[cfg(feature = "observ")]
+        if let Some(o) = &self.observ {
+            let ts_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros() as i64)
+                .unwrap_or(0);
+            let level = if status >= 500 {
+                "error"
+            } else if status >= 400 {
+                "warn"
+            } else {
+                "info"
+            };
+            o.log(crate::observ_sql::LogRow {
+                ts_us,
+                level,
+                method: method.to_string(),
+                path: path.to_string(),
+                status,
+                latency_ms: dur.as_secs_f64() * 1000.0,
+                ip: peer.ip().to_string(),
+            });
+        }
         let Some(w) = &self.access else {
             return;
         };
@@ -260,6 +288,8 @@ pub async fn run(
         pusher_enabled,
         access,
         shadow,
+        #[cfg(feature = "observ")]
+        observ: crate::observ_sql::TelemetrySink::from_env(),
     });
 
     // Tail the shared broadcast ring and fan events out to local SSE subscribers

@@ -2,6 +2,29 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## 0.9.4 — 2026-07-17
+
+- **Feature (observability): ship per-request logs to ElyraSQL / any MySQL-wire
+  database (`--features observ`, `ASKR_OBSERV_DSN`).** Askr already builds a
+  structured access record per request; this streams it to a telemetry database
+  over the MySQL wire protocol for SQL querying (in Conductor, a BI tool, or
+  `mysql`). A single background task per worker owns the connection; the request
+  path only does a non-blocking `try_send` into a bounded queue and **drops (with a
+  rate-limited warning) under backpressure**, so telemetry never blocks or fails a
+  request. Rows are batched into one multi-row `INSERT` (per `ASKR_OBSERV_BATCH` or
+  `ASKR_OBSERV_FLUSH_MS`), the `logs` table is auto-created, and the sink
+  reconnects on error and drains on shutdown. Configurable via
+  `ASKR_OBSERV_{SERVICE,HOST,BATCH,FLUSH_MS,QUEUE}`. Off by default and behind
+  `--features observ` (new optional `mysql_async` dependency), so the standard
+  build, its behaviour, and CI are unchanged. New module `observ_sql.rs`;
+  `docs/OBSERVABILITY.md`. (Metrics-rollup table + trace/span export are on the
+  roadmap.)
+- **Docs: a thorough Laravel setup guide (`docs/LARAVEL.md`)** — the recommended
+  end-to-end path for `composer require kwhorne/askr-laravel`: `.env`, store/
+  connection config, runner scripts, dev + production run commands, region sizing,
+  queue autoscaling, scheduler, broadcasting/Echo, durable L2, a production
+  checklist, verification, a Redis migration table, and troubleshooting.
+
 ## 0.9.3 — 2026-07-17
 
 Rounds out the optional durable L2 tier: cache and pub/sub backends over SQL
