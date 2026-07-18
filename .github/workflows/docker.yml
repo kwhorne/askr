@@ -59,3 +59,19 @@ jobs:
             ghcr.io/kwhorne/askr:${{ steps.v.outputs.ver }}
             ghcr.io/kwhorne/askr:${{ steps.v.outputs.minor }}
             ghcr.io/kwhorne/askr:latest
+
+      # Full variant: same image, built from the -full tarball (durable L2
+      # SQL Anywhere + observability compiled in).
+      - name: Build + push full image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            ASKR_VERSION=${{ steps.v.outputs.ver }}
+            ASKR_VARIANT=-full
+          tags: |
+            ghcr.io/kwhorne/askr:${{ steps.v.outputs.ver }}-full
+            ghcr.io/kwhorne/askr:${{ steps.v.outputs.minor }}-full
+            ghcr.io/kwhorne/askr:full

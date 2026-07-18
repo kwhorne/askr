@@ -24,14 +24,20 @@ default build, its behaviour, and CI are unaffected.
 
 ## Enable it
 
-**1. Build with the feature:**
+**1. Get a build that includes it.** Easiest is the published **`-full`** image or
+tarball (durable L2 + observability compiled in):
+
+```bash
+docker pull ghcr.io/kwhorne/askr:0.9-full        # or the -full release tarball
+```
+
+Or build it yourself:
 
 ```bash
 cargo build --release --features observ
 ```
 
-(The default release/Docker build does not include it — build your own, or use a
-`observ`-tagged artifact if you publish one.)
+(The *default* release/Docker build does not include it — use `-full` or your own.)
 
 **2. Point it at a database:**
 

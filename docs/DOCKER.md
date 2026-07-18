@@ -18,6 +18,25 @@ ghcr.io/kwhorne/askr:0.9.4      # exact
 ghcr.io/kwhorne/askr:latest
 ```
 
+### `-full` variant
+
+The default image is the standard build. A **`-full`** variant is published with
+the optional tiers compiled in — the **durable L2 SQL Anywhere backends**
+(`ASKR_CACHE_DB` / `ASKR_QUEUE_DB` / `ASKR_BROADCAST_DB`) and the
+**observability sink** (`ASKR_OBSERV_DSN`) — so you don't have to build from
+source:
+
+```
+ghcr.io/kwhorne/askr:0.9.4-full
+ghcr.io/kwhorne/askr:0.9-full
+ghcr.io/kwhorne/askr:full
+```
+
+Same runtime, same size class; the extra features are inert until you set the
+corresponding env vars. The `askr-*-linux-*-full.tar.gz` release tarball is the
+non-Docker equivalent. See [Storage backends](STORAGE_BACKEND.md) and
+[Observability](OBSERVABILITY.md).
+
 It's built on **`ubuntu:24.04`** — deliberately, not Debian and not Alpine (see
 [below](#why-ubuntu-2404-and-not-alpine)). It contains only the server; you layer
 your app on top.

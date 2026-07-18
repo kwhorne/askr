@@ -15,7 +15,8 @@ INSTALL="$ROOT/vendor/php-build/install"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 ARCH="$(uname -m)"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-NAME="askr-$VERSION-$OS-$ARCH"
+# Optional variant suffix (e.g. SUFFIX=-full for the sql-backend + observ build).
+NAME="askr-$VERSION-$OS-$ARCH${SUFFIX:-}"
 DIST="$ROOT/dist/$NAME"
 
 [ -x "$ROOT/target/release/askr" ] || { echo "build first: cargo build --release"; exit 1; }

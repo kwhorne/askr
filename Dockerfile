@@ -14,6 +14,8 @@
 # ---- fetch the relocatable release tarball ----
 FROM ubuntu:24.04 AS fetch
 ARG ASKR_VERSION=0.9.4
+# "" = the default build; "-full" pulls the sql-backend + observ tarball.
+ARG ASKR_VARIANT=""
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -27,7 +29,7 @@ RUN set -eux; \
     # for the release job to finish uploading the asset (404 → retry).
     curl -fsSL --retry 30 --retry-delay 20 --retry-all-errors \
       -o /tmp/askr.tgz \
-      "https://github.com/kwhorne/askr/releases/download/v${ASKR_VERSION}/askr-${ASKR_VERSION}-linux-${A}.tar.gz"; \
+      "https://github.com/kwhorne/askr/releases/download/v${ASKR_VERSION}/askr-${ASKR_VERSION}-linux-${A}${ASKR_VARIANT}.tar.gz"; \
     mkdir -p /opt/askr; \
     tar xzf /tmp/askr.tgz -C /opt/askr --strip-components=1
 

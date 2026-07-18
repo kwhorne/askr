@@ -240,7 +240,9 @@ For durability across restarts or multiple boxes, enable the SQL Anywhere L2 tie
 It's behind a build feature, so the default build is unaffected:
 
 ```bash
-# build once with the feature
+# use the published -full image/tarball (durable L2 + observ compiled in) …
+docker pull ghcr.io/kwhorne/askr:0.9-full
+# … or build it yourself
 cargo build --release --features sql-backend
 ```
 

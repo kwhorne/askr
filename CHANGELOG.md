@@ -2,6 +2,18 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Packaging: publish a `-full` build with the optional tiers compiled in.** Every
+  release now also ships an `askr-<ver>-linux-<arch>-full.tar.gz` tarball and a
+  `ghcr.io/kwhorne/askr:<ver>-full` / `:full` Docker image built with
+  `--features "sql-backend observ"` — so the durable **L2 SQL Anywhere** backends
+  (`ASKR_*_DB`) and the **observability sink** (`ASKR_OBSERV_DSN`) are usable
+  without compiling from source. The default tarball/image are unchanged (features
+  inert until the env vars are set). Release/Docker workflows build the variant
+  alongside the default; `package-release.sh` gained a `SUFFIX` knob and the
+  Dockerfile an `ASKR_VARIANT` build-arg.
+
 ## 0.9.4 — 2026-07-17
 
 - **Feature (observability): ship per-request logs to ElyraSQL / any MySQL-wire

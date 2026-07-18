@@ -38,11 +38,12 @@ the conformance-tested `QUEUE_CONTRACT.md` SQL verbatim and exposes the *same*
 `push`/`pop`/`delete`/`release`/`size` bridge as L1, so `askr_queue_*` and the
 Laravel driver are unchanged — only the backend differs.
 
-**Enable it** (build + run):
+**Enable it** (build + run). Easiest is the published **`-full`** image/tarball
+(features compiled in); otherwise build with `--features sql-backend`:
 
 ```bash
-cargo build --release -p askr --features sql-backend
-ASKR_QUEUE_DB=/var/lib/askr/queue.db ./askr serve ...   # unset => L1 fallback
+docker pull ghcr.io/kwhorne/askr:0.9-full               # or: cargo build --release -p askr --features sql-backend
+ASKR_QUEUE_DB=/var/lib/askr/queue.db askr serve ...     # unset => L1 fallback
 ```
 
 `ASKR_QUEUE_DB` points at an embedded SQL Anywhere file, an embedded replica, or
