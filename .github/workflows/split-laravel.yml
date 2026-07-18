@@ -29,6 +29,7 @@ jobs:
           TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
         run: |
           set -euo pipefail
+          [ -n "$TOKEN" ] || { echo "no ASKR_LARAVEL_SPLIT_TOKEN secret set — skipping split"; exit 0; }
           git subtree split --prefix=packages/laravel -b split
           git push --force \
             "https://x-access-token:${TOKEN}@github.com/kwhorne/askr-laravel.git" \
@@ -41,6 +42,8 @@ jobs:
           GH_TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
         run: |
           set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "no ASKR_LARAVEL_SPLIT_TOKEN secret set — skipping release"; exit 0; }
+          [ -n "${SPLIT_SHA:-}" ] || { echo "split was skipped — nothing to release"; exit 0; }
           TAG="${GITHUB_REF_NAME}"
           gh release create "$TAG" \
             --repo kwhorne/askr-laravel \
