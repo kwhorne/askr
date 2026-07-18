@@ -6,14 +6,14 @@
 # recompile — we drop in the relocatable release package (binary + libphp with
 # rpath $ORIGIN/lib), so this build is just fetch + package.
 #
-#   docker build --build-arg ASKR_VERSION=0.9.4 -t askr .
+#   docker build --build-arg ASKR_VERSION=0.9.5 -t askr .
 #
 # Multi-arch: buildx sets TARGETARCH (amd64 / arm64); we fetch the matching
 # tarball. See docs/DOCKER.md for the app-image and compose examples.
 
 # ---- fetch the relocatable release tarball ----
 FROM ubuntu:24.04 AS fetch
-ARG ASKR_VERSION=0.9.4
+ARG ASKR_VERSION=0.9.5
 # "" = the default build; "-full" pulls the sql-backend + observ tarball.
 ARG ASKR_VARIANT=""
 ARG TARGETARCH

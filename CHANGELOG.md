@@ -2,7 +2,9 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.5 — 2026-07-18
+
+Makes the optional tiers consumable without building from source.
 
 - **Packaging: publish a `-full` build with the optional tiers compiled in.** Every
   release now also ships an `askr-<ver>-linux-<arch>-full.tar.gz` tarball and a

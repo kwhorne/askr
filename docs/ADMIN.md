@@ -37,7 +37,7 @@ Then open <http://127.0.0.1:9000/>.
 
 ```json
 {
-  "version": "0.9.4",
+  "version": "0.9.5",
   "listen": "0.0.0.0:8000",
   "mode": "worker",
   "uptime_secs": 3600,
