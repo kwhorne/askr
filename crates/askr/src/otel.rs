@@ -21,7 +21,15 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 
-/// A finished request, reconstructed into two spans.
+/// A child span within a request: a named phase with a start offset (from request
+/// start) and a duration.
+pub struct Phase {
+    pub name: &'static str,
+    pub offset: Duration,
+    pub dur: Duration,
+}
+
+/// A finished request, reconstructed into a root span + child phase spans.
 pub struct RequestSpan {
     pub method: String,
     pub path: String,
@@ -30,12 +38,12 @@ pub struct RequestSpan {
     pub start_wall: SystemTime,
     /// Total request duration.
     pub total: Duration,
-    /// Offset from request start to when PHP execution began.
-    pub php_offset: Duration,
-    /// PHP execution duration.
-    pub php: Duration,
     /// Cache disposition: "HIT" | "MISS" | "STALE" | "".
     pub cache: &'static str,
+    /// Bytes written to the client.
+    pub bytes: u64,
+    /// Child spans (php.execute, cache.lookup, response.build, …), in any order.
+    pub phases: Vec<Phase>,
 }
 
 pub struct Otel {
@@ -73,7 +81,8 @@ impl Otel {
         })
     }
 
-    /// Export one request as a root span + a child `php.execute` span, timed from
+    /// Export one request as a root `http.request` span plus a child span per
+    /// measured phase (php.execute, cache.lookup, response.build, …), timed from
     /// the reconstructed wall-clock windows.
     pub fn record(&self, r: RequestSpan) {
         let end = r.start_wall + r.total;
@@ -86,20 +95,24 @@ impl Otel {
                 KeyValue::new("http.request.method", r.method),
                 KeyValue::new("url.path", r.path),
                 KeyValue::new("http.response.status_code", r.status as i64),
+                KeyValue::new("http.response.body.size", r.bytes as i64),
                 KeyValue::new("askr.cache", r.cache),
             ])
             .start(&self.tracer);
 
         let cx = Context::current_with_span(root);
 
-        if !r.php.is_zero() {
-            let php_start = r.start_wall + r.php_offset;
-            let mut php = self
+        for p in r.phases {
+            if p.dur.is_zero() {
+                continue;
+            }
+            let start = r.start_wall + p.offset;
+            let mut span = self
                 .tracer
-                .span_builder("php.execute")
-                .with_start_time(php_start)
+                .span_builder(p.name)
+                .with_start_time(start)
                 .start_with_context(&self.tracer, &cx);
-            php.end_with_timestamp(php_start + r.php);
+            span.end_with_timestamp(start + p.dur);
         }
 
         cx.span().end_with_timestamp(end);

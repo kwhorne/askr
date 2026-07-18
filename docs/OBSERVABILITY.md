@@ -174,17 +174,19 @@ ASKR_OTEL_ENDPOINT=http://127.0.0.1:4317   # enables trace export (OTLP/gRPC)
 ASKR_OTEL_SERVICE=askr                      # service.name (default "askr")
 ```
 
-Each PHP request becomes **two spans**:
+Each PHP request becomes a root span with a child span per phase:
 
 ```
-http.request   ── GET /orders/42 · status=200 · cache=MISS · 19.1 ms
-└─ php.execute ── 19.0 ms                          ← the PHP-vs-everything split
+http.request     ── GET /orders/42 · status=200 · cache=MISS · 15.4 ms
+├─ php.execute   ── 15.2 ms                    ← the PHP-vs-everything split
+└─ response.build ── 0.2 ms                    ← where the rest went (compress)
 ```
 
 The root `http.request` span carries `http.request.method`, `url.path`,
-`http.response.status_code` and `askr.cache` (`HIT`/`MISS`/`STALE`); the child
-`php.execute` span is the exact PHP execution window. That nesting makes the
-"PHP is ~99.5 % of the request" reality visible per request — something a FastCGI
+`http.response.status_code`, `http.response.body.size` and `askr.cache`
+(`HIT`/`MISS`/`STALE`); the child spans are the exact wall-clock windows of each
+phase. That nesting makes the "PHP is ~99.5 % of the request" reality visible per
+request — *and* shows where the remaining fraction went — something a FastCGI
 split can't show, because it never sees the PHP boundary.
 
 Try it in 30 seconds:

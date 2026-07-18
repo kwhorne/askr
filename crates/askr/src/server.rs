@@ -427,6 +427,8 @@ async fn handle(
     let t_start = Instant::now();
     #[cfg(feature = "otel")]
     let t_start_wall = std::time::SystemTime::now();
+    #[cfg(feature = "otel")]
+    let mut otel_phases: Vec<crate::otel::Phase> = Vec::new();
     let config = &rt.config;
     let port = config.listen.port();
     let accept_encoding = req
@@ -659,6 +661,12 @@ async fn handle(
         m.inflight.fetch_sub(1, Ordering::Relaxed);
     }
     let php_us = php_start.elapsed().as_micros() as u64;
+    #[cfg(feature = "otel")]
+    otel_phases.push(crate::otel::Phase {
+        name: "php.execute",
+        offset: php_start.saturating_duration_since(t_start),
+        dur: std::time::Duration::from_micros(php_us),
+    });
 
     let response = match php_result {
         Ok(resp) => {
@@ -678,7 +686,16 @@ async fn handle(
                 });
             }
             let state = rcache::enabled().then_some("MISS");
-            build_response(resp, state, &accept_encoding)
+            #[cfg(feature = "otel")]
+            let build_t0 = Instant::now();
+            let built = build_response(resp, state, &accept_encoding);
+            #[cfg(feature = "otel")]
+            otel_phases.push(crate::otel::Phase {
+                name: "response.build",
+                offset: build_t0.saturating_duration_since(t_start),
+                dur: build_t0.elapsed(),
+            });
+            built
         }
         Err(e) => {
             tracing::error!(error = %e, "php handling failed");
@@ -717,9 +734,9 @@ async fn handle(
             status: response.status().as_u16(),
             start_wall: t_start_wall,
             total: t_start.elapsed(),
-            php_offset: php_start.saturating_duration_since(t_start),
-            php: std::time::Duration::from_micros(php_us),
             cache: if rcache::enabled() { "MISS" } else { "" },
+            bytes: response.body().size_hint().exact().unwrap_or(0),
+            phases: std::mem::take(&mut otel_phases),
         });
     }
 
