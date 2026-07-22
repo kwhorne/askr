@@ -170,7 +170,7 @@ multiplexes many streams over one TCP connection, so a single lost segment stall
 packet only stalls the one stream that needed it. To see whether that's real (and
 not marketing), we measured it.
 
-**Method.** One Ubuntu 24.04 container, `askr 0.9.7-full --http3 --workers 4`
+**Method.** One Ubuntu 24.04 container, `askr 0.9.8-full --http3 --workers 4`
 serving a ~1 KB dynamic PHP response over TLS on loopback. A small native Rust load
 client (`scripts/h3bench`, built on Askr's own quinn/h3 + hyper stack) opens **one**
 connection (TCP+TLS for h2, QUIC for h3) and drives **50 multiplexed streams**, each

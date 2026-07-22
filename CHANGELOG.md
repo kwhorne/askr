@@ -2,7 +2,7 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.8 — 2026-07-22
 
 Robustness pass from a source-code review — correctness fixes in the shared-memory
 caches and the worker request path, all behaviour-preserving for correct inputs.
