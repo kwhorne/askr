@@ -2,6 +2,13 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Build (Docker): resilient apt in the image build.** Both `apt-get` layers now
+  retry the whole update+install (with per-fetch `Acquire::Retries`) so a transient
+  `archive`/`security.ubuntu.com` mirror outage on the CI runner no longer fails the
+  release image build. No change to the published binary or image contents.
+
 ## 0.9.8 — 2026-07-22
 
 Robustness pass from a source-code review — correctness fixes in the shared-memory

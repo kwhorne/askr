@@ -17,8 +17,14 @@ ARG ASKR_VERSION=0.9.8
 # "" = the default build; "-full" pulls the sql-backend + observ tarball.
 ARG ASKR_VARIANT=""
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    for i in 1 2 3 4 5 6; do \
+      apt-get -o Acquire::Retries=5 update \
+        && apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl ca-certificates \
+        && break; \
+      echo "apt attempt $i failed (mirror flaky); retrying in 15s"; sleep 15; \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) A=x86_64 ;; \
@@ -42,12 +48,20 @@ LABEL org.opencontainers.image.licenses="MIT"
 # Runtime libraries the laravel-profile libphp links (openssl/libxml2/oniguruma/
 # sqlite + icu/curl/gd stack/zip/pgsql), plus curl for the healthcheck and CA
 # certs for outbound TLS.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      libssl3 libxml2 libonig5 libsqlite3-0 \
-      libicu74 libcurl4 libpng16-16 libjpeg-turbo8 libfreetype6 libwebp7 \
-      libzip4 libpq5 zlib1g \
-      ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+# Retry the whole update+install (with per-fetch Acquire::Retries) so a transient
+# archive/security.ubuntu.com outage on the runner doesn't fail the release build.
+RUN set -eux; \
+    for i in 1 2 3 4 5 6; do \
+      apt-get -o Acquire::Retries=5 update \
+        && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+          libssl3 libxml2 libonig5 libsqlite3-0 \
+          libicu74 libcurl4 libpng16-16 libjpeg-turbo8 libfreetype6 libwebp7 \
+          libzip4 libpq5 zlib1g \
+          ca-certificates curl \
+        && break; \
+      echo "apt attempt $i failed (mirror flaky); retrying in 15s"; sleep 15; \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /opt/askr /opt/askr
 # System user (auto UID). ubuntu:24.04 already reserves UID 1000 for `ubuntu`, so
