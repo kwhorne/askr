@@ -152,6 +152,14 @@ enum Command {
         #[arg(long)]
         http3: bool,
 
+        /// Seconds a client may take to finish the TLS handshake (slowloris guard).
+        #[arg(long, default_value = "10")]
+        tls_handshake_timeout: u64,
+
+        /// Seconds a client may take to send request headers (slowloris guard).
+        #[arg(long, default_value = "15")]
+        header_read_timeout: u64,
+
         /// TLS certificate chain (PEM). Enables HTTPS (ALPN: h2, http/1.1).
         #[arg(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
@@ -402,6 +410,8 @@ fn main() -> anyhow::Result<()> {
             shadow_to,
             shadow_sample,
             http3,
+            tls_handshake_timeout,
+            header_read_timeout,
             tls_cert,
             tls_key,
             tls_self_signed,
@@ -521,6 +531,8 @@ fn main() -> anyhow::Result<()> {
                     shadow_to,
                     shadow_sample,
                     http3,
+                    tls_handshake_timeout,
+                    header_read_timeout,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

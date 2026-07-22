@@ -93,6 +93,12 @@ pub struct ServerSection {
     /// Serve HTTP/3 (QUIC) on the TLS port (requires TLS; build with `http3`).
     #[serde(default)]
     pub http3: bool,
+    /// Seconds a client may take to complete the TLS handshake (slowloris guard).
+    #[serde(default = "default_handshake_timeout")]
+    pub tls_handshake_timeout: u64,
+    /// Seconds a client may take to send the full request headers (slowloris guard).
+    #[serde(default = "default_header_read_timeout")]
+    pub header_read_timeout: u64,
     /// Harden workers on Linux (seccomp no-exec).
     #[serde(default)]
     pub sandbox: bool,
@@ -225,6 +231,8 @@ impl Default for ServerSection {
             https: false,
             access_log: None,
             http3: false,
+            tls_handshake_timeout: default_handshake_timeout(),
+            header_read_timeout: default_header_read_timeout(),
             sandbox: false,
             sandbox_write: Vec::new(),
         }
@@ -243,6 +251,14 @@ fn default_body() -> String {
 
 fn default_shadow_sample() -> u8 {
     100
+}
+
+fn default_handshake_timeout() -> u64 {
+    10
+}
+
+fn default_header_read_timeout() -> u64 {
+    15
 }
 
 /// The fully-resolved runtime configuration produced from a file.
@@ -391,6 +407,8 @@ impl FileConfig {
                 shadow_to: self.server.shadow_to,
                 shadow_sample: self.server.shadow_sample,
                 http3: self.server.http3,
+                tls_handshake_timeout: self.server.tls_handshake_timeout,
+                header_read_timeout: self.server.header_read_timeout,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

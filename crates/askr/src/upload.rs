@@ -105,6 +105,20 @@ where
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
         match file_name {
+            // Empty filename ⇒ the browser submitted a file input with nothing
+            // chosen. PHP surfaces this in $_FILES with UPLOAD_ERR_NO_FILE (4) and
+            // no temp file, so Laravel's `$request->hasFile()` returns false. Match
+            // that instead of fabricating a 0-byte upload with error=OK.
+            Some(ref fname) if fname.is_empty() => {
+                files.push(UploadedFile {
+                    field_name: name,
+                    file_name: String::new(),
+                    content_type,
+                    tmp_path: String::new(),
+                    size: 0,
+                    error: 4, // UPLOAD_ERR_NO_FILE
+                });
+            }
             // A file part → stream to a temp file.
             Some(file_name) => {
                 let tmp = temp_dir().join(unique_name());

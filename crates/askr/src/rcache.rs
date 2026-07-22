@@ -358,8 +358,12 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
         let _g = Slot::lock(e);
         // SAFETY: fields read under the slot lock; lengths clamped before slicing.
         unsafe {
-            if ptr::read(ptr::addr_of!((*e).state)) == 0 {
+            let st = ptr::read(ptr::addr_of!((*e).state));
+            if st == 0 {
                 break; // empty slot ends the probe chain
+            }
+            if st != 1 {
+                continue; // tombstone (2) ⇒ skip, but keep probing the chain
             }
             if ptr::read(ptr::addr_of!((*e).key_hash)) != h {
                 continue;
@@ -368,7 +372,7 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
             let hard = ptr::read(ptr::addr_of!((*e).stale_until));
             // Past the hard deadline ⇒ fully expired (a real miss).
             if hard != 0 && hard < now {
-                ptr::write(ptr::addr_of_mut!((*e).state), 0);
+                ptr::write(ptr::addr_of_mut!((*e).state), 2); // tombstone, keep chain
                 break;
             }
             // Tag invalidation is a *hard* invalidation (content changed): never
@@ -384,7 +388,7 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
                 }
             }
             if tag_invalid {
-                ptr::write(ptr::addr_of_mut!((*e).state), 0);
+                ptr::write(ptr::addr_of_mut!((*e).state), 2); // tombstone, keep chain
                 break;
             }
             // Past the fresh deadline but within the stale window ⇒ serve stale.
@@ -447,7 +451,8 @@ pub fn store(
         tg[i] = tag_gen(th[i]);
     }
 
-    let mut target = None;
+    let mut reuse = None; // first tombstone (free to reuse without evicting)
+    let mut target = None; // first live slot (eviction victim of last resort)
     for i in 0..PROBE {
         let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
         let _g = Slot::lock(e);
@@ -470,12 +475,18 @@ pub fn store(
             };
             return true;
         }
-        if target.is_none() {
+        if state == 2 {
+            if reuse.is_none() {
+                reuse = Some(e);
+            }
+        } else if target.is_none() {
             target = Some(e);
         }
     }
-    // Probe window full: evict the primary slot.
-    let e = target.unwrap_or_else(|| unsafe { p.add((h as usize) % slots) });
+    // Window full: reuse a tombstone if present, else evict the first live slot.
+    let e = reuse
+        .or(target)
+        .unwrap_or_else(|| unsafe { p.add((h as usize) % slots) });
     let _g = Slot::lock(e);
     unsafe {
         write_entry(

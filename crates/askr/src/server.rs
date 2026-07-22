@@ -47,10 +47,6 @@ pub(crate) type ResBody = BoxBody<Bytes, std::io::Error>;
 /// connections can't pile up.
 const MAX_CONNECTIONS: usize = 8192;
 
-/// Bounded wait for a TLS handshake / a client to send request headers.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
-
 /// How long a coalesced follower waits for the leader before running PHP itself.
 const COALESCE_WAIT: Duration = Duration::from_secs(5);
 
@@ -114,6 +110,10 @@ pub struct Config {
     /// Serve HTTP/3 (QUIC) alongside TCP on the TLS port (requires TLS).
     #[cfg_attr(not(feature = "http3"), allow(dead_code))]
     pub http3: bool,
+    /// Seconds a client may take to complete the TLS handshake (slowloris guard).
+    pub tls_handshake_timeout: u64,
+    /// Seconds a client may take to send the full request headers (slowloris guard).
+    pub header_read_timeout: u64,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -391,7 +391,8 @@ pub async fn run(
 async fn serve_conn(stream: tokio::net::TcpStream, rt: Arc<Runtime>, peer: SocketAddr) {
     if let Some(acceptor) = rt.tls.clone() {
         // Bound the handshake so a slow/malicious client can't hold a slot open.
-        match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+        let handshake_to = Duration::from_secs(rt.config.tls_handshake_timeout);
+        match tokio::time::timeout(handshake_to, acceptor.accept(stream)).await {
             Ok(Ok(tls)) => serve_io(TokioIo::new(tls), rt, peer).await,
             Ok(Err(e)) => tracing::debug!(error = %e, "TLS handshake failed"),
             Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
@@ -405,6 +406,7 @@ async fn serve_io<I>(io: I, rt: Arc<Runtime>, peer: SocketAddr)
 where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
+    let header_read_to = Duration::from_secs(rt.config.header_read_timeout);
     // Wrap handle so every response — whatever branch produced it — is logged.
     let service = service_fn(move |req: Request<Incoming>| {
         let rt = rt.clone();
@@ -433,7 +435,7 @@ where
     builder
         .http1()
         .timer(TokioTimer::new())
-        .header_read_timeout(HEADER_READ_TIMEOUT);
+        .header_read_timeout(header_read_to);
     if let Err(e) = builder.serve_connection_with_upgrades(io, service).await {
         tracing::debug!(error = %e, "connection closed");
     }

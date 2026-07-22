@@ -2,6 +2,36 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+Robustness pass from a source-code review — correctness fixes in the shared-memory
+caches and the worker request path, all behaviour-preserving for correct inputs.
+
+- **Fix (cache correctness): tombstone deletion in the shared-memory caches.** The
+  KV cache (`cache.rs`) and response cache (`rcache.rs`) use linear probing but
+  `delete`/expiry/tag-invalidation wrote an *empty* slot (`0`) mid-chain, which
+  ended the probe early and hid a colliding key stored later in the chain — a false
+  cache miss, and for the atomic-lock path (`add`, used by `Cache::lock`) a possible
+  false re-acquire of a still-held lock. Deletes now write a **tombstone** that
+  lookups skip but don't stop at; `set`/`add`/`increment` scan the whole chain for
+  an existing key before reusing a tombstone (so no duplicates), and re-validate
+  under the slot lock. New regression test (`delete_preserves_colliding_chain`).
+- **Fix (cache): eviction no longer clobbers a racing write.** `set`'s victim
+  selection now prefers a free/tombstoned slot over evicting a live entry, and only
+  counts a real eviction; the response cache does the same.
+- **Fix (uploads): an empty file input is `UPLOAD_ERR_NO_FILE`, not a 0-byte file.**
+  A form submitted with a file field left blank (`filename=""`) previously produced
+  a 0-byte temp file with `error=OK`, so `$request->hasFile()` returned true. It now
+  matches PHP: the entry has `error=4` and no temp file.
+- **Fix (worker): request buffers no longer grow without bound / drop silently.** The
+  C shim now warns once per request when a request exceeds the header/POST/file caps
+  (raised to 256/1024/128) instead of silently dropping, and reclaims a response
+  buffer that a single large response grew past 256 KB (a 50 MB export no longer
+  costs a worker 50 MB of C heap for the rest of its life).
+- **Feature: configurable slowloris timeouts.** `--tls-handshake-timeout` (default
+  10 s) and `--header-read-timeout` (default 15 s), also `[server]` keys — previously
+  hard-coded, now tunable for slow/mobile clients.
+
 ## 0.9.7 — 2026-07-18
 
 HTTP/3 is now *real and measured*: responses stream over QUIC, the traces show it

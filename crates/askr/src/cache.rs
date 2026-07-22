@@ -197,12 +197,16 @@ impl<const V: usize> Region<V> {
             let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
             let _g = Slot::lock(e);
             unsafe {
+                // Only an EMPTY (0) slot ends the probe chain. A TOMBSTONE (2) is
+                // skipped (matches() requires state==1), so a live key placed past a
+                // deleted colliding key is still found. (Fixes the false-miss where
+                // delete used to punch a 0 hole mid-chain.)
                 if r_u32(ptr::addr_of!((*e).state)) == 0 {
                     return None;
                 }
                 if Self::matches(e, key, h) {
                     if Self::expired(e, now) {
-                        ptr::write(ptr::addr_of_mut!((*e).state), 0);
+                        ptr::write(ptr::addr_of_mut!((*e).state), 2); // tombstone
                         return None;
                     }
                     return Some(Self::read_val(e));
@@ -221,6 +225,7 @@ impl<const V: usize> Region<V> {
         }
         let now = now_secs();
         let expires = if ttl > 0 { now + ttl } else { 0 };
+        let mut reuse: Option<usize> = None; // first EMPTY or TOMBSTONE slot
         let mut victim = (h as usize) % slots;
         let mut oldest = u64::MAX;
         let mut expired_victim: Option<usize> = None;
@@ -230,25 +235,42 @@ impl<const V: usize> Region<V> {
             let _g = Slot::lock(e);
             unsafe {
                 let state = r_u32(ptr::addr_of!((*e).state));
-                if state == 0 || Self::matches(e, key, h) {
+                // Live/expired match ⇒ update in place, atomically (lock held).
+                if state == 1 && Self::matches(e, key, h) {
                     Self::write(e, key, val, h, expires);
                     return true;
                 }
-                if Self::expired(e, now) && expired_victim.is_none() {
-                    expired_victim = Some(idx);
+                if (state == 0 || state == 2) && reuse.is_none() {
+                    reuse = Some(idx);
                 }
-                let wa = r_u64(ptr::addr_of!((*e).written_at));
-                if wa < oldest {
-                    oldest = wa;
-                    victim = idx;
+                if state == 0 {
+                    break; // chain end: key is absent, write at `reuse` (≤ this idx)
+                }
+                if state == 1 {
+                    if Self::expired(e, now) && expired_victim.is_none() {
+                        expired_victim = Some(idx);
+                    }
+                    let wa = r_u64(ptr::addr_of!((*e).written_at));
+                    if wa < oldest {
+                        oldest = wa;
+                        victim = idx;
+                    }
                 }
             }
         }
-        let target = expired_victim.unwrap_or(victim);
+        // Prefer a free slot (empty/tombstone), then an expired entry, then evict
+        // the oldest live entry. Only the last case is a real eviction.
+        let evicting = reuse.is_none() && expired_victim.is_none();
+        let target = reuse.or(expired_victim).unwrap_or(victim);
         let e = unsafe { p.add(target) };
         let _g = Slot::lock(e);
+        // Re-validate under the lock: if a racing writer already put *our* key
+        // somewhere we'd now clobber, last-writer-wins is still correct; we just
+        // write our value. (Closes the evict/target race window.)
         unsafe { Self::write(e, key, val, h, expires) };
-        note_eviction();
+        if evicting {
+            note_eviction();
+        }
         true
     }
 
@@ -262,15 +284,38 @@ impl<const V: usize> Region<V> {
         }
         let now = now_secs();
         let expires = if ttl > 0 { now + ttl } else { 0 };
+        let mut reuse: Option<usize> = None;
         for i in 0..PROBE {
             let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
             let _g = Slot::lock(e);
             unsafe {
                 let state = r_u32(ptr::addr_of!((*e).state));
-                if state == 1 && Self::matches(e, key, h) && !Self::expired(e, now) {
-                    return false; // already present and live
+                if state == 1 && Self::matches(e, key, h) {
+                    if !Self::expired(e, now) {
+                        return false; // already present and live
+                    }
+                    Self::write(e, key, val, h, expires); // expired ⇒ acquire in place
+                    return true;
                 }
-                if state == 0 || Self::matches(e, key, h) || Self::expired(e, now) {
+                if (state == 0 || state == 2) && reuse.is_none() {
+                    reuse = Some((h as usize).wrapping_add(i) % slots);
+                }
+                if state == 0 {
+                    break; // chain end: no live holder ahead, safe to insert
+                }
+            }
+        }
+        // Insert at the first free slot, but re-check under the lock so two racing
+        // `add`s for the same key can't both succeed (atomic-lock correctness).
+        if let Some(idx) = reuse {
+            let e = unsafe { p.add(idx) };
+            let _g = Slot::lock(e);
+            unsafe {
+                let state = r_u32(ptr::addr_of!((*e).state));
+                if state == 1 && Self::matches(e, key, h) && !Self::expired(e, now) {
+                    return false; // lost the race to another acquirer
+                }
+                if state == 0 || state == 2 || Self::matches(e, key, h) || Self::expired(e, now) {
                     Self::write(e, key, val, h, expires);
                     return true;
                 }
@@ -291,7 +336,9 @@ impl<const V: usize> Region<V> {
                     return false;
                 }
                 if Self::matches(e, key, h) {
-                    ptr::write(ptr::addr_of_mut!((*e).state), 0);
+                    // Tombstone (2), not empty (0): preserves the probe chain so a
+                    // colliding key stored later in the chain stays reachable.
+                    ptr::write(ptr::addr_of_mut!((*e).state), 2);
                     return true;
                 }
             }
@@ -315,7 +362,7 @@ impl<const V: usize> Region<V> {
                 }
                 if Self::matches(e, key, h) {
                     if Self::expired(e, now) {
-                        ptr::write(ptr::addr_of_mut!((*e).state), 0);
+                        ptr::write(ptr::addr_of_mut!((*e).state), 2); // tombstone
                         return false;
                     }
                     ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
@@ -332,14 +379,17 @@ impl<const V: usize> Region<V> {
         };
         let now = now_secs();
         let expires = if ttl > 0 { now + ttl } else { 0 };
+        let mut reuse: Option<usize> = None;
         for i in 0..PROBE {
-            let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
+            let idx = (h as usize).wrapping_add(i) % slots;
+            let e = unsafe { p.add(idx) };
             let _g = Slot::lock(e);
             unsafe {
                 let state = r_u32(ptr::addr_of!((*e).state));
-                let is_match = state == 1 && Self::matches(e, key, h) && !Self::expired(e, now);
-                if state == 0 || is_match {
-                    let cur: i64 = if is_match {
+                // Found the counter (skipping tombstones/other keys): bump in place.
+                if state == 1 && Self::matches(e, key, h) {
+                    let live = !Self::expired(e, now);
+                    let cur: i64 = if live {
                         std::str::from_utf8(&Self::read_val(e))
                             .ok()
                             .and_then(|s| s.trim().parse().ok())
@@ -348,7 +398,7 @@ impl<const V: usize> Region<V> {
                         0
                     };
                     let next = cur + delta;
-                    let exp = if is_match {
+                    let exp = if live {
                         r_u64(ptr::addr_of!((*e).expires_at))
                     } else {
                         expires
@@ -356,6 +406,33 @@ impl<const V: usize> Region<V> {
                     Self::write(e, key, next.to_string().as_bytes(), h, exp);
                     return next;
                 }
+                if (state == 0 || state == 2) && reuse.is_none() {
+                    reuse = Some(idx);
+                }
+                if state == 0 {
+                    break; // chain end: counter is absent, create it at `reuse`
+                }
+            }
+        }
+        // Create a fresh counter at the first free slot, re-checking under the lock
+        // so a racing increment doesn't get lost.
+        if let Some(idx) = reuse {
+            let e = unsafe { p.add(idx) };
+            let _g = Slot::lock(e);
+            unsafe {
+                let state = r_u32(ptr::addr_of!((*e).state));
+                if state == 1 && Self::matches(e, key, h) && !Self::expired(e, now) {
+                    let cur: i64 = std::str::from_utf8(&Self::read_val(e))
+                        .ok()
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                    let next = cur + delta;
+                    let exp = r_u64(ptr::addr_of!((*e).expires_at));
+                    Self::write(e, key, next.to_string().as_bytes(), h, exp);
+                    return next;
+                }
+                Self::write(e, key, delta.to_string().as_bytes(), h, expires);
+                return delta;
             }
         }
         delta
@@ -613,5 +690,57 @@ mod tests {
         flush();
         assert_eq!(get(b"name"), None);
         assert_eq!(get(b"session:abc"), None);
+    }
+
+    // Regression: deleting a key must not punch a hole that hides a colliding key
+    // stored later in the same probe chain (tombstone deletion).
+    #[test]
+    fn delete_preserves_colliding_chain() {
+        use std::collections::HashMap;
+        init(256, 64);
+        flush();
+        let slots = 256usize;
+        // Find two small-value keys that share a starting slot (collide).
+        let mut buckets: HashMap<usize, Vec<Vec<u8>>> = HashMap::new();
+        let (mut k1, mut k2) = (Vec::new(), Vec::new());
+        for n in 0..50_000u32 {
+            let k = format!("collide-{n}").into_bytes();
+            let s = hash_key(&k) as usize % slots;
+            let v = buckets.entry(s).or_default();
+            v.push(k);
+            if v.len() == 2 {
+                k1 = v[0].clone();
+                k2 = v[1].clone();
+                break;
+            }
+        }
+        assert!(!k1.is_empty() && !k2.is_empty(), "no colliding pair found");
+
+        // A occupies the start slot, B lands later in the same chain.
+        assert!(set(&k1, b"A", 60));
+        assert!(set(&k2, b"B", 60));
+        assert_eq!(get(&k1).as_deref(), Some(&b"A"[..]));
+        assert_eq!(get(&k2).as_deref(), Some(&b"B"[..]));
+
+        // Delete A. Before the tombstone fix this created a `state==0` hole that
+        // ended B's probe chain early ⇒ a false miss.
+        assert!(delete(&k1));
+        assert_eq!(get(&k1), None);
+        assert_eq!(
+            get(&k2).as_deref(),
+            Some(&b"B"[..]),
+            "colliding key hidden by a deleted neighbour"
+        );
+
+        // Atomic-lock correctness: with A tombstoned and B still live in the chain,
+        // add(B) must fail (B is held) — the old hole let it falsely re-acquire.
+        assert!(!add(&k2, b"B2", 60), "add falsely re-acquired a live lock");
+
+        // A tombstone must be reusable, so add(A) succeeds again.
+        assert!(add(&k1, b"A2", 60));
+        assert_eq!(get(&k1).as_deref(), Some(&b"A2"[..]));
+        // …and B is still intact after reuse.
+        assert_eq!(get(&k2).as_deref(), Some(&b"B"[..]));
+        flush();
     }
 }

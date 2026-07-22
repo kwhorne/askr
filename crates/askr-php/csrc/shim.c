@@ -70,6 +70,22 @@ static void buf_reset(buf_t *b) {
     }
 }
 
+/* Like buf_reset, but if a single big response grew the buffer past a threshold,
+ * free it so the worker doesn't retain that peak for the rest of its life (a
+ * 50 MB export shouldn't cost 50 MB of C heap forever). It re-grows from 4 KB on
+ * the next request. */
+#define ASKR_BUF_KEEP (256 * 1024)
+static void buf_reclaim(buf_t *b) {
+    if (b->cap > ASKR_BUF_KEEP) {
+        free(b->ptr);
+        b->ptr = NULL;
+        b->len = 0;
+        b->cap = 0;
+    } else {
+        buf_reset(b);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* current-request state                                             */
 /* ------------------------------------------------------------------ */
@@ -343,8 +359,9 @@ static askr_wait_fn  g_wait = NULL;
 static askr_reply_fn g_reply = NULL;
 static void         *g_ctx = NULL;
 
-/* Current worker request, populated by Rust via the setters below. */
-#define ASKR_MAX_HEADERS 128
+/* Current worker request, populated by Rust via the setters below. Overflow past
+ * these caps is dropped (never silently corrupt state), and warned once/request. */
+#define ASKR_MAX_HEADERS 256
 static char  *w_method;
 static char  *w_uri;
 static char  *w_query;
@@ -353,12 +370,17 @@ static char  *w_hvalues[ASKR_MAX_HEADERS];
 static int    w_nheaders;
 
 /* Parsed multipart POST fields + uploaded files (worker mode). */
-#define ASKR_MAX_POST 256
+#define ASKR_MAX_POST 1024
 static char  *w_pnames[ASKR_MAX_POST];
 static char  *w_pvalues[ASKR_MAX_POST];
 static int    w_npost;
 
-#define ASKR_MAX_FILES 64
+/* One-shot overflow-warning flags, cleared each request in askr_req_reset(). */
+static int    w_warn_hdr;
+static int    w_warn_post;
+static int    w_warn_files;
+
+#define ASKR_MAX_FILES 128
 typedef struct {
     char  *field;
     char  *name;
@@ -380,6 +402,7 @@ static char *dup_cstr(const char *s) {
 
 /* Setters called by Rust from inside the wait callback. */
 void askr_req_reset(void) {
+    w_warn_hdr = w_warn_post = w_warn_files = 0;
     free(w_method); w_method = NULL;
     free(w_uri);    w_uri = NULL;
     free(w_query);  w_query = NULL;
@@ -400,6 +423,10 @@ void askr_req_add_post(const char *name, const char *value) {
         w_pnames[w_npost] = dup_cstr(name);
         w_pvalues[w_npost] = dup_cstr(value);
         w_npost++;
+    } else if (!w_warn_post) {
+        w_warn_post = 1;
+        fprintf(stderr, "askr: request has >%d POST fields; extra dropped\n",
+                ASKR_MAX_POST);
     }
 }
 
@@ -413,6 +440,10 @@ void askr_req_add_file(const char *field, const char *file_name, const char *con
         w_files[w_nfiles].size = size;
         w_files[w_nfiles].error = error;
         w_nfiles++;
+    } else if (!w_warn_files) {
+        w_warn_files = 1;
+        fprintf(stderr, "askr: request has >%d uploaded files; extra dropped\n",
+                ASKR_MAX_FILES);
     }
 }
 
@@ -427,6 +458,10 @@ void askr_req_add_header(const char *name, const char *value) {
         w_hnames[w_nheaders] = dup_cstr(name);
         w_hvalues[w_nheaders] = dup_cstr(value);
         w_nheaders++;
+    } else if (!w_warn_hdr) {
+        w_warn_hdr = 1;
+        fprintf(stderr, "askr: request has >%d headers; extra dropped\n",
+                ASKR_MAX_HEADERS);
     }
 }
 
@@ -439,8 +474,8 @@ void askr_req_set_body(const char *ptr, size_t len) {
 
 /* Reset SAPI response state between iterations (no RSHUTDOWN). */
 static void worker_reset_response(void) {
-    buf_reset(&g_req.out);
-    buf_reset(&g_req.hdr);
+    buf_reclaim(&g_req.out);
+    buf_reclaim(&g_req.hdr);
     SG(sapi_headers).http_response_code = 200;
     SG(headers_sent) = 0;
     zend_llist_clean(&SG(sapi_headers).headers);
