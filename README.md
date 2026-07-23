@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v0.9.11</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v0.9.12</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v0.9.11; ARCH=$(uname -m)
+VER=v0.9.12; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -67,6 +67,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Building](docs/BUILDING.md) — `libphp` + `askr`, the extension matrix
 - [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
 - [CLI reference](docs/CLI.md) — every command and flag
+- [Hosting multiple domains](docs/HOSTING.md) — virtual hosts, redirects, multi-domain TLS
 - [Stability & compatibility](docs/STABILITY.md) — the 1.0 contract + deprecation policy
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
 - [Docker](docs/DOCKER.md) — one container replaces app+nginx+redis+queue+cron (GHCR, multi-arch)
@@ -80,7 +81,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Benchmarks](docs/BENCHMARKS.md) — vs FrankenPHP, FPM+nginx, RoadRunner (reproducible)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (0.9.11)
+## What works today (0.9.12)
 
 - Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
 - **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -160,6 +161,7 @@ Everything lives in [`docs/`](docs/README.md):
 | **0.9.9** — perf follow-through: per-thread request-field arena (no per-field `CString`), gentler `shmlock` backoff, channel-sharded SSE hub, `askr_cache_oversize_total` metric | ✅ |
 | **0.9.10** — review pass: relaxed shared-memory pointer ordering (Acquire/Release), `0700` upload temp dir, graceful flush window before worker `exit(75)` | ✅ |
 | **0.9.11** — admin bearer-token auth (`ASKR_ADMIN_TOKEN`), dropped unmaintained `rustls-pemfile`, extracted `supervisor.rs` from `main.rs`, concurrent cache stress test | ✅ |
+| **0.9.12** — multi-domain hosting: virtual hosts (`[[site]]`) + redirects (www→apex, `force_https`); streaming PHP output on `flush()`; boot crash-loop guard; TLS cert hot-reload; wider cache probe | ✅ |
 | **Next** — HTTP/3 (QUIC), OTel traces. *(io_uring deprioritised: benchmarks show PHP is 99.5% of request time, I/O ~0.5%)* | ⏳ |
 
 The biggest remaining step is the per-core **io_uring** I/O core and a

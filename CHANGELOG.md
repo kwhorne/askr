@@ -2,7 +2,11 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.12 — 2026-07-23
+
+Multi-domain hosting: one Askr instance now serves many domains/apps and redirects
+between hostnames. Plus streaming PHP output, a crash-loop guard, and TLS cert
+hot-reload. See the new [Hosting guide](docs/HOSTING.md).
 
 - **Feature (routing): virtual hosts — multiple domains/apps in one instance (Askr-32).**
   `[[site]]` entries in `askr.toml` (`hosts`, `root`, `front`) route by the `Host`
