@@ -24,7 +24,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const KEY_MAX: usize = 250;
 const VAL_SMALL: usize = 4096;
 const VAL_LARGE: usize = 64 * 1024;
-const PROBE: usize = 16;
+/// Linear-probe window. A `set` evicts only when all `PROBE` slots from the home
+/// slot are occupied by live keys, so a larger window defers eviction to a higher
+/// fill factor (fewer premature evictions when the table is, say, 70 % full) at the
+/// cost of scanning/locking more slots per op on a collision. 32 balances the two
+/// for typical slot counts (512–4096). Size the table generously and this rarely
+/// bites either way.
+const PROBE: usize = 32;
 
 #[repr(C)]
 struct Entry<const V: usize> {

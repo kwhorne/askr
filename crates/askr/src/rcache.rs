@@ -25,7 +25,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const HDR_MAX: usize = 8 * 1024;
 const BODY_MAX: usize = 128 * 1024;
 const MAX_TAGS: usize = 8;
-const PROBE: usize = 8;
+/// Linear-probe window (see the note in `cache.rs`). Widened so a response cache at
+/// high fill evicts less eagerly; the cost is scanning more slots on a collision.
+const PROBE: usize = 16;
 const TAG_SLOTS: usize = 4096;
 
 #[repr(C)]

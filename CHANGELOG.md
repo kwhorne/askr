@@ -2,6 +2,20 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+- **Feature (TLS): automatic reload on certificate change (Askr-27).** A watcher polls
+  the `--tls-cert`/`--tls-key` mtime and triggers a graceful rolling reload when they
+  change on disk (e.g. an external certbot renewal). Respawned workers re-read the
+  cert, so an external renewal now hot-reloads with no restart or manual `SIGHUP`.
+  On by default when a cert file is configured (not self-signed / not `--acme`).
+  Verified e2e: renewing the cert triggers exactly one rolling reload (no restart),
+  the server keeps serving.
+- **Perf (cache): wider probe window before eviction (Askr-25).** The KV cache probe
+  window went 16→32 and the response cache 8→16, so a `set` evicts only at a higher
+  fill factor (fewer premature evictions when the table is ~70 % full) — at the cost
+  of scanning more slots on a collision. Size tables generously and it rarely bites.
+
 ## 0.9.11 — 2026-07-23
 
 Third source-code-review pass (admin/security + hygiene) plus follow-through on the

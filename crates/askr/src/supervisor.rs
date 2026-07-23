@@ -108,6 +108,33 @@ pub fn trigger_reload() {
     roll_next();
 }
 
+/// Poll the TLS cert (and key) mtime and trigger a graceful reload when it changes,
+/// so an external renewal (certbot etc.) is picked up with no downtime. Cheap: two
+/// `stat`s every 30 s. Only changes *after* startup trigger a reload.
+fn spawn_cert_watcher(cert: PathBuf, key: Option<PathBuf>) {
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    std::thread::Builder::new()
+        .name("askr-cert-watch".into())
+        .spawn(move || {
+            let mut last = (mtime(&cert), key.as_deref().and_then(mtime));
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                let now = (mtime(&cert), key.as_deref().and_then(mtime));
+                // Only reload on a real change where the cert still exists (avoid
+                // reacting to a transient mid-renewal unlink).
+                if now != last && now.0.is_some() {
+                    last = now;
+                    tracing::info!(
+                        cert = %cert.display(),
+                        "TLS certificate changed on disk — triggering graceful reload"
+                    );
+                    trigger_reload();
+                }
+            }
+        })
+        .ok();
+}
+
 /// Fork `workers` child processes, each running an independent worker on the
 /// shared inherited listener, then supervise them: forward termination signals
 /// and reap exits.
@@ -322,6 +349,15 @@ pub(crate) fn supervise(
             record_dir: config.record_dir.clone(),
         };
         crate::admin::spawn(addr, info);
+    }
+
+    // Watch an external TLS cert on disk (e.g. a certbot renewal) and hot-reload
+    // when it changes — respawned workers re-read the cert, so no restart needed.
+    // Self-signed doesn't renew, and `--acme` manages its own certificate.
+    if !config.tls_self_signed {
+        if let Some(cert) = config.tls_cert.clone() {
+            spawn_cert_watcher(cert, config.tls_key.clone());
+        }
     }
 
     install_signals();
