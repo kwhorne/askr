@@ -14,7 +14,7 @@ Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
 ghcr.io/kwhorne/askr:0.8        # latest 0.8.x
-ghcr.io/kwhorne/askr:0.9.12      # exact
+ghcr.io/kwhorne/askr:1.0.0      # exact
 ghcr.io/kwhorne/askr:latest
 ```
 
@@ -27,7 +27,7 @@ the optional tiers compiled in — the **durable L2 SQL Anywhere backends**
 source:
 
 ```
-ghcr.io/kwhorne/askr:0.9.12-full
+ghcr.io/kwhorne/askr:1.0.0-full
 ghcr.io/kwhorne/askr:0.9-full
 ghcr.io/kwhorne/askr:full
 ```

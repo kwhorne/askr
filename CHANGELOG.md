@@ -1,6 +1,36 @@
 # Changelog
 
-All notable changes to Askr. This is pre-1.0 exploratory work.
+All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
+and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
+
+## 1.0.0 — 2026-07-23
+
+**Askr is 1.0.** The stable surface is now **frozen under SemVer** — see
+[STABILITY.md](docs/STABILITY.md). There are no functional changes since 0.9.12; this
+release promotes the battle-tested 0.9.x line into a stability commitment.
+
+What 1.0 locks down (stable within `1.x`; a breaking change needs `2.0` + a
+deprecation cycle):
+
+- **CLI** — subcommands (`serve`/`test`/`replay`/`doctor`/`config-check`/`upgrade`/
+  `status`) and their documented flags.
+- **Config** — every documented `askr.toml` key.
+- **Environment** — the `ASKR_*` variables.
+- **PHP bridge** — the `askr_*` functions injected into PHP.
+- **HTTP surface** — `/askr/*`, the `Askr-Cache`/`X-Askr-Cache` headers, `Alt-Svc`.
+- **Build features** — `sql-backend`, `observ`, `otel`, `http3` (all in the `-full`
+  build); the default build stays feature-free.
+
+The 1.0 line is the whole PHP application server in one binary: embedded **PHP 8.5**
+(non-ZTS, OPcache + JIT) running real **Laravel 13** with no FPM/FastCGI; process-per-
+core prefork or CoW workers; Redis-free sessions/cache/locks/queue/broadcasting;
+optional durable **L2** backends and an **observability** sink over the MySQL wire;
+**HTTP/1.1 + HTTP/2 + HTTP/3**; auto-TLS (ACME) + cert hot-reload; multi-domain
+hosting (virtual hosts + redirects); Linux sandboxing; and self-update.
+
+Validated by a stress campaign in a local OrbStack: tens of millions of requests at
+**100 % success** with bounded memory, the observability sink **DB-verified against
+ElyraSQL**, and multi-domain routing correct under concurrency.
 
 ## 0.9.12 — 2026-07-23
 

@@ -4,15 +4,14 @@ This document defines what Askr promises not to break, and how changes are rolle
 out. It is the compatibility contract you can build tooling, deployments, and apps
 against.
 
-## Status: pre-1.0
+## Status: stable (1.x)
 
-Askr is currently in the `0.x` series. Per SemVer, **`0.x` makes no stability
-promise** — a minor bump (`0.9` → `0.10`) may change any of the surfaces below.
-In practice we already treat the surfaces as stable and avoid gratuitous breakage,
-but the hard guarantee below begins at **1.0**.
+Askr is **1.0** — the guarantees below are **now in effect**. Within the `1.x`
+series the surfaces listed here are stable: a breaking change to any of them
+requires a major bump (`2.0`) and the deprecation cycle described below.
 
-The list here *is* the freeze list: it's what 1.0 will lock down. If something you
-depend on isn't listed, ask — it either belongs here or is intentionally internal.
+If something you depend on isn't listed, ask — it either belongs here or is
+intentionally internal.
 
 ## What SemVer covers (from 1.0)
 
@@ -127,5 +126,6 @@ cert-cache directory). The old spelling still works as an alias.
 ## Reporting a break
 
 If an upgrade within a major version breaks one of the stable surfaces above, that's
-a bug — please open an issue with the before/after and the version pair. Pre-1.0,
-breaking changes are called out in [CHANGELOG.md](../CHANGELOG.md).
+a bug — please open an issue with the before/after and the version pair. Any
+intentional change to a stable surface is called out in
+[CHANGELOG.md](../CHANGELOG.md).

@@ -2,12 +2,13 @@
 
 ## Supported versions
 
-Askr is pre-1.0. Security fixes target the latest released version on `main`.
+Askr follows Semantic Versioning from 1.0. Security fixes target the latest `1.x`
+release.
 
 | Version | Supported |
 | --- | --- |
-| 0.9.x | ✅ |
-| < 0.9 | ❌ |
+| 1.x | ✅ |
+| < 1.0 | ❌ |
 
 ## Reporting a vulnerability
 
