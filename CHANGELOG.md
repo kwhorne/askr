@@ -4,6 +4,14 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (routing): virtual hosts — multiple domains/apps in one instance (Askr-32).**
+  `[[site]]` entries in `askr.toml` (`hosts`, `root`, `front`) route by the `Host`
+  header to per-site document roots, with a `*.suffix` glob and a fallback to
+  `[server] root`. Static files are served per-site in any mode; **full dynamic
+  dispatch (a different app per host) works in per-request mode** — worker mode still
+  serves one booted app (statics per-site), so multi-app worker pools remain future
+  work. Verified e2e: three hosts → three apps + per-site static files, glob + default
+  fallback. No more one-Askr-per-app on a shared server.
 - **Feature (routing): redirect engine — `www`→apex and http→https (Askr-33).**
   Declarative host redirects in `askr.toml` (`[[redirect]] from = "www.x.no", to =
   "https://x.no"`, default 308, path + query preserved, `*.suffix` glob) plus a

@@ -123,6 +123,34 @@ status = 301
 
 For plain-HTTP→HTTPS across all hosts, use `[server] force_https = true` instead.
 
+### `[[site]]`
+
+Virtual hosts — serve several domains/apps from **one** Askr instance, routed by the
+`Host` header. Each site has its own document root + front controller; `hosts` match
+exactly or as a `*.suffix` glob. A request whose Host matches no site falls back to
+`[server] root`.
+
+```toml
+[server]
+listen = "0.0.0.0:443"
+root   = "/var/www/default/public"   # fallback
+
+[[site]]
+hosts = ["domene.no", "*.domene.no"]
+root  = "/var/www/domene/public"
+
+[[site]]
+hosts = ["annet.no"]
+root  = "/var/www/annet/public"
+front = "index.php"
+```
+
+Static files are served from the matching site's root in any mode. **Full dynamic
+dispatch (a different app per host) works in per-request mode** — each request runs
+that site's front controller fresh. In **worker mode** the single booted app is
+fixed, so give each app its own instance (or route by host inside the worker script)
+until per-site worker pools land. Combine with `[[redirect]]` for per-host www→apex.
+
 ### `[cache]`
 
 Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See

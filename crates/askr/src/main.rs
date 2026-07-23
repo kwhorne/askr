@@ -541,6 +541,7 @@ fn main() -> anyhow::Result<()> {
                     header_read_timeout,
                     force_https,
                     redirects: Vec::new(),
+                    sites: Vec::new(),
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

@@ -44,6 +44,21 @@ pub struct FileConfig {
     /// Host redirects: `[[redirect]] from = "www.x.no" to = "https://x.no"`.
     #[serde(default)]
     pub redirect: Vec<RedirectRule>,
+    /// Virtual hosts: `[[site]] hosts = [...] root = "…"` — route by Host header.
+    #[serde(default)]
+    pub site: Vec<SiteSpec>,
+}
+
+/// A virtual host: one or more `hosts` (exact or `*.suffix`) served from `root`
+/// with its own `front` controller. Full dynamic dispatch requires per-request
+/// mode; in worker mode statics are per-site but the booted app is fixed.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SiteSpec {
+    pub hosts: Vec<String>,
+    pub root: PathBuf,
+    #[serde(default = "default_front")]
+    pub front: String,
 }
 
 /// A declarative host redirect (e.g. `www.domene.no` → `https://domene.no`). The
@@ -336,6 +351,28 @@ impl FileConfig {
             docroot.join(&front).display()
         );
 
+        // Resolve [[site]] virtual hosts (each with its own docroot + front
+        // controller). Host-routed per request; full dynamic dispatch is
+        // per-request mode — in worker mode the booted app is fixed (statics are
+        // still served per site).
+        let mut sites = Vec::new();
+        for s in &self.site {
+            let sroot = std::fs::canonicalize(&s.root)
+                .with_context(|| format!("site root {} not found", s.root.display()))?;
+            let sfront = PathBuf::from(&s.front);
+            anyhow::ensure!(
+                sroot.join(&sfront).is_file(),
+                "site front controller not found: {}",
+                sroot.join(&sfront).display()
+            );
+            anyhow::ensure!(!s.hosts.is_empty(), "each [[site]] needs at least one host");
+            sites.push(crate::server::Site {
+                hosts: s.hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
+                docroot: sroot,
+                front_controller: sfront,
+            });
+        }
+
         let workers = match self.server.workers.as_str() {
             "auto" => cpus.max(1),
             n => n
@@ -435,6 +472,7 @@ impl FileConfig {
                 header_read_timeout: self.server.header_read_timeout,
                 force_https: self.server.force_https,
                 redirects: self.redirect.clone(),
+                sites,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

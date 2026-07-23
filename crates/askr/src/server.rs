@@ -118,6 +118,29 @@ pub struct Config {
     pub force_https: bool,
     /// Declarative host redirects (e.g. `www.x.no` → `https://x.no`).
     pub redirects: Vec<crate::config::RedirectRule>,
+    /// Virtual hosts routed by the `Host` header (empty = single-site).
+    pub sites: Vec<Site>,
+}
+
+/// A virtual host: its docroot + front controller, matched by `hosts`.
+#[derive(Clone)]
+pub struct Site {
+    pub hosts: Vec<String>,
+    pub docroot: PathBuf,
+    pub front_controller: PathBuf,
+}
+
+impl Config {
+    /// Resolve the docroot + front controller for a request `Host` — the matching
+    /// `[[site]]`, or the default single site when none matches.
+    pub fn site_for(&self, host: &str) -> (&std::path::Path, &std::path::Path) {
+        for s in &self.sites {
+            if s.hosts.iter().any(|h| host_matches(host, h)) {
+                return (&s.docroot, &s.front_controller);
+            }
+        }
+        (&self.docroot, &self.front_controller)
+    }
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -472,13 +495,28 @@ where
         .unwrap_or("")
         .to_owned();
 
+    // Request Host (lowercased, port stripped) — drives redirects + virtual hosts.
+    let host = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
     // Host / scheme redirects (www→apex, http→https) — before any dispatch.
     if config.force_https || !config.redirects.is_empty() {
-        if let Some(resp) = redirect_target(&req, config, &rt) {
+        if let Some(resp) = redirect_target(&req, &host, config, &rt) {
             finish(&rt, &resp, t_start, 0);
             return Ok(resp);
         }
     }
+
+    // Virtual host: this request's docroot + front controller (a matching
+    // `[[site]]`, or the default single site).
+    let (docroot, front_controller) = config.site_for(&host);
 
     // Pusher WebSocket endpoint: /app/{key} (drop-in Reverb, #6).
     if rt.pusher_enabled
@@ -509,7 +547,7 @@ where
     // syscall on the async path).
     let rel = sanitize(req.uri().path());
     if !rel.as_os_str().is_empty() {
-        let candidate = config.docroot.join(&rel);
+        let candidate = docroot.join(&rel);
         if let Ok(meta) = tokio::fs::metadata(&candidate).await {
             if meta.is_file() {
                 return Ok(serve_static(&candidate, &meta, req.method(), req.headers()).await);
@@ -611,8 +649,8 @@ where
         }
     }
 
-    let script = config.docroot.join(&config.front_controller);
-    let script_name = format!("/{}", config.front_controller.display());
+    let script = docroot.join(front_controller);
+    let script_name = format!("/{}", front_controller.display());
 
     #[cfg(feature = "otel")]
     let read_t0 = Instant::now();
@@ -637,7 +675,7 @@ where
                 let mut request = cgi::build_request(
                     &parts,
                     Vec::new(), // body consumed while streaming; PHP uses $_POST/$_FILES
-                    &config.docroot,
+                    docroot,
                     &script,
                     &script_name,
                     peer,
@@ -705,7 +743,7 @@ where
         let request = cgi::build_request(
             &parts,
             body_bytes,
-            &config.docroot,
+            docroot,
             &script,
             &script_name,
             peer,
@@ -903,18 +941,10 @@ fn redirect_to(location: String, status: u16) -> Response<ResBody> {
 /// path + query) if one matches, else `None` (request proceeds normally).
 fn redirect_target<B>(
     req: &Request<B>,
+    host: &str,
     config: &Config,
     rt: &Runtime,
 ) -> Option<Response<ResBody>> {
-    let host = req
-        .headers()
-        .get(hyper::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
     let pq = req
         .uri()
         .path_and_query()
@@ -936,7 +966,7 @@ fn redirect_target<B>(
     }
 
     for rule in &config.redirects {
-        if host_matches(&host, &rule.from) {
+        if host_matches(host, &rule.from) {
             let to = rule.to.trim_end_matches('/');
             return Some(redirect_to(format!("{to}{pq}"), rule.status));
         }
@@ -1116,8 +1146,9 @@ async fn refresh_entry(
 ) {
     let config = &rt.config;
     let port = config.listen.port();
-    let script = config.docroot.join(&config.front_controller);
-    let script_name = format!("/{}", config.front_controller.display());
+    let (docroot, front_controller) = config.site_for(&host);
+    let script = docroot.join(front_controller);
+    let script_name = format!("/{}", front_controller.display());
 
     let mut builder = hyper::Request::builder().method(method).uri(uri);
     builder = builder.header(hyper::header::HOST, host);
@@ -1132,7 +1163,7 @@ async fn refresh_entry(
     let request = cgi::build_request(
         &parts,
         Vec::new(),
-        &config.docroot,
+        docroot,
         &script,
         &script_name,
         peer,
