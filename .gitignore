@@ -1,3 +1,8 @@
 /target
 /vendor/php-build
 /dist
+
+# Local secrets / environment (never commit)
+.env
+.env.*
+!.env.example
