@@ -152,6 +152,11 @@ enum Command {
         #[arg(long)]
         http3: bool,
 
+        /// Redirect plain HTTP requests to HTTPS (308). (Host redirects like
+        /// www→apex are configured via `[[redirect]]` in askr.toml.)
+        #[arg(long)]
+        force_https: bool,
+
         /// Seconds a client may take to finish the TLS handshake (slowloris guard).
         #[arg(long, default_value = "10")]
         tls_handshake_timeout: u64,
@@ -410,6 +415,7 @@ fn main() -> anyhow::Result<()> {
             shadow_to,
             shadow_sample,
             http3,
+            force_https,
             tls_handshake_timeout,
             header_read_timeout,
             tls_cert,
@@ -533,6 +539,8 @@ fn main() -> anyhow::Result<()> {
                     http3,
                     tls_handshake_timeout,
                     header_read_timeout,
+                    force_https,
+                    redirects: Vec::new(),
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

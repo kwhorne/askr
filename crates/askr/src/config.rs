@@ -41,6 +41,25 @@ pub struct FileConfig {
     /// Arbitrary supervised external commands: `[[sidecar]] command = "…"`.
     #[serde(default)]
     pub sidecar: Vec<SidecarSpec>,
+    /// Host redirects: `[[redirect]] from = "www.x.no" to = "https://x.no"`.
+    #[serde(default)]
+    pub redirect: Vec<RedirectRule>,
+}
+
+/// A declarative host redirect (e.g. `www.domene.no` → `https://domene.no`). The
+/// request path + query are preserved; `status` defaults to 308 (permanent, keeps
+/// the method). `from` matches the Host header exactly or as a `*.suffix` glob.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RedirectRule {
+    pub from: String,
+    pub to: String,
+    #[serde(default = "default_redirect_status")]
+    pub status: u16,
+}
+
+fn default_redirect_status() -> u16 {
+    308
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +107,10 @@ pub struct ServerSection {
     /// Mark requests as HTTPS in $_SERVER (e.g. behind a TLS terminator).
     #[serde(default)]
     pub https: bool,
+    /// Redirect plain-HTTP requests to HTTPS (308). Uses the connection's TLS
+    /// state, `https`, or an `X-Forwarded-Proto` header to decide.
+    #[serde(default)]
+    pub force_https: bool,
     /// Structured (JSON) access log destination: a file path, or "-" for stdout.
     pub access_log: Option<PathBuf>,
     /// Serve HTTP/3 (QUIC) on the TLS port (requires TLS; build with `http3`).
@@ -229,6 +252,7 @@ impl Default for ServerSection {
             shadow_sample: default_shadow_sample(),
             max_body_size: default_body(),
             https: false,
+            force_https: false,
             access_log: None,
             http3: false,
             tls_handshake_timeout: default_handshake_timeout(),
@@ -409,6 +433,8 @@ impl FileConfig {
                 http3: self.server.http3,
                 tls_handshake_timeout: self.server.tls_handshake_timeout,
                 header_read_timeout: self.server.header_read_timeout,
+                force_https: self.server.force_https,
+                redirects: self.redirect.clone(),
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

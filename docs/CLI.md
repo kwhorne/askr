@@ -37,6 +37,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--https` | off | Mark requests as HTTPS in `$_SERVER` (behind a TLS terminator). |
 | `--ini <LINES>` | — | Extra `php.ini` lines (e.g. opcache). Overrides `$ASKR_PHP_INI`. |
 | `--max-body-size <SIZE>` | `16M` | Reject larger bodies with `413` (`K`/`M`/`G`). |
+| `--force-https` | off | Redirect plain HTTP to HTTPS (308). Host redirects (www→apex) go in `[[redirect]]` in `askr.toml`. |
 | `--tls-handshake-timeout <SECS>` | `10` | Max time a client may take to finish the TLS handshake (slowloris guard). |
 | `--header-read-timeout <SECS>` | `15` | Max time a client may take to send request headers (slowloris guard). |
 

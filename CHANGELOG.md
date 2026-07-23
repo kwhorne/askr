@@ -4,6 +4,13 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (routing): redirect engine — `www`→apex and http→https (Askr-33).**
+  Declarative host redirects in `askr.toml` (`[[redirect]] from = "www.x.no", to =
+  "https://x.no"`, default 308, path + query preserved, `*.suffix` glob) plus a
+  `--force-https` / `[server] force_https` flag that 308s plain HTTP to HTTPS (using
+  the connection's TLS state, `https`, or `X-Forwarded-Proto`). Runs before any
+  dispatch. Verified e2e: www→apex (308), glob (301), no-rule host passes through,
+  force_https redirects while an `X-Forwarded-Proto: https` request is left alone.
 - **Feature (worker mode): PHP output streams as it's flushed (Askr-26).** When a
   worker script calls `flush()` mid-request (a Symfony `StreamedResponse`, an SSE
   endpoint, a large `readfile()` export), Askr now streams each chunk to the client

@@ -114,6 +114,10 @@ pub struct Config {
     pub tls_handshake_timeout: u64,
     /// Seconds a client may take to send the full request headers (slowloris guard).
     pub header_read_timeout: u64,
+    /// Redirect plain HTTP to HTTPS (308).
+    pub force_https: bool,
+    /// Declarative host redirects (e.g. `www.x.no` → `https://x.no`).
+    pub redirects: Vec<crate::config::RedirectRule>,
 }
 
 /// Shared per-worker runtime state for recycling/draining.
@@ -467,6 +471,14 @@ where
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_owned();
+
+    // Host / scheme redirects (www→apex, http→https) — before any dispatch.
+    if config.force_https || !config.redirects.is_empty() {
+        if let Some(resp) = redirect_target(&req, config, &rt) {
+            finish(&rt, &resp, t_start, 0);
+            return Ok(resp);
+        }
+    }
 
     // Pusher WebSocket endpoint: /app/{key} (drop-in Reverb, #6).
     if rt.pusher_enabled
@@ -866,6 +878,70 @@ fn otel_fast(
             phases: Vec::new(),
         });
     }
+}
+
+/// Match a Host against a redirect `from` pattern: exact, or `*.suffix`.
+fn host_matches(host: &str, pattern: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        host == suffix || host.ends_with(&format!(".{suffix}"))
+    } else {
+        host.eq_ignore_ascii_case(pattern)
+    }
+}
+
+/// A bare redirect response (status + `Location`), no body.
+fn redirect_to(location: String, status: u16) -> Response<ResBody> {
+    Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::PERMANENT_REDIRECT))
+        .header(hyper::header::LOCATION, location)
+        .header(hyper::header::CONTENT_LENGTH, "0")
+        .body(full(Bytes::new()))
+        .unwrap()
+}
+
+/// Apply `force_https` then the host redirect rules. Returns a redirect (preserving
+/// path + query) if one matches, else `None` (request proceeds normally).
+fn redirect_target<B>(
+    req: &Request<B>,
+    config: &Config,
+    rt: &Runtime,
+) -> Option<Response<ResBody>> {
+    let host = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let pq = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+
+    if config.force_https && !host.is_empty() {
+        let secure = rt.tls.is_some()
+            || config.https
+            || req
+                .headers()
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.eq_ignore_ascii_case("https"))
+                .unwrap_or(false);
+        if !secure {
+            return Some(redirect_to(format!("https://{host}{pq}"), 308));
+        }
+    }
+
+    for rule in &config.redirects {
+        if host_matches(&host, &rule.from) {
+            let to = rule.to.trim_end_matches('/');
+            return Some(redirect_to(format!("{to}{pq}"), rule.status));
+        }
+    }
+    None
 }
 
 /// Record metrics and advance the recycle counter for a finished request.

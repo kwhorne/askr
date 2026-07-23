@@ -34,6 +34,7 @@ typos fail fast in `config-check`.
 | `tls_handshake_timeout` | int | `10` | Seconds a client may take to finish the TLS handshake (slowloris guard). |
 | `header_read_timeout` | int | `15` | Seconds a client may take to send request headers (slowloris guard). |
 | `https` | bool | `false` | Force HTTPS in `$_SERVER` (e.g. behind a TLS terminator). Implied by TLS. |
+| `force_https` | bool | `false` | Redirect plain HTTP to HTTPS (308), using the connection's TLS state / `https` / `X-Forwarded-Proto`. |
 | `workers_min` | int | = `workers` | CoW autoscaling floor (with `--cow`). |
 | `workers_max` | int | = `workers` | CoW autoscaling ceiling (> min enables autoscaling). |
 | `access_log` | path | — | JSON access log per request; `-` for stdout. Off if unset. |
@@ -102,6 +103,25 @@ Run via `sh -c` in `$ASKR_APP_BASE`. Used for e.g. Inertia SSR — see [Docker](
 [[sidecar]]
 command = "node bootstrap/ssr/ssr.mjs"
 ```
+
+### `[[redirect]]`
+
+Declarative host redirects (array of tables), evaluated before any dispatch. `from`
+matches the `Host` header exactly or as a `*.suffix` glob; the request path + query
+are preserved; `status` defaults to 308 (permanent, method-preserving).
+
+```toml
+[[redirect]]
+from = "www.domene.no"
+to   = "https://domene.no"     # → https://domene.no/<path>?<query>
+
+[[redirect]]
+from   = "*.old.no"
+to     = "https://ny.no"
+status = 301
+```
+
+For plain-HTTP→HTTPS across all hosts, use `[server] force_https = true` instead.
 
 ### `[cache]`
 
