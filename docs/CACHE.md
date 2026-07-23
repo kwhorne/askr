@@ -120,6 +120,12 @@ behind `Cache::add()` and `Cache::lock()`. The store implements Laravel's
 - **Eviction:** the probe window (16 slots) evicts an expired entry, else the
   oldest-written one; `askr_cache_evictions_total` counts evictions. Sizing the
   table generously avoids eviction under load.
+- **Oversize values:** a value larger than the largest slot (64 KB) isn't cached —
+  `set` returns `false` and `askr_cache_oversize_total` increments (also logged at
+  debug), so dropped large sessions/fragments are visible rather than silent.
+- **Deletion is tombstoned:** a deleted/expired slot becomes a tombstone (not an
+  empty hole), so a colliding key stored later in the same probe chain stays
+  reachable; inserts reuse tombstones.
 - **TTL** is lazy (checked on read) — expired entries free their slot on the next
   access to it.
 - **Best-effort under crashes:** a per-slot spinlock is stolen if a holder dies
