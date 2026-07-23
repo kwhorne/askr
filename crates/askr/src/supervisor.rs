@@ -45,6 +45,15 @@ pub(crate) static CANARY_DEADLINE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static CANARY_ERR_BASE: AtomicU64 = AtomicU64::new(0);
 pub(crate) const CANARY_WINDOW_SECS: u64 = 5;
 pub(crate) const CANARY_ERR_THRESHOLD: u64 = 3;
+// Crash-loop guard: a worker that dies within BOOT_FAIL_SECS of being spawned is a
+// boot failure (bad TLS cert, bad config, panic on startup) rather than normal
+// recycling. If enough boot failures pile up within FASTFAIL_WINDOW_SECS the master
+// gives up instead of respawning forever and burning a core.
+pub(crate) static SPAWN_AT: [AtomicU64; MAX_WORKERS] = [const { AtomicU64::new(0) }; MAX_WORKERS];
+pub(crate) static FASTFAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static FASTFAIL_WINDOW: AtomicU64 = AtomicU64::new(0);
+pub(crate) const BOOT_FAIL_SECS: u64 = 3;
+pub(crate) const FASTFAIL_WINDOW_SECS: u64 = 30;
 
 /// Aggregate error signal (BAD_GATEWAY + app 5xx) for the canary check.
 pub(crate) fn error_count() -> u64 {
@@ -310,6 +319,7 @@ pub(crate) fn supervise(
             }
             pid => {
                 CHILDREN[i].store(pid, Ordering::SeqCst);
+                SPAWN_AT[i].store(now_secs(), Ordering::SeqCst);
                 let label = match kind {
                     Kind::Web => "web",
                     Kind::Queue => "queue",
@@ -393,6 +403,38 @@ pub(crate) fn supervise(
                         // A queue worker scaled out of the desired set: let it go.
                         tracing::info!(pid, worker = i, "queue worker scaled down");
                     } else {
+                        // Crash-loop guard: a worker that died within BOOT_FAIL_SECS
+                        // of spawn *with a non-zero exit* is a boot failure (bad
+                        // cert/config, or an app that fatals on the first request) —
+                        // not normal recycling, which drains and exits 0. Too many in
+                        // a short window ⇒ give up instead of respawning forever.
+                        let alive = now_secs().saturating_sub(SPAWN_AT[i].load(Ordering::SeqCst));
+                        let failed_exit = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0;
+                        if alive < BOOT_FAIL_SECS && failed_exit {
+                            let now = now_secs();
+                            if now.saturating_sub(FASTFAIL_WINDOW.load(Ordering::SeqCst))
+                                > FASTFAIL_WINDOW_SECS
+                            {
+                                FASTFAIL_WINDOW.store(now, Ordering::SeqCst);
+                                FASTFAIL_COUNT.store(1, Ordering::SeqCst);
+                            } else {
+                                let n = FASTFAIL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+                                if n >= (workers * 3).max(10) {
+                                    tracing::error!(
+                                        worker = i,
+                                        failures = n,
+                                        window_secs = FASTFAIL_WINDOW_SECS,
+                                        "workers are crash-looping on boot — check the TLS \
+                                         cert (must be X.509 v3 with a SAN) / config; giving up"
+                                    );
+                                    kill_all(libc::SIGTERM);
+                                    std::process::exit(1);
+                                }
+                            }
+                        } else {
+                            // Survived long enough to be healthy — clear the streak.
+                            FASTFAIL_COUNT.store(0, Ordering::SeqCst);
+                        }
                         tracing::info!(pid, worker = i, "worker exited; respawning");
                         RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
                         spawn_slot(i);

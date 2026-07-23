@@ -4,6 +4,13 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Robustness (supervisor): fail fast on a boot crash-loop (Askr-31).** A worker that
+  dies within 3 s of spawn *with a non-zero exit* is a boot failure (an invalid TLS
+  cert, bad config, or an app that fatals on the first request) rather than normal
+  recycling — which drains and exits 0. If enough pile up (≥ `max(workers×3, 10)`)
+  within 30 s the master logs a clear error and exits instead of respawning forever
+  and burning a core. Verified: an invalid (X.509 v1) cert now makes the master give
+  up in ~1 s, while 200 rapid `--max-requests` recycles don't trip it.
 - **Feature (TLS): automatic reload on certificate change (Askr-27).** A watcher polls
   the `--tls-cert`/`--tls-key` mtime and triggers a graceful rolling reload when they
   change on disk (e.g. an external certbot renewal). Respawned workers re-read the
