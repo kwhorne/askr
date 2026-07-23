@@ -4,6 +4,17 @@ All notable changes to Askr. This is pre-1.0 exploratory work.
 
 ## Unreleased
 
+- **Feature (worker mode): PHP output streams as it's flushed (Askr-26).** When a
+  worker script calls `flush()` mid-request (a Symfony `StreamedResponse`, an SSE
+  endpoint, a large `readfile()` export), Askr now streams each chunk to the client
+  as PHP produces it — chunked transfer, no `Content-Length` — instead of buffering
+  the whole body first. Wired through a new SAPI flush hook in the C shim that sends
+  headers once then body chunks, a `Reply::Stream` variant carrying an `mpsc` body
+  channel with back-pressure (a slow client pauses PHP, bounded memory), and a
+  streaming response in the server. The buffered path is unchanged (a normal response
+  never flushes mid-handler), so cache/compression still apply to it. Verified e2e:
+  5 chunks arrive ~200 ms apart (chunked, no buffering); buffered responses (status,
+  headers, POST) byte-identical.
 - **Robustness (supervisor): fail fast on a boot crash-loop (Askr-31).** A worker that
   dies within 3 s of spawn *with a non-zero exit* is a boot failure (an invalid TLS
   cert, bad config, or an app that fatals on the first request) rather than normal

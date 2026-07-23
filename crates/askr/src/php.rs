@@ -23,9 +23,21 @@ use tokio::sync::{mpsc, oneshot};
 
 use askr_php::{Interpreter, Request, Response};
 
+/// What the interpreter hands back for one request: either a fully buffered
+/// response (the common case — cacheable, compressible), or a streaming response
+/// whose body arrives in chunks as PHP `flush()`es (SSE, large exports).
+pub enum Reply {
+    Buffered(Response),
+    Stream {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: mpsc::Receiver<bytes::Bytes>,
+    },
+}
+
 struct Job {
     req: Request,
-    reply: oneshot::Sender<Result<Response, String>>,
+    reply: oneshot::Sender<Result<Reply, String>>,
 }
 
 /// A handle to the pinned PHP interpreter thread. Cheap to clone.
@@ -64,7 +76,10 @@ impl Php {
                 tracing::info!(version = %php.php_version(), "embedded PHP ready (per-request)");
 
                 while let Some(job) = rx.blocking_recv() {
-                    let res = php.handle(&job.req).map_err(|e| e.to_string());
+                    let res = php
+                        .handle(&job.req)
+                        .map(Reply::Buffered)
+                        .map_err(|e| e.to_string());
                     let _ = job.reply.send(res);
                 }
             })?;
@@ -106,7 +121,12 @@ impl Php {
                 crate::broadcast::register_bridge();
                 tracing::info!("embedded PHP ready (worker mode), running worker script");
 
-                let mut bridge = WorkerBridge { rx, pending: None };
+                register_stream_callbacks();
+                let mut bridge = WorkerBridge {
+                    rx,
+                    pending: None,
+                    stream: None,
+                };
                 let ctx = &mut bridge as *mut WorkerBridge as *mut c_void;
                 // SAFETY: runs on this thread with the engine started; ctx
                 // outlives the call (the loop blocks here until it ends).
@@ -156,6 +176,7 @@ impl Php {
             Ok(c) => c,
             Err(_) => return -1,
         };
+        register_stream_callbacks();
         // SAFETY: uses the worker-bridge trampolines; the initial ctx is null —
         // each CoW worker swaps in its own via `cow_bridge()` before serving.
         unsafe {
@@ -172,14 +193,18 @@ impl Php {
     /// `Php` handle for its server. The interpreter + booted app are inherited.
     pub fn cow_bridge() -> Php {
         let (tx, rx) = mpsc::channel::<Job>(1024);
-        let bridge = Box::into_raw(Box::new(WorkerBridge { rx, pending: None }));
+        let bridge = Box::into_raw(Box::new(WorkerBridge {
+            rx,
+            pending: None,
+            stream: None,
+        }));
         // SAFETY: the shim uses this pointer as the worker ctx for wait/reply.
         unsafe { askr_php::worker::askr_php_swap_worker_ctx(bridge as *mut c_void) };
         Php { tx }
     }
 
     /// Run one request through the interpreter.
-    pub async fn handle(&self, req: Request) -> Result<Response, String> {
+    pub async fn handle(&self, req: Request) -> Result<Reply, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Job { req, reply })
@@ -201,7 +226,9 @@ fn wait_ready(ready_rx: std::sync::mpsc::Receiver<Result<(), String>>) -> anyhow
 
 struct WorkerBridge {
     rx: mpsc::Receiver<Job>,
-    pending: Option<oneshot::Sender<Result<Response, String>>>,
+    pending: Option<oneshot::Sender<Result<Reply, String>>>,
+    // Active streaming body sender (set on the first flush of a streaming request).
+    stream: Option<mpsc::Sender<bytes::Bytes>>,
 }
 
 impl WorkerBridge {
@@ -210,6 +237,7 @@ impl WorkerBridge {
             Some(job) => {
                 load_request(&job.req);
                 self.pending = Some(job.reply);
+                self.stream = None;
                 1
             }
             None => 0,
@@ -218,13 +246,45 @@ impl WorkerBridge {
 
     fn reply(&mut self, body: Vec<u8>, headers: Vec<(String, String)>, status: u16) {
         if let Some(tx) = self.pending.take() {
-            let _ = tx.send(Ok(Response {
+            let _ = tx.send(Ok(Reply::Buffered(Response {
                 status,
                 headers,
                 body,
                 php_status: 0,
+            })));
+        }
+    }
+
+    /// First flush of a streaming request: hand the client a streaming response
+    /// (status + headers + a body channel) and keep the sender to feed chunks.
+    fn stream_begin(&mut self, headers: Vec<(String, String)>, status: u16) {
+        if let Some(tx) = self.pending.take() {
+            // Bounded: if the client can't keep up, `blocking_send` in
+            // `stream_chunk` back-pressures the interpreter thread (pauses PHP),
+            // exactly like a blocking write in FPM — bounded memory, no runaway.
+            let (body_tx, body) = mpsc::channel::<bytes::Bytes>(16);
+            self.stream = Some(body_tx);
+            let _ = tx.send(Ok(Reply::Stream {
+                status,
+                headers,
+                body,
             }));
         }
+    }
+
+    fn stream_chunk(&mut self, chunk: bytes::Bytes) {
+        if let Some(tx) = &self.stream {
+            // Block the interpreter thread if the client is slow (back-pressure).
+            // A send error means the client hung up — stop streaming.
+            if tx.blocking_send(chunk).is_err() {
+                self.stream = None;
+            }
+        }
+    }
+
+    fn stream_end(&mut self) {
+        // Dropping the sender closes the body stream (EOF to the client).
+        self.stream = None;
     }
 }
 
@@ -337,6 +397,49 @@ extern "C" fn reply_trampoline(
         parse_headers(raw)
     };
     bridge.reply(body, headers, status.max(0) as u16);
+}
+
+extern "C" fn stream_begin_trampoline(
+    ctx: *mut c_void,
+    hdrs: *const c_char,
+    hlen: usize,
+    status: i32,
+) {
+    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+    let headers = if hdrs.is_null() || hlen == 0 {
+        Vec::new()
+    } else {
+        parse_headers(unsafe { std::slice::from_raw_parts(hdrs as *const u8, hlen) })
+    };
+    bridge.stream_begin(headers, status.max(0) as u16);
+}
+
+extern "C" fn stream_chunk_trampoline(ctx: *mut c_void, ptr: *const c_char, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+    let chunk =
+        bytes::Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) });
+    bridge.stream_chunk(chunk);
+}
+
+extern "C" fn stream_end_trampoline(ctx: *mut c_void) {
+    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+    bridge.stream_end();
+}
+
+/// Register the streaming-reply callbacks with the shim (global; the shim routes
+/// them to the current worker ctx). Call once on the interpreter thread.
+fn register_stream_callbacks() {
+    // SAFETY: sets three global fn pointers in the shim; idempotent.
+    unsafe {
+        askr_php::worker::askr_php_set_stream_callbacks(
+            stream_begin_trampoline,
+            stream_chunk_trampoline,
+            stream_end_trampoline,
+        );
+    }
 }
 
 fn parse_headers(raw: &[u8]) -> Vec<(String, String)> {

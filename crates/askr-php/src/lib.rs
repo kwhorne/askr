@@ -319,6 +319,22 @@ pub mod worker {
     pub type ReplyFn =
         extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize, c_int);
 
+    /// Streaming reply callbacks (used when a worker script flush()es mid-request):
+    /// begin (headers + status, once), chunk (a body slice), end (close).
+    pub type StreamBeginFn = extern "C" fn(*mut c_void, *const c_char, usize, c_int);
+    pub type StreamChunkFn = extern "C" fn(*mut c_void, *const c_char, usize);
+    pub type StreamEndFn = extern "C" fn(*mut c_void);
+
+    extern "C" {
+        /// Register the streaming-reply callbacks. Pass all three; when set and the
+        /// script flushes, the response streams instead of buffering.
+        pub fn askr_php_set_stream_callbacks(
+            begin: StreamBeginFn,
+            chunk: StreamChunkFn,
+            end: StreamEndFn,
+        );
+    }
+
     extern "C" {
         /// Run the worker script in one long-lived request context. Blocks
         /// until the loop ends. Must be called on the interpreter's thread,

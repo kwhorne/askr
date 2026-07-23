@@ -196,6 +196,10 @@ static char askr_ini[] =
  * function is available to worker scripts. */
 static const zend_function_entry askr_functions[];
 
+/* SAPI flush hook: streams partial output to Rust when PHP flush()es mid-request
+ * (defined below, after the stream-callback globals). */
+static void askr_flush(void *server_context);
+
 int askr_php_startup(void) {
 #if defined(SIGPIPE) && defined(SIG_IGN)
     signal(SIGPIPE, SIG_IGN);
@@ -212,7 +216,7 @@ int askr_php_startup(void) {
     php_embed_module.read_post = askr_read_post;
     php_embed_module.read_cookies = askr_read_cookies;
     php_embed_module.register_server_variables = askr_register_variables;
-    php_embed_module.flush = NULL;
+    php_embed_module.flush = askr_flush;
 
     sapi_startup(&php_embed_module);
 
@@ -359,6 +363,46 @@ static askr_wait_fn  g_wait = NULL;
 static askr_reply_fn g_reply = NULL;
 static void         *g_ctx = NULL;
 
+/* Streaming reply: when a worker script flush()es mid-request, send the headers
+ * once and then body chunks incrementally, instead of one buffered g_reply at the
+ * end. Engaged only if Rust registered these callbacks AND the script flushes — a
+ * normal response never flushes mid-handler, so it stays on the buffered path. */
+typedef void (*askr_stream_begin_fn)(void *ctx, const char *hdrs, size_t hlen, int status);
+typedef void (*askr_stream_chunk_fn)(void *ctx, const char *ptr, size_t len);
+typedef void (*askr_stream_end_fn)(void *ctx);
+static askr_stream_begin_fn g_stream_begin = NULL;
+static askr_stream_chunk_fn g_stream_chunk = NULL;
+static askr_stream_end_fn   g_stream_end = NULL;
+static int g_streaming = 0; /* per-request: has this request started streaming? */
+
+void askr_php_set_stream_callbacks(askr_stream_begin_fn begin,
+                                   askr_stream_chunk_fn chunk,
+                                   askr_stream_end_fn end) {
+    g_stream_begin = begin;
+    g_stream_chunk = chunk;
+    g_stream_end = end;
+}
+
+/* Called by PHP's flush() (and ob flushing). First flush sends the committed
+ * headers + status; every flush drains the accumulated body buffer to Rust. */
+static void askr_flush(void *server_context) {
+    (void)server_context;
+    if (!g_stream_begin || !g_stream_chunk) {
+        return; /* streaming not wired → behave as before (buffered) */
+    }
+    if (!g_streaming) {
+        sapi_send_headers(); /* commit headers into g_req.hdr */
+        int status = SG(sapi_headers).http_response_code;
+        if (status == 0) status = 200;
+        g_stream_begin(g_ctx, g_req.hdr.ptr, g_req.hdr.len, status);
+        g_streaming = 1;
+    }
+    if (g_req.out.len > 0) {
+        g_stream_chunk(g_ctx, g_req.out.ptr, g_req.out.len);
+        buf_reset(&g_req.out);
+    }
+}
+
 /* Current worker request, populated by Rust via the setters below. Overflow past
  * these caps is dropped (never silently corrupt state), and warned once/request. */
 #define ASKR_MAX_HEADERS 256
@@ -476,6 +520,7 @@ void askr_req_set_body(const char *ptr, size_t len) {
 static void worker_reset_response(void) {
     buf_reclaim(&g_req.out);
     buf_reclaim(&g_req.hdr);
+    g_streaming = 0;
     SG(sapi_headers).http_response_code = 200;
     SG(headers_sent) = 0;
     zend_llist_clean(&SG(sapi_headers).headers);
@@ -592,7 +637,16 @@ static PHP_FUNCTION(askr_handle_request) {
     int status = SG(sapi_headers).http_response_code;
     if (status == 0) status = 200;
 
-    if (g_reply) {
+    if (g_streaming) {
+        /* Headers were sent on the first flush. Emit any trailing output produced
+         * after the last flush, then close the stream. */
+        if (g_req.out.len > 0 && g_stream_chunk) {
+            g_stream_chunk(g_ctx, g_req.out.ptr, g_req.out.len);
+        }
+        if (g_stream_end) {
+            g_stream_end(g_ctx);
+        }
+    } else if (g_reply) {
         g_reply(g_ctx, g_req.out.ptr, g_req.out.len, g_req.hdr.ptr, g_req.hdr.len, status);
     }
 

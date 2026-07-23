@@ -35,7 +35,7 @@ use tokio_rustls::TlsAcceptor;
 use fastwebsockets::upgrade;
 
 use crate::cgi;
-use crate::php::Php;
+use crate::php::{Php, Reply};
 use crate::pusher::{self, PusherHub};
 use crate::rcache;
 
@@ -733,7 +733,14 @@ where
 
     #[allow(unused_mut)]
     let mut response = match php_result {
-        Ok(resp) => {
+        // Streaming response: PHP flush()ed mid-request (SSE, large export). Serve
+        // the chunks as they arrive; bypass the cache/compression/shadow path.
+        Ok(Reply::Stream {
+            status,
+            headers,
+            body,
+        }) => stream_response(status, headers, body),
+        Ok(Reply::Buffered(resp)) => {
             // Cache store: the app opts in per-response with an `Askr-Cache`
             // header (which we consume, never forwarding it to the client).
             if let Some(key) = &cache_key {
@@ -1056,10 +1063,40 @@ async fn refresh_entry(
         config.https,
         port,
     );
-    if let Ok(resp) = rt.php.handle(request).await {
+    // Only a buffered response is cacheable; a streaming one is skipped.
+    if let Ok(Reply::Buffered(resp)) = rt.php.handle(request).await {
         maybe_store(&key, &resp, &accept_encoding);
     }
     rcache::end(&key);
+}
+
+/// Build a chunked, streaming response from a PHP `flush()`-driven body channel.
+/// Streaming bypasses the response cache and compression (the full body isn't known
+/// up front) and is framed chunked (no `Content-Length`).
+fn stream_response(
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: mpsc::Receiver<Bytes>,
+) -> Response<ResBody> {
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    for (name, value) in &headers {
+        if name.eq_ignore_ascii_case("Content-Length")
+            || name.eq_ignore_ascii_case("Transfer-Encoding")
+            || name.eq_ignore_ascii_case("Askr-Cache")
+        {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(SseBody { rx: body }.boxed())
+        .unwrap_or_else(|_| {
+            text(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "askr: bad stream response",
+            )
+        })
 }
 
 /// Finish a response body, compressing it (br/gzip) when the client accepts it

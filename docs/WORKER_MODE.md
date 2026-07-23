@@ -197,6 +197,28 @@ How it works ([`examples/askr-paranoid.php`](../examples/askr-paranoid.php)):
 It's expensive (reflection every request) — **dev only**, and use `--workers 1`
 for readable output. Enable it in a config file with `[worker] paranoid = true`.
 
+## Streaming responses
+
+Output is normally buffered and sent as one response (so it can be cached and
+compressed). But when a worker script calls `flush()` mid-request, Askr switches
+that response to **streaming**: it sends the headers once, then each chunk as PHP
+produces it — chunked transfer, no `Content-Length`. This makes Server-Sent Events,
+a Symfony `StreamedResponse`, and large `readfile()`/export downloads work without
+buffering the whole body in memory:
+
+```php
+header('Content-Type: text/event-stream');
+while (true) {
+    echo "data: " . json_encode($tick()) . "\n\n";
+    flush();            // ← streams this chunk to the client now
+    usleep(500_000);
+}
+```
+
+Back-pressure is built in: the body channel is bounded, so a slow client pauses the
+worker (like a blocking write under FPM) rather than growing memory. A response that
+never calls `flush()` mid-request stays on the buffered path (cacheable, compressible).
+
 ## Recycling
 
 Long-lived workers can still drift or leak over time (in app code or extensions).
