@@ -163,7 +163,8 @@ $request->file('avatar')->store('avatars');   // just works
 $request->input('name');                       // multipart fields too
 ```
 
-Temp files land under `$TMPDIR/askr-uploads` and are removed after each request.
+Temp files land under `$TMPDIR/askr-uploads` (created `0700` on Unix so other local
+users on a shared host can't read them) and are removed after each request.
 The `--max-body-size` limit is enforced on the stream (`413` above it); set PHP's
 `upload_max_filesize`/`post_max_size` via `[worker] ini` if your app checks them.
 

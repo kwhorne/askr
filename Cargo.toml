@@ -9,7 +9,7 @@ members = [
 exclude = ["scripts/h3bench"]
 
 [workspace.package]
-version = "0.9.9"
+version = "0.9.10"
 edition = "2021"
 license = "MIT"
 authors = ["Knut W. Horne <kh@gets.no>"]

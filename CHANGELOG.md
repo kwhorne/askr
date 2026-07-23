@@ -2,7 +2,7 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.10 — 2026-07-23
 
 Second source-code-review pass. Each finding was verified against the source first;
 below are the ones that were real. (Notably *not* real: the "`DefaultHasher` uses
