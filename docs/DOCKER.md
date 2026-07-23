@@ -151,6 +151,11 @@ admin plane on `127.0.0.1:9000` (`--admin 127.0.0.1:9000` or `[admin] listen`):
 HEALTHCHECK CMD curl -sf http://127.0.0.1:9000/api/status || exit 1
 ```
 
+> **If you run without `--admin`, the container reports `unhealthy`** even though it
+> serves traffic perfectly — the healthcheck simply can't reach the (disabled) admin
+> plane. Always pass `--admin 127.0.0.1:9000` (or `[admin] listen`) in a container so
+> the healthcheck, `/metrics`, and the dashboard work.
+
 Prometheus can scrape `http://<admin>/metrics`.
 
 ### TLS
