@@ -80,6 +80,20 @@ fn note_eviction() {
     }
 }
 
+/// A value was too large for any cache region and was dropped. Counted so an
+/// operator can see (via `/metrics`) that big sessions/fragments aren't caching,
+/// instead of it failing silently.
+fn note_oversize(len: usize) {
+    if let Some(m) = crate::metrics::Metrics::get() {
+        m.cache_oversize.fetch_add(1, Ordering::Relaxed);
+    }
+    tracing::debug!(
+        bytes = len,
+        limit = VAL_LARGE,
+        "cache: value too large, not cached"
+    );
+}
+
 /// RAII spinlock guard over one slot.
 struct Slot<const V: usize>(*mut Entry<V>);
 impl<const V: usize> Slot<V> {
@@ -488,7 +502,8 @@ pub fn set(key: &[u8], val: &[u8], ttl: u64) -> bool {
         SMALL.delete(key, h);
         LARGE.set(key, val, h, ttl)
     } else {
-        false // exceeds the largest slot
+        note_oversize(val.len()); // exceeds the largest slot — dropped, not silent
+        false
     }
 }
 
@@ -690,15 +705,11 @@ mod tests {
         flush();
         assert_eq!(get(b"name"), None);
         assert_eq!(get(b"session:abc"), None);
-    }
 
-    // Regression: deleting a key must not punch a hole that hides a colliding key
-    // stored later in the same probe chain (tombstone deletion).
-    #[test]
-    fn delete_preserves_colliding_chain() {
+        // Regression (same test to avoid racing the shared global cache with a
+        // parallel test): deleting a key must not punch a hole that hides a
+        // colliding key stored later in the same probe chain (tombstone deletion).
         use std::collections::HashMap;
-        init(256, 64);
-        flush();
         let slots = 256usize;
         // Find two small-value keys that share a starting slot (collide).
         let mut buckets: HashMap<usize, Vec<Vec<u8>>> = HashMap::new();

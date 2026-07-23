@@ -247,6 +247,12 @@ fn prometheus() -> Response<Full<Bytes>> {
     );
     push_counter(
         &mut s,
+        "askr_cache_oversize_total",
+        "KV cache writes dropped for exceeding the largest slot (64 KB).",
+        &m.cache_oversize.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
         "askr_shadow_total",
         "Requests mirrored to the shadow upstream.",
         &m.shadow_total.load(Relaxed).to_string(),

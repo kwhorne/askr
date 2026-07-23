@@ -203,42 +203,46 @@ fn json_escape(s: &str) -> String {
 /// shared broadcast ring and pushes matching events to these.
 #[derive(Default)]
 struct SseHub {
-    subs: Mutex<Vec<Sub>>,
-}
-
-struct Sub {
-    channel: String,
-    tx: mpsc::Sender<Bytes>,
+    // Sharded by channel so delivering one event only touches that channel's
+    // subscribers — O(subs-on-channel), not O(all-subs) — which matters when a box
+    // fans out to thousands of SSE clients across many channels.
+    channels: Mutex<std::collections::HashMap<String, Vec<mpsc::Sender<Bytes>>>>,
 }
 
 impl SseHub {
     fn subscribe(&self, channel: String) -> mpsc::Receiver<Bytes> {
         let (tx, rx) = mpsc::channel(128);
         let _ = tx.try_send(Bytes::from_static(b": connected\n\n"));
-        self.subs.lock().unwrap().push(Sub { channel, tx });
+        self.channels
+            .lock()
+            .unwrap()
+            .entry(channel)
+            .or_default()
+            .push(tx);
         rx
     }
 
     fn deliver(&self, channel: &str, data: &Bytes) {
-        self.subs.lock().unwrap().retain(|s| {
-            if s.channel == channel {
-                // Non-blocking: if a subscriber's 128-message buffer is full
-                // (a client that can't keep up), try_send fails and we drop that
-                // subscriber. This is intentional back-pressure — a slow client
-                // is disconnected rather than stalling the broadcast fan-out.
-                s.tx.try_send(data.clone()).is_ok()
-            } else {
-                !s.tx.is_closed()
+        let mut map = self.channels.lock().unwrap();
+        if let Some(subs) = map.get_mut(channel) {
+            // Non-blocking: if a subscriber's 128-message buffer is full (a client
+            // that can't keep up), try_send fails and we drop it — intentional
+            // back-pressure, a slow client is disconnected rather than stalling the
+            // fan-out. Prune the channel entry once it's empty.
+            subs.retain(|tx| tx.try_send(data.clone()).is_ok());
+            if subs.is_empty() {
+                map.remove(channel);
             }
-        });
+        }
     }
 
     fn ping(&self) {
         let msg = Bytes::from_static(b": ping\n\n");
-        self.subs
-            .lock()
-            .unwrap()
-            .retain(|s| s.tx.try_send(msg.clone()).is_ok());
+        // Keep-alive sweep (~15 s): prune dead subscribers and empty channels.
+        self.channels.lock().unwrap().retain(|_, subs| {
+            subs.retain(|tx| tx.try_send(msg.clone()).is_ok());
+            !subs.is_empty()
+        });
     }
 }
 

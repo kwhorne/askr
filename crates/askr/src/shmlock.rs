@@ -70,13 +70,20 @@ pub fn acquire(lock: &AtomicU32) {
             continue;
         }
 
-        // Live holder, almost certainly preempted mid-copy. Back off rather than
-        // corrupt: yield a few times, then sleep briefly to bound CPU.
+        // Live holder, almost certainly preempted mid-copy. Prefer *yielding*
+        // (which keeps the thread runnable, unlike a sleep that parks it and — on
+        // a Tokio worker — stalls that reactor) for a good while: a holder copying
+        // a ≤64 KB value resumes within microseconds, so most contention clears
+        // without ever sleeping. Only a genuinely stuck holder reaches the bounded
+        // sleep, which stays small (10 µs → 200 µs cap) so we neither burn a core
+        // nor park a Tokio worker for long.
         idle_rounds += 1;
-        if idle_rounds < 8 {
+        if idle_rounds < 64 {
             std::thread::yield_now();
         } else {
-            std::thread::sleep(std::time::Duration::from_micros(100));
+            let shift = (idle_rounds - 64).min(5);
+            let us = (10u64 << shift).min(200);
+            std::thread::sleep(std::time::Duration::from_micros(us));
         }
     }
 }

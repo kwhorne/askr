@@ -12,6 +12,7 @@
 //!     app once and loops; each request reuses the booted app (the Octane model,
 //!     in-process) — no per-request bootstrap.
 
+use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -219,52 +220,87 @@ impl WorkerBridge {
     }
 }
 
+/// Reusable, per-thread NUL-terminated scratch buffers, so loading a request
+/// doesn't allocate a fresh `CString` per `$_SERVER`/header/POST/file field on the
+/// hot path (hundreds of short-lived allocs/s at high RPS). The shim copies every
+/// pointer (`dup_cstr`) before returning, so a buffer only has to stay valid until
+/// its own next reuse — distinct slots hold the pointers a single call needs live
+/// at once (`set_meta`=3, `add_file`=4).
+#[derive(Default)]
+struct CStrArena {
+    bufs: Vec<Vec<u8>>,
+}
+
+impl CStrArena {
+    /// Write `s` + NUL into slot `i` and return a pointer valid until slot `i` is
+    /// next written. `None` if `s` has an interior NUL (matches `CString::new`).
+    /// Growing `bufs` never invalidates prior pointers: only the outer Vec's
+    /// headers move, never an inner buffer's heap bytes.
+    fn cstr(&mut self, i: usize, s: &str) -> Option<*const c_char> {
+        if s.as_bytes().contains(&0) {
+            return None;
+        }
+        while self.bufs.len() <= i {
+            self.bufs.push(Vec::new());
+        }
+        let b = &mut self.bufs[i];
+        b.clear();
+        b.extend_from_slice(s.as_bytes());
+        b.push(0);
+        Some(b.as_ptr() as *const c_char)
+    }
+}
+
+thread_local! {
+    static REQ_ARENA: RefCell<CStrArena> = RefCell::new(CStrArena::default());
+}
+
 /// Load a request into the shim's worker slot via the FFI setters.
 fn load_request(req: &Request) {
-    let method = CString::new(req.method.as_str()).unwrap_or_default();
     let uri = req
         .server_vars
         .iter()
         .find(|(k, _)| k == "REQUEST_URI")
-        .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| "/".to_string());
-    let uri = CString::new(uri).unwrap_or_default();
-    let query = CString::new(req.query_string.as_str()).unwrap_or_default();
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("/");
 
-    // SAFETY: called on the interpreter thread from inside wait(); all pointers
-    // are copied by the shim before the next call.
-    unsafe {
-        askr_php::worker::askr_req_reset();
-        askr_php::worker::askr_req_set_meta(method.as_ptr(), uri.as_ptr(), query.as_ptr());
-        for (k, v) in &req.server_vars {
-            if let (Ok(kk), Ok(vv)) = (CString::new(k.as_str()), CString::new(v.as_str())) {
-                askr_php::worker::askr_req_add_header(kk.as_ptr(), vv.as_ptr());
-            }
-        }
-        askr_php::worker::askr_req_set_body(req.body.as_ptr() as *const c_char, req.body.len());
-        for (k, v) in &req.post_fields {
-            if let (Ok(kk), Ok(vv)) = (CString::new(k.as_str()), CString::new(v.as_str())) {
-                askr_php::worker::askr_req_add_post(kk.as_ptr(), vv.as_ptr());
-            }
-        }
-        for f in &req.files {
-            if let (Ok(field), Ok(name), Ok(ty), Ok(tmp)) = (
-                CString::new(f.field_name.as_str()),
-                CString::new(f.file_name.as_str()),
-                CString::new(f.content_type.as_str()),
-                CString::new(f.tmp_path.as_str()),
+    REQ_ARENA.with(|arena| {
+        let mut a = arena.borrow_mut();
+        // SAFETY: called on the interpreter thread from inside wait(); the shim
+        // copies every pointer before returning, and each arena slot stays valid
+        // until its own next reuse (slots for pointers live at once are distinct).
+        unsafe {
+            askr_php::worker::askr_req_reset();
+            if let (Some(m), Some(u), Some(q)) = (
+                a.cstr(0, req.method.as_str()),
+                a.cstr(1, uri),
+                a.cstr(2, req.query_string.as_str()),
             ) {
-                askr_php::worker::askr_req_add_file(
-                    field.as_ptr(),
-                    name.as_ptr(),
-                    ty.as_ptr(),
-                    tmp.as_ptr(),
-                    f.size,
-                    f.error,
-                );
+                askr_php::worker::askr_req_set_meta(m, u, q);
+            }
+            for (k, v) in &req.server_vars {
+                if let (Some(kk), Some(vv)) = (a.cstr(0, k), a.cstr(1, v)) {
+                    askr_php::worker::askr_req_add_header(kk, vv);
+                }
+            }
+            askr_php::worker::askr_req_set_body(req.body.as_ptr() as *const c_char, req.body.len());
+            for (k, v) in &req.post_fields {
+                if let (Some(kk), Some(vv)) = (a.cstr(0, k), a.cstr(1, v)) {
+                    askr_php::worker::askr_req_add_post(kk, vv);
+                }
+            }
+            for f in &req.files {
+                if let (Some(field), Some(name), Some(ty), Some(tmp)) = (
+                    a.cstr(0, &f.field_name),
+                    a.cstr(1, &f.file_name),
+                    a.cstr(2, &f.content_type),
+                    a.cstr(3, &f.tmp_path),
+                ) {
+                    askr_php::worker::askr_req_add_file(field, name, ty, tmp, f.size, f.error);
+                }
             }
         }
-    }
+    });
 }
 
 extern "C" fn wait_trampoline(ctx: *mut c_void) -> i32 {

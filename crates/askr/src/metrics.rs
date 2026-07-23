@@ -35,6 +35,8 @@ pub struct Metrics {
     pub inflight: AtomicU64,
     /// KV cache entries evicted under pressure (probe window full).
     pub cache_evictions: AtomicU64,
+    /// KV cache writes rejected because the value exceeds the largest slot (64 KB).
+    pub cache_oversize: AtomicU64,
     /// Traffic-shadow outcomes: mirrored requests, matches, mismatches, errors.
     pub shadow_total: AtomicU64,
     pub shadow_match: AtomicU64,

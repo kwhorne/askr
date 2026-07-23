@@ -2,12 +2,35 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.9 — 2026-07-23
 
-- **Build (Docker): resilient apt in the image build.** Both `apt-get` layers now
-  retry the whole update+install (with per-fetch `Acquire::Retries`) so a transient
+Follow-through on the deferred performance/robustness items from the 0.9.8
+source-code review. All behaviour-preserving; default build/CI unchanged.
+
+- **Perf (worker hot path): reuse NUL-terminated buffers instead of allocating a
+  `CString` per request field.** `php.rs` now loads each request's method / URI /
+  query / headers / POST fields / file metadata through a per-thread arena of
+  reusable buffers, removing hundreds of short-lived heap allocations per second at
+  high RPS. The shim copies every pointer before returning, so a buffer only lives
+  until its own next reuse. Verified end-to-end (headers, query, POST arrays, 200/200
+  requests correct). *(Askr-21)*
+- **Perf (shared-memory lock): gentler backoff under contention.** `shmlock` now
+  yields far longer (a holder copying a ≤64 KB value resumes in microseconds) before
+  falling back to a small, bounded sleep (10 µs → 200 µs cap) — reducing how long a
+  Tokio worker thread can be parked waiting on a preempted holder, without touching
+  the uncontended fast path. *(Askr-22)*
+- **Perf (SSE/broadcast): shard subscribers by channel.** The SSE hub is now a
+  `HashMap<channel, Vec<Sender>>`, so delivering an event only touches that channel's
+  subscribers (O(subs-on-channel), not O(all-subs)) — relevant when a box fans out to
+  thousands of SSE clients across many channels. *(Askr-23)*
+- **Observability: count oversized cache drops.** A cache write whose value exceeds
+  the largest slot (64 KB) now increments `askr_cache_oversize_total` (on `/metrics`)
+  and logs at debug, instead of failing silently — so dropped large sessions/fragments
+  are visible. *(Askr-24)*
+- **Build (Docker): resilient apt in the image build.** Both `apt-get` layers retry
+  the whole update+install (with per-fetch `Acquire::Retries`) so a transient
   `archive`/`security.ubuntu.com` mirror outage on the CI runner no longer fails the
-  release image build. No change to the published binary or image contents.
+  release image build.
 
 ## 0.9.8 — 2026-07-22
 
