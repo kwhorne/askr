@@ -13,7 +13,7 @@ version = "0.9.10"
 edition = "2021"
 license = "MIT"
 authors = ["Knut W. Horne <kh@gets.no>"]
-repository = "https://github.com/wirelabs/askr"
+repository = "https://github.com/kwhorne/askr"
 rust-version = "1.80"
 
 [workspace.dependencies]

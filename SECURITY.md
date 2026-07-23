@@ -6,8 +6,8 @@ Askr is pre-1.0. Security fixes target the latest released version on `main`.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | ✅ |
-| < 0.1 | ❌ |
+| 0.9.x | ✅ |
+| < 0.9 | ❌ |
 
 ## Reporting a vulnerability
 

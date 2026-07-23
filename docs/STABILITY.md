@@ -50,6 +50,7 @@ The `ASKR_*` variables that select runtime backends and telemetry:
 | `ASKR_APP_BASE` | App root passed to the runner scripts. |
 | `ASKR_PHP_INI` | Extra `php.ini` path. |
 | `ASKR_PUSHER_SECRET` | Pusher/Reverb auth secret. |
+| `ASKR_ADMIN_TOKEN` | Bearer token required for the admin reload + data endpoints (unset = open). |
 | `ASKR_CACHE_DB` / `ASKR_QUEUE_DB` / `ASKR_BROADCAST_DB` | Select the durable **L2** backend (feature `sql-backend`). |
 | `ASKR_OBSERV_DSN` and `ASKR_OBSERV_{SERVICE,HOST,BATCH,FLUSH_MS,QUEUE,METRICS_MS,TLS}` | Observability sink (feature `observ`). |
 | `ASKR_OTEL_ENDPOINT` / `ASKR_OTEL_SERVICE` | OpenTelemetry trace export (feature `otel`). |

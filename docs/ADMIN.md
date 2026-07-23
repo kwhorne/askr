@@ -20,9 +20,19 @@ listen = "127.0.0.1:9000"
 Then open <http://127.0.0.1:9000/>.
 
 > **Bind to localhost** (the examples do) and reach it over an SSH tunnel or a
-> private network. The admin plane has no built-in authentication in 0.1.0 —
-> don't expose it publicly. Put it behind your own auth/proxy if remote access is
-> needed.
+> private network. If you bind it to a non-loopback address, Askr logs a warning
+> at startup.
+>
+> **`ASKR_ADMIN_TOKEN`** — set this to require `Authorization: Bearer <token>` on the
+> reload trigger (`POST /api/reload`) and the data endpoints (`/api/status`,
+> `/api/metrics`, `/metrics`, `/api/errors`). When unset, the plane is open (rely on
+> loopback/network isolation). The dashboard shell (`GET /`) is always open but
+> carries no data itself.
+
+```bash
+ASKR_ADMIN_TOKEN=$(openssl rand -hex 32) askr serve … --admin 0.0.0.0:9000
+curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
+```
 
 ## Endpoints
 

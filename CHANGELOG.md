@@ -2,6 +2,27 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+Third source-code-review pass (admin/security + hygiene).
+
+- **Security (admin plane): optional bearer token + non-loopback warning.** The admin
+  plane exposed `POST /api/reload` (a reload trigger) and `/api/status`,`/api/metrics`,
+  `/metrics`,`/api/errors` (PIDs, RSS, error records) with no auth beyond "bind to
+  localhost". Now: set **`ASKR_ADMIN_TOKEN`** to require `Authorization: Bearer <token>`
+  on those endpoints (constant-time compared), and Askr logs a clear warning at
+  startup if the admin address isn't loopback (louder still if no token is set). The
+  dashboard shell (`GET /`) stays open (no data); default behaviour (no token) is
+  unchanged.
+- **Fix (metadata): correct the package repository URL.** `Cargo.toml` pointed at
+  `github.com/wirelabs/askr`; it's `github.com/kwhorne/askr` (matching README/SECURITY
+  and the actual repo published as crate metadata).
+- **Fix (docs): SECURITY.md supported-versions table** now reflects the `0.9.x` line
+  instead of the stale `0.1.x`.
+- **Deps: move off yanked versions.** `cargo update` to `num-bigint` 0.4.8 and `spin`
+  0.9.9 (both transitive, previously yanked). `rustls-pemfile` (unmaintained,
+  RUSTSEC-2025-0134) is tracked for migration to `rustls-pki-types` separately.
+
 ## 0.9.10 — 2026-07-23
 
 Second source-code-review pass. Each finding was verified against the source first;

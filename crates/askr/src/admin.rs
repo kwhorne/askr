@@ -12,6 +12,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::thread;
 
 use bytes::Bytes;
@@ -32,6 +33,29 @@ pub struct Info {
 
 /// Start the admin server on its own thread. Never blocks the caller.
 pub fn spawn(addr: SocketAddr, info: Info) {
+    // Optional bearer token. When set, the mutating endpoint and the info-leaking
+    // endpoints require `Authorization: Bearer <token>`.
+    let token = std::env::var("ASKR_ADMIN_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    // The admin plane exposes PIDs/RSS/error records and a reload trigger. It has
+    // no transport security of its own, so warn loudly if it's reachable off-box.
+    if !addr.ip().is_loopback() {
+        if token.is_some() {
+            tracing::warn!(
+                %addr,
+                "admin plane bound to a non-loopback address (protected by ASKR_ADMIN_TOKEN)"
+            );
+        } else {
+            tracing::warn!(
+                %addr,
+                "admin plane bound to a non-loopback address WITHOUT ASKR_ADMIN_TOKEN — \
+                 /api/reload is unauthenticated and status/metrics/errors are exposed; \
+                 bind to loopback or set ASKR_ADMIN_TOKEN"
+            );
+        }
+    }
+    let token = Arc::new(token);
     thread::Builder::new()
         .name("askr-admin".into())
         .spawn(move || {
@@ -60,8 +84,10 @@ pub fn spawn(addr: SocketAddr, info: Info) {
                     };
                     let io = TokioIo::new(stream);
                     let info = info.clone();
+                    let token = token.clone();
                     tokio::task::spawn(async move {
-                        let service = service_fn(move |req| handle(req, info.clone()));
+                        let service =
+                            service_fn(move |req| handle(req, info.clone(), token.clone()));
                         let _ = http1::Builder::new().serve_connection(io, service).await;
                     });
                 }
@@ -73,8 +99,31 @@ pub fn spawn(addr: SocketAddr, info: Info) {
 async fn handle(
     req: Request<hyper::body::Incoming>,
     info: Info,
+    token: Arc<Option<String>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let resp = match (req.method(), req.uri().path()) {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    // When a token is configured, gate the reload trigger and the endpoints that
+    // leak operational data. The dashboard shell (`GET /`) stays open — it carries
+    // no data itself and its API calls are gated.
+    let protected = matches!(
+        path.as_str(),
+        "/api/status" | "/api/metrics" | "/metrics" | "/api/errors"
+    ) || (method == Method::POST && path == "/api/reload");
+    if protected {
+        if let Some(tok) = token.as_ref() {
+            if !bearer_ok(&req, tok) {
+                return Ok(Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .header("WWW-Authenticate", "Bearer")
+                    .body(Full::new(Bytes::from("unauthorized")))
+                    .unwrap());
+            }
+        }
+    }
+
+    let resp = match (&method, path.as_str()) {
         (&Method::GET, "/") => html(DASHBOARD),
         (&Method::GET, "/api/status") => json(status_json(&info)),
         (&Method::GET, "/api/metrics") => json(metrics_json()),
@@ -90,6 +139,27 @@ async fn handle(
             .unwrap(),
     };
     Ok(resp)
+}
+
+/// Constant-time check of an `Authorization: Bearer <token>` header.
+fn bearer_ok(req: &Request<hyper::body::Incoming>, token: &str) -> bool {
+    let Some(h) = req
+        .headers()
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    let (a, b) = (h.as_bytes(), token.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn status_json(info: &Info) -> String {
