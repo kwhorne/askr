@@ -63,7 +63,23 @@ pub enum UploadError {
 
 fn temp_dir() -> PathBuf {
     let dir = std::env::temp_dir().join("askr-uploads");
-    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        // 0700: on a shared host, uploaded temp files (which may hold sensitive
+        // form data) must not be readable/traversable by other local users. A
+        // 0700 directory blocks entry regardless of the files' own modes.
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir);
+        // Tighten an already-existing dir (e.g. created before this hardening).
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::create_dir_all(&dir);
+    }
     dir
 }
 

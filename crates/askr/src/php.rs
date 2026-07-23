@@ -132,6 +132,14 @@ impl Php {
                         "php worker interpreter exited unexpectedly (fatal/OOM?) — \
                          exiting for supervisor respawn"
                     );
+                    // Give the Tokio runtime (still live on other threads) a brief
+                    // window to flush in-flight responses before we tear the process
+                    // down. A request that was mid-execution sees its reply channel
+                    // dropped and is answered 502 by the handler, but that response
+                    // still has to reach the socket — without this window the abrupt
+                    // exit can turn it into a client-visible connection reset. Bounded
+                    // so it doesn't materially delay the supervisor respawn.
+                    std::thread::sleep(std::time::Duration::from_millis(150));
                     std::process::exit(75);
                 }
             })?;

@@ -123,7 +123,7 @@ fn mmap_shared(bytes: usize) -> *mut libc::c_void {
 /// Map the response cache (`slots` entries) and the tag table. Call in the
 /// master before forking. Idempotent-ish.
 pub fn init(slots: usize) {
-    if !RCACHE_PTR.load(Ordering::SeqCst).is_null() {
+    if !RCACHE_PTR.load(Ordering::Relaxed).is_null() {
         return;
     }
     let slots = slots.max(16);
@@ -142,11 +142,14 @@ pub fn init(slots: usize) {
         tracing::warn!("response cache: mmap failed; disabled");
         return;
     }
-    RCACHE_SLOTS.store(slots, Ordering::SeqCst);
-    TAGS_PTR.store(tp as *mut TagGen, Ordering::SeqCst);
-    INFLIGHT_PTR.store(ip as *mut Inflight, Ordering::SeqCst);
-    COUNTERS_PTR.store(cp as *mut Counters, Ordering::SeqCst);
-    RCACHE_PTR.store(ep as *mut Entry, Ordering::SeqCst);
+    // Mapped once in the master before forking; pointers are read-only after, so
+    // a release-store paired with acquire-loads suffices. Store slots first so any
+    // reader that acquire-loads a non-null RCACHE_PTR also sees the slot count.
+    RCACHE_SLOTS.store(slots, Ordering::Relaxed);
+    TAGS_PTR.store(tp as *mut TagGen, Ordering::Release);
+    INFLIGHT_PTR.store(ip as *mut Inflight, Ordering::Release);
+    COUNTERS_PTR.store(cp as *mut Counters, Ordering::Release);
+    RCACHE_PTR.store(ep as *mut Entry, Ordering::Release);
     tracing::info!(
         slots,
         mib = esize / 1024 / 1024,
@@ -155,15 +158,15 @@ pub fn init(slots: usize) {
 }
 
 pub fn enabled() -> bool {
-    !RCACHE_PTR.load(Ordering::SeqCst).is_null()
+    !RCACHE_PTR.load(Ordering::Acquire).is_null()
 }
 
 fn base() -> Option<(*mut Entry, usize)> {
-    let p = RCACHE_PTR.load(Ordering::SeqCst);
+    let p = RCACHE_PTR.load(Ordering::Acquire);
     if p.is_null() {
         None
     } else {
-        Some((p, RCACHE_SLOTS.load(Ordering::SeqCst)))
+        Some((p, RCACHE_SLOTS.load(Ordering::Relaxed)))
     }
 }
 

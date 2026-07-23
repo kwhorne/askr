@@ -118,7 +118,7 @@ unsafe fn r_u64(p: *const u64) -> u64 {
 
 impl<const V: usize> Region<V> {
     fn map(&self, slots: usize) {
-        if !self.ptr.load(Ordering::SeqCst).is_null() {
+        if !self.ptr.load(Ordering::Relaxed).is_null() {
             return;
         }
         let slots = slots.max(16);
@@ -138,8 +138,13 @@ impl<const V: usize> Region<V> {
             tracing::warn!(val = V, "cache: mmap failed; region disabled");
             return;
         }
-        self.slots.store(slots, Ordering::SeqCst);
-        self.ptr.store(p as *mut Entry<V>, Ordering::SeqCst);
+        // Publish: write slots first, then release-store the pointer so any reader
+        // that acquire-loads a non-null pointer also sees the matching slot count.
+        // (The region is mapped once in the master before forking; the pointer is
+        // read-only thereafter, so Acquire/Release suffices — no need for SeqCst's
+        // stronger barrier on the per-op read path, which is costlier on ARM.)
+        self.slots.store(slots, Ordering::Relaxed);
+        self.ptr.store(p as *mut Entry<V>, Ordering::Release);
         tracing::info!(
             slots,
             mib = size / 1024 / 1024,
@@ -149,16 +154,16 @@ impl<const V: usize> Region<V> {
     }
 
     fn base(&self) -> Option<(*mut Entry<V>, usize)> {
-        let p = self.ptr.load(Ordering::SeqCst);
+        let p = self.ptr.load(Ordering::Acquire);
         if p.is_null() {
             None
         } else {
-            Some((p, self.slots.load(Ordering::SeqCst)))
+            Some((p, self.slots.load(Ordering::Relaxed)))
         }
     }
 
     fn enabled(&self) -> bool {
-        !self.ptr.load(Ordering::SeqCst).is_null()
+        !self.ptr.load(Ordering::Acquire).is_null()
     }
 
     /// Does the occupied slot hold `key`/`hash`?

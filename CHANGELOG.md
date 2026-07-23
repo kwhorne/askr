@@ -2,6 +2,32 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
+## Unreleased
+
+Second source-code-review pass. Each finding was verified against the source first;
+below are the ones that were real. (Notably *not* real: the "`DefaultHasher` uses
+random per-process keys so shared-memory hashing differs across workers" claim —
+`DefaultHasher::new()` uses fixed keys and is deterministic across processes, proven
+empirically and by the fact that sessions/cache already persist across workers.)
+
+- **Perf (cache hot path): relax shared-memory pointer ordering.** The KV cache and
+  response cache published their base pointers with `SeqCst` and re-read them with
+  `SeqCst` on every op. The region is mapped once in the master before forking and
+  is read-only after, so this is now a `Release` store paired with `Acquire` loads —
+  dropping `SeqCst`'s stronger barrier from the per-op read path (a measurable win on
+  weak-memory/ARM; a no-op on x86). Verified cross-worker cache sharing intact
+  (50/50 hits across 4 workers).
+- **Security (uploads): the temp dir is now `0700` on Unix.** `/tmp/askr-uploads`
+  was created with default (world-traversable) permissions, so uploaded temp files
+  could be read by other local users on a shared host. It's now created `0700` (and
+  an already-existing dir is tightened), blocking entry by other users.
+- **Robustness (worker): brief flush window before `exit(75)`.** When the PHP
+  interpreter dies unexpectedly (fatal/OOM) the worker exits for a supervisor
+  respawn; it now waits ~150 ms first so the Tokio runtime can flush the in-flight
+  request's 502 (and any concurrently draining response) to the client, instead of
+  the abrupt exit turning it into a connection reset. Bounded so respawn isn't
+  materially delayed.
+
 ## 0.9.9 — 2026-07-23
 
 Follow-through on the deferred performance/robustness items from the 0.9.8
