@@ -130,7 +130,7 @@ async fn handle(
         (&Method::GET, "/metrics") => prometheus(),
         (&Method::GET, "/api/errors") => json(errors_json(&info)),
         (&Method::POST, "/api/reload") => {
-            crate::trigger_reload();
+            crate::supervisor::trigger_reload();
             json(r#"{"ok":true,"action":"reload"}"#.to_string())
         }
         _ => Response::builder()
@@ -163,7 +163,7 @@ fn bearer_ok(req: &Request<hyper::body::Incoming>, token: &str) -> bool {
 }
 
 fn status_json(info: &Info) -> String {
-    let s = crate::status();
+    let s = crate::supervisor::status();
     let mut rss_total = 0u64;
     let workers = s
         .pids
@@ -386,7 +386,7 @@ fn prometheus() -> Response<Full<Bytes>> {
         "# HELP askr_inflight Requests currently executing in PHP.\n# TYPE askr_inflight gauge\naskr_inflight {}\n",
         m.inflight.load(Relaxed)
     );
-    let st = crate::status();
+    let st = crate::supervisor::status();
     let _ = write!(
         s,
         "# HELP askr_workers_alive Live worker processes.\n# TYPE askr_workers_alive gauge\naskr_workers_alive {}\n",

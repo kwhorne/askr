@@ -669,8 +669,17 @@ pub fn register_bridge() {
 mod tests {
     use super::*;
 
+    // The cache tests share the process-wide SMALL/LARGE regions (they init/flush
+    // the same statics), so serialize them — parallel execution would interfere.
+    // `into_inner` ignores poisoning so one failing test doesn't cascade.
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn size_classes_and_add() {
+        let _g = guard();
         init(256, 64);
         assert!(enabled());
 
@@ -757,6 +766,65 @@ mod tests {
         assert_eq!(get(&k1).as_deref(), Some(&b"A2"[..]));
         // …and B is still intact after reuse.
         assert_eq!(get(&k2).as_deref(), Some(&b"B"[..]));
+        flush();
+    }
+
+    // Stress: hammer the shared-memory table from many threads to shake out
+    // torn writes / probe-chain / tombstone races (the per-slot spinlock must keep
+    // read-modify-write atomic). Threads share the same global regions.
+    #[test]
+    fn concurrent_stress_no_corruption() {
+        let _g = guard();
+        init(1024, 64);
+        flush();
+
+        // 1) Atomic increment under contention: N threads × M bumps of one counter
+        //    must total exactly N*M (the slot lock serialises read-modify-write).
+        const T: i64 = 8;
+        const M: i64 = 2000;
+        std::thread::scope(|s| {
+            for _ in 0..T {
+                s.spawn(|| {
+                    for _ in 0..M {
+                        increment(b"ctr", 1, 60);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            get(b"ctr").as_deref(),
+            Some(format!("{}", T * M).as_bytes()),
+            "concurrent increments lost an update"
+        );
+
+        // 2) set/delete/get churn on a small (colliding) keyspace: liveness (no
+        //    deadlock/panic) and a pinned key survives unrelated churn.
+        assert!(set(b"pin", b"PIN", 0));
+        std::thread::scope(|s| {
+            for t in 0..T {
+                s.spawn(move || {
+                    for i in 0..M {
+                        let k = format!("s{}", i % 32);
+                        match (t + i) % 3 {
+                            0 => {
+                                set(k.as_bytes(), b"v", 60);
+                            }
+                            1 => {
+                                let _ = get(k.as_bytes());
+                            }
+                            _ => {
+                                delete(k.as_bytes());
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            get(b"pin").as_deref(),
+            Some(&b"PIN"[..]),
+            "a pinned key was corrupted by unrelated churn"
+        );
         flush();
     }
 }

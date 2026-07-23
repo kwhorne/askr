@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
@@ -19,7 +20,7 @@ pub fn acceptor(cert_path: &Path, key_path: &Path) -> anyhow::Result<TlsAcceptor
     let key_pem = std::fs::read(key_path)
         .with_context(|| format!("reading TLS key {}", key_path.display()))?;
 
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<_, _>>()
         .context("parsing TLS certificate chain")?;
     anyhow::ensure!(
@@ -28,9 +29,8 @@ pub fn acceptor(cert_path: &Path, key_path: &Path) -> anyhow::Result<TlsAcceptor
         cert_path.display()
     );
 
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_slice())
-        .context("parsing TLS private key")?
-        .with_context(|| format!("no private key found in {}", key_path.display()))?;
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(&key_pem)
+        .with_context(|| format!("no usable private key in {}", key_path.display()))?;
 
     from_parts(certs, key)
 }

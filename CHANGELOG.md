@@ -2,10 +2,25 @@
 
 All notable changes to Askr. This is pre-1.0 exploratory work.
 
-## Unreleased
+## 0.9.11 — 2026-07-23
 
-Third source-code-review pass (admin/security + hygiene).
+Third source-code-review pass (admin/security + hygiene) plus follow-through on the
+tracked hygiene items.
 
+- **Deps: drop the unmaintained `rustls-pemfile`.** Cert/key PEM parsing in `tls.rs`
+  and `http3.rs` now uses `rustls::pki_types::pem` (`PemObject`) directly, and
+  `rustls-pemfile` (RUSTSEC-2025-0134) is removed from the tree. Verified: TLS (h2)
+  and HTTP/3 still load certs. *(Askr-28)*
+- **Refactor: extract the supervisor into its own module.** `main.rs` dropped from
+  ~1762 to ~1026 lines; the prefork/CoW pools, recycling, RSS-based recycling, queue
+  autoscaling, canary + rolling reload, and the status/reload surface now live in
+  `supervisor.rs`. No behaviour change — verified e2e (4 workers, admin status,
+  rolling reload, `--max-requests` recycling). *(Askr-30)*
+- **Tests: concurrent shared-memory cache stress test.** Hammers the table from 8
+  threads — an atomic-increment invariant (N×M increments total exactly N×M) plus
+  set/delete/get churn on a colliding keyspace — to catch torn-write/probe-chain/
+  tombstone races. Cache tests are now serialized so they don't race the shared
+  global regions. *(Askr-29)*
 - **Security (admin plane): optional bearer token + non-loopback warning.** The admin
   plane exposed `POST /api/reload` (a reload trigger) and `/api/status`,`/api/metrics`,
   `/metrics`,`/api/errors` (PIDs, RSS, error records) with no auth beyond "bind to

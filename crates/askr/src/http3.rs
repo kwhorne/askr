@@ -23,10 +23,11 @@ pub fn endpoint(
 ) -> anyhow::Result<quinn::Endpoint> {
     let cert_pem = std::fs::read(cert_path)?;
     let key_pem = std::fs::read(key_path)?;
+    use rustls::pki_types::pem::PemObject;
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<_, _>>()?;
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
-        .ok_or_else(|| anyhow::anyhow!("no private key in {}", key_path.display()))?;
+        rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<_, _>>()?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+        .map_err(|e| anyhow::anyhow!("no usable private key in {}: {e}", key_path.display()))?;
 
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()

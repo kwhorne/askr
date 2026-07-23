@@ -108,7 +108,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "askr"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "anyhow",
  "askr-php",
@@ -136,7 +136,6 @@ dependencies = [
  "rcgen",
  "rusqlite",
  "rustls",
- "rustls-pemfile",
  "seccompiler",
  "serde",
  "serde_json",
@@ -151,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "askr-php"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "cc",
  "serde_json",
@@ -2214,15 +2213,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
