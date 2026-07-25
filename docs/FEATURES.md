@@ -49,6 +49,39 @@ store time, so hits and stale serves do zero per-request compression.
 - Only anonymous `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
   so a cached page can't pin one session onto every visitor.
 
+### PURGE & BAN over HTTP
+
+Tag invalidation covers "this content changed". Sometimes you need to invalidate by
+**URL** instead — from a deploy script, a CMS webhook, or by hand:
+
+```bash
+# Drop every cached variant of one URL (all encodings + device classes, GET & HEAD)
+curl -X PURGE https://example.com/posts/123
+
+# Drop everything under a path, by glob
+curl -X BAN -H 'X-Ban-Url: /category/tech/*' https://example.com/
+```
+
+Both answer with a count, so a purge that matched nothing is visible rather than
+silent: `{"purged":3}` / `{"banned":12}`.
+
+- **`PURGE`** targets the request URL. With a query string it purges that exact URL;
+  without one, every query variant of the path. Matching stops at a component
+  boundary, so purging `/posts/1` never touches `/posts/12`.
+- **`BAN`** takes a **glob** in `X-Ban-Url` (`*` and `?`), matched against the path.
+  It is not a regex — a regex-looking pattern is rejected with a 400 rather than
+  silently matching nothing. Entries stored *after* the ban are unaffected, which is
+  what you want: they were rendered from current data.
+- Both are **scoped to the requesting `Host`**, so one virtual host can't wipe
+  another's cache.
+- **Authentication:** set `ASKR_ADMIN_TOKEN` and send
+  `Authorization: Bearer <token>`. With no token configured, `PURGE`/`BAN` are
+  accepted from **loopback only** — an open purge endpoint is a cache-wiping DoS.
+
+BAN is an eager scan at ban time rather than a rule list consulted on every lookup,
+so invalidation costs one pass over the cache slots and the request hot path stays
+exactly as fast as before.
+
 ### stale-if-error & saint mode
 
 When the database falls over, the choice is between a 500 page and *slightly old

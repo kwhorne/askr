@@ -82,9 +82,13 @@ calling the bridge directly if you want the smoothest ride.
   WebSocket), `POST /apps/{id}/events` (Pusher trigger), and the admin `/metrics`
   (Prometheus text). Paths under `/askr/` are reserved for Askr — don't route them
   in your app.
+- Cache-invalidation methods Askr answers itself: **`PURGE <url>`** and **`BAN`**
+  (with the **`X-Ban-Url`** glob header). Both are authenticated with
+  `ASKR_ADMIN_TOKEN`, or restricted to loopback when no token is set.
 - Response contract headers: the app-supplied **`Askr-Cache`** request-to-cache
-  header (consumed, never forwarded) and the **`X-Askr-Cache: HIT|MISS|STALE`**
-  diagnostic header. When HTTP/3 is on, TCP responses carry **`Alt-Svc: h3=…`**.
+  header (consumed, never forwarded) and the
+  **`X-Askr-Cache: HIT|MISS|STALE|STALE-ERROR`** diagnostic header. When HTTP/3 is
+  on, TCP responses carry **`Alt-Svc: h3=…`**.
 
 ### 6. Build features
 

@@ -28,6 +28,10 @@ Then open <http://127.0.0.1:9000/>.
 > `/api/metrics`, `/metrics`, `/api/errors`). When unset, the plane is open (rely on
 > loopback/network isolation). The dashboard shell (`GET /`) is always open but
 > carries no data itself.
+>
+> The same token also gates **`PURGE`/`BAN`** cache invalidation on the *public*
+> listener (see [Features](FEATURES.md#purge--ban-over-http)); without a token those
+> are accepted from loopback only.
 
 ```bash
 ASKR_ADMIN_TOKEN=$(openssl rand -hex 32) askr serve … --admin 0.0.0.0:9000

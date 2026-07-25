@@ -29,6 +29,8 @@ const MAX_TAGS: usize = 8;
 /// high fill evicts less eagerly; the cost is scanning more slots on a collision.
 const PROBE: usize = 16;
 const TAG_SLOTS: usize = 4096;
+/// Bytes of cache key retained per entry, for URL-targeted invalidation.
+const KEY_MAX: usize = 512;
 
 #[repr(C)]
 struct Entry {
@@ -43,6 +45,11 @@ struct Entry {
     // only when the origin fails (5xx / handler error).
     status: u32,
     ntags: u32,
+    // The full cache key, kept so PURGE/BAN can match entries by URL. Keys longer
+    // than KEY_MAX are truncated (pathological; a truncated key simply won't match
+    // a purge, so it expires normally).
+    key_len: u32,
+    key_bytes: [u8; KEY_MAX],
     tag_hash: [u64; MAX_TAGS],
     tag_gen: [u64; MAX_TAGS], // each tag's generation at store time
     hdr_len: u32,
@@ -344,6 +351,130 @@ pub struct Cached {
     pub error_only: bool,
 }
 
+/// Glob match with `*` wildcards (any number, anywhere). Iterative and
+/// allocation-free — it runs while a slot lock is held.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let (p, t) = (pattern.as_bytes(), text.as_bytes());
+    // Two-pointer wildcard match with backtracking to the last `*`.
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = pi;
+            mark = ti;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Split a stored key (`METHOD \0 host \0 path?query \0 enc \0 device`) into its
+/// method, host and path+query parts.
+fn key_parts(key: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
+    let mut it = key.split(|b| *b == 0);
+    let method = it.next()?;
+    let host = it.next()?;
+    let pq = it.next()?;
+    Some((method, host, pq))
+}
+
+/// Invalidate every variant of one URL — all encodings and device classes, for
+/// both `GET` and `HEAD`. Returns how many entries were dropped.
+///
+/// The stored key is matched by prefix, and only at a component boundary, so
+/// purging `/posts/1` never touches `/posts/12`. A query string on the purged URL
+/// is honoured: without one, every query variant of that path goes.
+pub fn purge_url(host: &str, path: &str, query: Option<&str>) -> usize {
+    scan_invalidate(|key| {
+        let Some((method, khost, pq)) = key_parts(key) else {
+            return false;
+        };
+        if method != b"GET" && method != b"HEAD" {
+            return false;
+        }
+        if !khost.eq_ignore_ascii_case(host.as_bytes()) {
+            return false;
+        }
+        match query {
+            // Exact path+query.
+            Some(q) => {
+                let want: Vec<u8> = [path.as_bytes(), b"?", q.as_bytes()].concat();
+                pq == want.as_slice()
+            }
+            // Path only: this path with any (or no) query string.
+            None => {
+                let p = path.as_bytes();
+                pq == p || (pq.len() > p.len() && pq.starts_with(p) && pq[p.len()] == b'?')
+            }
+        }
+    })
+}
+
+/// Invalidate every entry for `host` whose path matches a `*` glob. Returns how
+/// many entries were dropped.
+///
+/// This is an eager scan at ban time rather than a rule list consulted on every
+/// lookup: the hot path stays untouched, and the cost is one pass over the slots.
+/// Entries stored *after* the ban are unaffected, which is what you want — they
+/// were rendered from current data.
+pub fn ban_glob(host: &str, pattern: &str) -> usize {
+    scan_invalidate(|key| {
+        let Some((method, khost, pq)) = key_parts(key) else {
+            return false;
+        };
+        if method != b"GET" && method != b"HEAD" {
+            return false;
+        }
+        if !khost.eq_ignore_ascii_case(host.as_bytes()) {
+            return false;
+        }
+        // Match the path only — a ban targets URLs, not query permutations.
+        let path = match pq.iter().position(|b| *b == b'?') {
+            Some(i) => &pq[..i],
+            None => pq,
+        };
+        std::str::from_utf8(path).is_ok_and(|p| glob_match(pattern, p))
+    })
+}
+
+/// Walk every slot and tombstone the live entries whose key satisfies `want`.
+fn scan_invalidate(want: impl Fn(&[u8]) -> bool) -> usize {
+    let Some((p, slots)) = base() else {
+        return 0;
+    };
+    let mut n = 0;
+    for i in 0..slots {
+        let e = unsafe { p.add(i) };
+        let _g = Slot::lock(e);
+        // SAFETY: fields read under the slot lock; key length clamped before slicing.
+        unsafe {
+            if ptr::read(ptr::addr_of!((*e).state)) != 1 {
+                continue;
+            }
+            let klen = (ptr::read(ptr::addr_of!((*e).key_len)) as usize).min(KEY_MAX);
+            let key = std::slice::from_raw_parts(ptr::addr_of!((*e).key_bytes) as *const u8, klen);
+            if want(key) {
+                // Tombstone (not empty) so colliding probe chains stay intact.
+                ptr::write(ptr::addr_of_mut!((*e).state), 2);
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Look up a cached response and record a hit/miss. Use [`peek`] for the
 /// coalescing poll loop so repeated polls don't inflate the miss counter.
 pub fn get(key: &[u8]) -> Option<Cached> {
@@ -506,6 +637,7 @@ pub fn store(
                     ntags,
                     &th,
                     &tg,
+                    key,
                 )
             };
             return true;
@@ -536,6 +668,7 @@ pub fn store(
             ntags,
             &th,
             &tg,
+            key,
         )
     };
     true
@@ -554,6 +687,7 @@ unsafe fn write_entry(
     ntags: usize,
     th: &[u64; MAX_TAGS],
     tg: &[u64; MAX_TAGS],
+    key: &[u8],
 ) {
     ptr::write(ptr::addr_of_mut!((*e).state), 1);
     ptr::write(ptr::addr_of_mut!((*e).key_hash), h);
@@ -566,6 +700,13 @@ unsafe fn write_entry(
         ptr::write(ptr::addr_of_mut!((*e).tag_hash[i]), th[i]);
         ptr::write(ptr::addr_of_mut!((*e).tag_gen[i]), tg[i]);
     }
+    let klen = key.len().min(KEY_MAX);
+    ptr::write(ptr::addr_of_mut!((*e).key_len), klen as u32);
+    ptr::copy_nonoverlapping(
+        key.as_ptr(),
+        ptr::addr_of_mut!((*e).key_bytes) as *mut u8,
+        klen,
+    );
     ptr::write(ptr::addr_of_mut!((*e).hdr_len), blob.len() as u32);
     ptr::write(ptr::addr_of_mut!((*e).body_len), body.len() as u32);
     ptr::copy_nonoverlapping(
@@ -679,6 +820,98 @@ mod tests {
         let s = get(b"GET|/swr").expect("served stale");
         assert!(s.stale);
         assert_eq!(s.body, b"swrbody");
+    }
+
+    #[test]
+    fn glob_matching() {
+        assert!(glob_match("/category/tech/*", "/category/tech/rust"));
+        assert!(glob_match("/category/tech/*", "/category/tech/"));
+        assert!(!glob_match("/category/tech/*", "/category/food/x"));
+        assert!(glob_match("*", "/anything"));
+        assert!(glob_match("/a/*/c", "/a/b/c"));
+        assert!(glob_match("/a/*/c", "/a/b/b/c"));
+        assert!(!glob_match("/a/*/c", "/a/b/d"));
+        assert!(glob_match("/post?", "/posts"));
+        assert!(glob_match("/exact", "/exact"));
+        assert!(!glob_match("/exact", "/exactly"));
+    }
+
+    #[test]
+    fn purge_and_ban_invalidate_by_url() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        init(256);
+        flush();
+        let h = vec![("Content-Type".to_string(), "text/html".to_string())];
+        // Two encoding variants of one URL, plus neighbours that must survive.
+        let k = |pq: &str, enc: &str| format!("GET\0site.no\0{pq}\0{enc}\0").into_bytes();
+        assert!(store(&k("/posts/1", "id"), 200, &h, b"a", 60, 0, 0, &[]));
+        assert!(store(&k("/posts/1", "gzip"), 200, &h, b"b", 60, 0, 0, &[]));
+        assert!(store(
+            &k("/posts/1?page=2", "id"),
+            200,
+            &h,
+            b"c",
+            60,
+            0,
+            0,
+            &[]
+        ));
+        assert!(store(&k("/posts/12", "id"), 200, &h, b"d", 60, 0, 0, &[]));
+        assert!(store(&k("/about", "id"), 200, &h, b"e", 60, 0, 0, &[]));
+
+        // PURGE /posts/1 drops both encodings *and* the query variant, but must not
+        // touch /posts/12 (prefix boundary) or /about.
+        assert_eq!(purge_url("site.no", "/posts/1", None), 3);
+        assert!(get(&k("/posts/1", "id")).is_none());
+        assert!(get(&k("/posts/1", "gzip")).is_none());
+        assert!(get(&k("/posts/1?page=2", "id")).is_none());
+        assert!(
+            get(&k("/posts/12", "id")).is_some(),
+            "/posts/12 must survive"
+        );
+        assert!(get(&k("/about", "id")).is_some());
+
+        // Host scoping: another vhost's identical URL is untouched.
+        let other = b"GET\0other.no\0/about\0id\0".to_vec();
+        assert!(store(&other, 200, &h, b"x", 60, 0, 0, &[]));
+        assert_eq!(purge_url("site.no", "/about", None), 1);
+        assert!(get(&other).is_some(), "other host must survive");
+
+        // BAN by glob.
+        assert!(store(
+            &k("/cat/tech/rust", "id"),
+            200,
+            &h,
+            b"1",
+            60,
+            0,
+            0,
+            &[]
+        ));
+        assert!(store(
+            &k("/cat/tech/go", "id"),
+            200,
+            &h,
+            b"2",
+            60,
+            0,
+            0,
+            &[]
+        ));
+        assert!(store(
+            &k("/cat/food/pizza", "id"),
+            200,
+            &h,
+            b"3",
+            60,
+            0,
+            0,
+            &[]
+        ));
+        assert_eq!(ban_glob("site.no", "/cat/tech/*"), 2);
+        assert!(get(&k("/cat/tech/rust", "id")).is_none());
+        assert!(get(&k("/cat/tech/go", "id")).is_none());
+        assert!(get(&k("/cat/food/pizza", "id")).is_some());
     }
 
     #[test]

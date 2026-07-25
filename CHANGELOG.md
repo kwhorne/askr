@@ -5,6 +5,32 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **HTTP `PURGE` and `BAN` cache invalidation** (Askr-19) — invalidate by URL, not just
+  by tag:
+
+  ```bash
+  curl -X PURGE https://example.com/posts/123
+  curl -X BAN -H 'X-Ban-Url: /category/tech/*' https://example.com/
+  ```
+
+  `PURGE` drops every cached variant of one URL (all encodings and device classes,
+  `GET` and `HEAD`); matching stops at a component boundary so `/posts/1` never purges
+  `/posts/12`. `BAN` takes a **glob** (`*`, `?`) in `X-Ban-Url`; a regex-looking pattern
+  is rejected with a 400 instead of silently matching nothing. Both answer with a count
+  (`{"purged":3}`) and are scoped to the requesting `Host`, so one virtual host can't
+  wipe another's cache.
+
+  Authenticated with `ASKR_ADMIN_TOKEN` (`Authorization: Bearer …`); with no token set,
+  accepted from **loopback only** — an open purge endpoint is a cache-wiping DoS.
+
+  Implemented as an eager scan at invalidation time rather than a shared-memory rule
+  list consulted on every lookup, so the request hot path is unchanged. Cache entries
+  now retain their key (512 bytes on a ~140 KB entry) to make URL matching possible.
+- The response-cache key now uses the **normalised** host (lowercased, port-stripped) —
+  the same value used for virtual-host routing. `example.com` and `example.com:443` now
+  share one entry instead of two, and `PURGE`/`BAN` match the host a request was routed
+  with.
+
 ### Security
 
 - **Editor and deploy leftovers are no longer served** (Askr-35). A follow-up probe

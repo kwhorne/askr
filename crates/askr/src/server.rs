@@ -515,6 +515,17 @@ where
         .unwrap_or("")
         .to_ascii_lowercase();
 
+    // Cache invalidation over HTTP: PURGE one URL, or BAN a glob of URLs. Handled
+    // before the redirect engine so a control-plane call over plain HTTP isn't
+    // bounced to HTTPS. Authenticated: ASKR_ADMIN_TOKEN as a bearer token, or —
+    // when no token is set — loopback peers only. An open PURGE is a cache-wiping
+    // DoS.
+    if req.method().as_str() == "PURGE" || req.method().as_str() == "BAN" {
+        let resp = invalidate_request(&req, &host, peer);
+        finish(&rt, &resp, t_start, 0);
+        return Ok(resp);
+    }
+
     // Host / scheme redirects (www→apex, http→https) — before any dispatch.
     if config.force_https || !config.redirects.is_empty() {
         if let Some(resp) = redirect_target(&req, &host, config, &rt) {
@@ -580,7 +591,7 @@ where
                 v.to_str()
                     .is_ok_and(|c| cookies_ignorable(c, &rt.config.cache_ignore_cookies))
             });
-    let cache_key = cacheable.then(|| response_cache_key(&req, &rt.config));
+    let cache_key = cacheable.then(|| response_cache_key(&req, &host, &rt.config));
 
     // Traffic shadow: decide (and sample) now, while `req` is still intact, what
     // to mirror. The mirror itself fires after the real response is built.
@@ -1083,6 +1094,100 @@ fn saint_active() -> bool {
     SAINT_UNTIL.load(std::sync::atomic::Ordering::Relaxed) > unix_secs()
 }
 
+/// Constant-time bearer check against `ASKR_ADMIN_TOKEN`.
+fn control_token_ok<B>(req: &Request<B>) -> Option<bool> {
+    let token = std::env::var("ASKR_ADMIN_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())?;
+    let given = req
+        .headers()
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let (a, b) = (given.as_bytes(), token.as_bytes());
+    if a.len() != b.len() {
+        return Some(false);
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    Some(diff == 0)
+}
+
+/// Handle a `PURGE` or `BAN` request against the response cache.
+///
+/// - `PURGE /posts/123` drops every cached variant of that URL (all encodings and
+///   device classes, `GET` and `HEAD`). With a query string it purges that exact
+///   URL; without one, every query variant of the path.
+/// - `BAN` with `X-Ban-Url: /category/tech/*` drops every cached URL matching the
+///   glob. Patterns are globs (`*`, `?`), not regexes.
+///
+/// Both are scoped to the requesting `Host`, so one virtual host can't wipe
+/// another's cache.
+fn invalidate_request<B>(req: &Request<B>, host: &str, peer: SocketAddr) -> Response<ResBody> {
+    // Auth: a configured token must match; with no token, only loopback may call.
+    match control_token_ok(req) {
+        Some(true) => {}
+        Some(false) => return text(StatusCode::FORBIDDEN, "askr: bad or missing bearer token"),
+        None if peer.ip().is_loopback() => {}
+        None => {
+            return text(
+                StatusCode::FORBIDDEN,
+                "askr: set ASKR_ADMIN_TOKEN to allow PURGE/BAN from a non-loopback address",
+            )
+        }
+    }
+    if !rcache::enabled() {
+        return text(StatusCode::CONFLICT, "askr: response cache is disabled");
+    }
+    if host.is_empty() {
+        return text(
+            StatusCode::BAD_REQUEST,
+            "askr: PURGE/BAN needs a Host header",
+        );
+    }
+
+    if req.method().as_str() == "PURGE" {
+        let n = rcache::purge_url(host, req.uri().path(), req.uri().query());
+        tracing::info!(host, path = req.uri().path(), purged = n, "cache PURGE");
+        return json_response(&format!("{{\"purged\":{n}}}"));
+    }
+
+    // BAN
+    let Some(pattern) = req
+        .headers()
+        .get("x-ban-url")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    else {
+        return text(
+            StatusCode::BAD_REQUEST,
+            "askr: BAN needs an X-Ban-Url header, e.g. X-Ban-Url: /category/tech/*",
+        );
+    };
+    // Fail loudly on regex-looking input rather than silently matching nothing.
+    if pattern.starts_with('^') || pattern.contains(".*") || pattern.ends_with('$') {
+        return text(
+            StatusCode::BAD_REQUEST,
+            "askr: X-Ban-Url is a glob, not a regex — use /category/tech/* instead of ^/category/tech/.*",
+        );
+    }
+    let n = rcache::ban_glob(host, pattern);
+    tracing::info!(host, pattern, banned = n, "cache BAN");
+    json_response(&format!("{{\"banned\":{n}}}"))
+}
+
+fn json_response(body: &str) -> Response<ResBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(full(Bytes::from(body.to_owned())))
+        .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
+}
+
 /// Serve a held entry as a **failure fallback** (`stale-if-error`): the origin
 /// returned 5xx or the handler errored, and stale content beats an error page.
 fn stale_error_fallback(key: &[u8]) -> Option<Response<ResBody>> {
@@ -1157,12 +1262,11 @@ fn ua_class(ua: &str) -> &'static str {
 }
 
 /// Cache key: `METHOD \0 host \0 path?normalised-query \0 encoding \0 device`.
-fn response_cache_key<B>(req: &Request<B>, cfg: &Config) -> Vec<u8> {
-    let host = req
-        .headers()
-        .get(hyper::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
+///
+/// `host` is the already-normalised (lowercased, port-stripped) value also used for
+/// virtual-host routing — so `example.com` and `example.com:443` share one entry,
+/// and `PURGE`/`BAN` can match keys by the same host they were routed with.
+fn response_cache_key<B>(req: &Request<B>, host: &str, cfg: &Config) -> Vec<u8> {
     // Normalised path+query: tracking parameters are dropped from the *key* only
     // — PHP still receives the full, untouched query string.
     let path = req.uri().path();
@@ -1200,6 +1304,7 @@ fn response_cache_key<B>(req: &Request<B>, cfg: &Config) -> Vec<u8> {
         device
     )
     .into_bytes()
+    // (host is already lowercase here)
 }
 
 /// Store a 200 response if the app opted in via an `Askr-Cache` header.
