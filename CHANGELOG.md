@@ -5,6 +5,41 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **Declarative cache rules** (Askr-17) — `[[cache.rule]]` sets response-cache policy
+  per path from `askr.toml`, for apps you can't edit:
+
+  ```toml
+  [[cache.rule]]
+  path = "/admin/*"
+  action = "pass"          # never cache, whatever the app says
+
+  [[cache.rule]]
+  path = "/static/*"
+  ttl = 86400
+  force = true             # cache even for visitors carrying cookies
+
+  [[cache.rule]]
+  path = "/*"
+  ttl = 300
+  swr = 30
+  stale_if_error = 3600
+  ```
+
+  First match wins. A rule's `ttl` overrides the app's `Askr-Cache` header but keeps its
+  tags, so a rule-cached page is still invalidated by `askr_cache_forget_tag()`.
+  Rule-bypassed responses carry `X-Askr-Cache: PASS`, so you can tell "not cacheable"
+  from "a rule said no" with curl.
+
+  Patterns are globs, not regexes, because rules run on the request hot path; a
+  regex-shaped pattern is rejected at config load, as are unknown actions and a rule
+  with neither `pass` nor `ttl` — `askr config-check` reports them.
+
+  **Not implemented, deliberately:** the issue's later phases (embedded Rhai scripting,
+  Wasm plugins). They'd put arbitrary code on the cache decision path, add a sandbox to
+  secure, and freeze a scripting API under the 1.0 stability contract — to do what these
+  rules already do declaratively. Most of VCL's other uses are already config in Askr:
+  redirects, `force_https`, cache-key normalisation, PURGE/BAN and ESI.
+
 - **ESI — Edge-Side Includes** (Askr-16). A page can now be cached *with holes* and
   assembled per request, so the one dynamic widget on an otherwise static page stops
   making the whole page uncacheable:

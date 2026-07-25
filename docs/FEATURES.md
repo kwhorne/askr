@@ -49,6 +49,68 @@ store time, so hits and stale serves do zero per-request compression.
 - Only anonymous `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
   so a cached page can't pin one session onto every visitor.
 
+### Cache rules — policy without touching the app
+
+Everything above assumes you can edit the application. Sometimes you can't: a legacy
+app, a vendor package, a site you inherited. `[[cache.rule]]` sets cache policy per
+path from `askr.toml` instead — the part of VCL that's genuinely hard to live without:
+
+```toml
+[cache]
+response_slots = 512
+
+# Never cache the admin area, whatever the app says
+[[cache.rule]]
+path = "/admin/*"
+action = "pass"
+
+# Cache these for a day even though the app never opted in — and even for
+# visitors carrying cookies
+[[cache.rule]]
+path = "/static/*"
+ttl = 86400
+force = true
+
+# Everything else: short TTL with a stale-if-error safety net
+[[cache.rule]]
+path = "/*"
+ttl = 300
+swr = 30
+stale_if_error = 3600
+```
+
+**First match wins**, so put specific rules above the catch-all. Keys:
+
+| Key | Meaning |
+| --- | --- |
+| `path` | Path glob (`*`, `?`). Must start with `/`. |
+| `action = "pass"` | Never cache this path, even if the app sent `Askr-Cache`. Responses carry `X-Askr-Cache: PASS`. |
+| `ttl` | Fresh seconds. Caches a path the app never opted in to, and overrides the app's TTL for matching paths. |
+| `swr` / `stale_if_error` | The windows from [stale-if-error](#stale-if-error--saint-mode), per rule. |
+| `force` | Cache **even when the request carries cookies**. |
+
+Notes:
+
+- A rule's `ttl` wins over the app's `Askr-Cache` header (it's your explicit policy),
+  but the app's **tags are kept** — so a rule-cached page is still invalidated by
+  `askr_cache_forget_tag()`.
+- ⚠️ **`force` is the dangerous one**, exactly as in Varnish: if the path can render
+  anything user-specific, one visitor's page will be served to everyone. Use it only
+  on paths you know are identical for all visitors. `Set-Cookie` is still stripped on
+  store, but that doesn't make a personalised body safe to share.
+- Patterns are **globs, not regexes**, because rules are evaluated on the request hot
+  path. A regex-shaped pattern is rejected at config load, so `askr config-check`
+  tells you at once rather than leaving a rule that silently never matches.
+
+**Why not a scripting engine?** The original plan had later phases with embedded Rhai
+and Wasm plugins. Those are not implemented, on purpose: they would put arbitrary code
+on the cache decision path, add a whole sandbox to secure, and freeze a scripting API
+under [STABILITY.md](STABILITY.md) — to do what the table above already does
+declaratively. Most of what VCL is used for is elsewhere in Askr as config already:
+redirects and `force_https` ([Hosting](HOSTING.md)), cache-key normalisation, PURGE/BAN,
+and ESI. If you hit a case these rules genuinely can't express, that's worth an issue —
+it's better evidence for a script engine than the idea of one.
+
 ### ESI — one page, many TTLs
 
 The hard part of caching isn't the cache, it's the *one dynamic thing* on an

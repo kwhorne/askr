@@ -548,6 +548,8 @@ fn main() -> anyhow::Result<()> {
                     cache_ignore_cookies: Vec::new(),
                     cache_vary_user_agent: false,
                     cache_saint_seconds: 0,
+                    // Cache rules are config-file only (they're table-valued).
+                    cache_rules: Vec::new(),
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

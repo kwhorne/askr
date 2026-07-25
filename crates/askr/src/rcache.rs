@@ -352,8 +352,9 @@ pub struct Cached {
 }
 
 /// Glob match with `*` wildcards (any number, anywhere). Iterative and
-/// allocation-free — it runs while a slot lock is held.
-fn glob_match(pattern: &str, text: &str) -> bool {
+/// allocation-free — it runs while a slot lock is held, and per request for
+/// `[[cache.rule]]` matching.
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     let (p, t) = (pattern.as_bytes(), text.as_bytes());
     // Two-pointer wildcard match with backtracking to the last `*`.
     let (mut pi, mut ti) = (0usize, 0usize);

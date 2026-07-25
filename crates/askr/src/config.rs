@@ -77,6 +77,50 @@ fn default_redirect_status() -> u16 {
     308
 }
 
+/// A declarative response-cache rule: `[[cache.rule]]`.
+///
+/// Rules let an operator set cache policy per path **without touching the app** — the
+/// one thing VCL is genuinely needed for once redirects, cache keys, PURGE/BAN,
+/// stale-if-error and ESI are all first-class elsewhere in Askr.
+///
+/// Patterns are globs (`*`, `?`), not regexes: rules are evaluated on the request hot
+/// path, and a regex engine has no business there. A regex-looking pattern is
+/// rejected at config load, so you find out at startup (or from `askr config-check`)
+/// rather than from a rule that silently never matches.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheRule {
+    /// Path glob, e.g. `/admin/*`. Matched against the request path (no query).
+    pub path: String,
+    /// `"pass"` — never cache this path, even if the app sent an `Askr-Cache` header.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Fresh seconds. Set this to cache a path the app never opted in to; it also
+    /// overrides the app's `Askr-Cache` TTL for matching paths.
+    #[serde(default)]
+    pub ttl: Option<u64>,
+    /// Stale-while-revalidate window (seconds past `ttl`).
+    #[serde(default)]
+    pub swr: u64,
+    /// `stale-if-error` window (seconds past `ttl`).
+    #[serde(default)]
+    pub stale_if_error: u64,
+    /// Cache this path **even when the request carries cookies**.
+    ///
+    /// This is the dangerous one, exactly as in Varnish: if the path can render
+    /// anything user-specific, one visitor's page is then served to everyone. Only
+    /// use it on paths you know are identical for all visitors.
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl CacheRule {
+    /// Does this rule bypass the cache entirely?
+    pub fn is_pass(&self) -> bool {
+        self.action.as_deref() == Some("pass")
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidecarSpec {
@@ -234,6 +278,9 @@ pub struct CacheSection {
     /// are then served from cache without running PHP. 0 = off (default).
     #[serde(default)]
     pub saint_seconds: u64,
+    /// Declarative per-path cache policy: `[[cache.rule]]`. First match wins.
+    #[serde(default)]
+    pub rule: Vec<CacheRule>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -392,6 +439,42 @@ impl FileConfig {
             });
         }
 
+        // Cache rules: validate at load so a typo fails at startup (and under
+        // `askr config-check`) instead of becoming a rule that never matches.
+        for r in &self.cache.rule {
+            anyhow::ensure!(
+                !r.path.trim().is_empty(),
+                "[[cache.rule]] needs a path glob, e.g. path = \"/admin/*\""
+            );
+            // Check regex-shaped input first: its message is the useful one.
+            anyhow::ensure!(
+                !(r.path.starts_with('^') || r.path.contains(".*") || r.path.ends_with('$')),
+                "[[cache.rule]] path is a glob, not a regex — use \"/admin/*\" instead of \"^/admin/.*\": {}",
+                r.path
+            );
+            anyhow::ensure!(
+                r.path.starts_with('/'),
+                "[[cache.rule]] path must start with '/': {}",
+                r.path
+            );
+            if let Some(a) = &r.action {
+                anyhow::ensure!(
+                    a == "pass",
+                    "[[cache.rule]] unknown action \"{a}\" — the only action is \"pass\""
+                );
+            }
+            anyhow::ensure!(
+                r.is_pass() || r.ttl.is_some(),
+                "[[cache.rule]] for {} needs either action = \"pass\" or a ttl",
+                r.path
+            );
+            anyhow::ensure!(
+                !(r.is_pass() && r.ttl.is_some()),
+                "[[cache.rule]] for {} sets both action = \"pass\" and a ttl",
+                r.path
+            );
+        }
+
         let workers = match self.server.workers.as_str() {
             "auto" => cpus.max(1),
             n => n
@@ -496,6 +579,7 @@ impl FileConfig {
                 cache_ignore_cookies: self.cache.ignore_cookies.clone(),
                 cache_vary_user_agent: self.cache.vary_user_agent,
                 cache_saint_seconds: self.cache.saint_seconds,
+                cache_rules: self.cache.rule.clone(),
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

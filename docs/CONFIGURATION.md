@@ -166,6 +166,31 @@ Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See
 | `vary_user_agent` | bool | Split the response-cache key on mobile vs desktop `User-Agent` (also sets `Vary: User-Agent`). Default `false`. |
 | `saint_seconds` | int | Saint mode: seconds to treat PHP as unhealthy after a `5xx`, during which requests holding a `stale-if-error` entry skip PHP entirely. `0` = off (default). |
 
+#### `[[cache.rule]]`
+
+Per-path cache policy, applied without touching the app. **First match wins** — put
+specific rules above the catch-all. See [Features](FEATURES.md#cache-rules--policy-without-touching-the-app).
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `path` | string | Path glob (`*`, `?`), must start with `/`. Globs, not regexes — a regex-shaped pattern is rejected at load. |
+| `action` | string | `"pass"` = never cache this path, even if the app sent `Askr-Cache`. Responses carry `X-Askr-Cache: PASS`. |
+| `ttl` | int | Fresh seconds. Caches a path the app never opted in to; overrides the app's TTL (the app's tags are kept). |
+| `swr` | int | Stale-while-revalidate window, seconds past `ttl`. |
+| `stale_if_error` | int | `stale-if-error` window, seconds past `ttl`. |
+| `force` | bool | Cache **even when the request carries cookies**. Dangerous on anything user-specific — one visitor's page is then served to everyone. |
+
+```toml
+[[cache.rule]]
+path = "/admin/*"
+action = "pass"
+
+[[cache.rule]]
+path = "/static/*"
+ttl = 86400
+force = true
+```
+
 Cache-key normalisation example — tracking parameters and analytics cookies stop
 fragmenting the cache:
 

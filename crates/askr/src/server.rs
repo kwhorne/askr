@@ -129,6 +129,8 @@ pub struct Config {
     /// Saint mode: seconds to treat PHP as unhealthy after a 5xx, during which a
     /// request holding a `stale-if-error` entry skips PHP entirely (0 = off).
     pub cache_saint_seconds: u64,
+    /// Declarative per-path cache policy (`[[cache.rule]]`), first match wins.
+    pub cache_rules: Vec<crate::config::CacheRule>,
 }
 
 /// A virtual host: its docroot + front controller, matched by `hosts`.
@@ -581,17 +583,25 @@ where
     // session/auth cookie may see user-specific content. Cookies listed in
     // `[cache] ignore_cookies` (analytics like `_ga`) don't count as identity,
     // so a visitor who only has those is still served from the shared cache.
+    // A `[[cache.rule]]` can override that policy per path: bypass the cache, or
+    // cache despite cookies.
+    let rule = cache_rule_for(req.uri().path(), &rt.config.cache_rules);
+    let passed = rule.is_some_and(|r| r.is_pass());
+    let anonymous = req
+        .headers()
+        .get_all(hyper::header::COOKIE)
+        .iter()
+        .all(|v| {
+            v.to_str()
+                .is_ok_and(|c| cookies_ignorable(c, &rt.config.cache_ignore_cookies))
+        });
     let cacheable = rcache::enabled()
+        && !passed
         && matches!(*req.method(), Method::GET | Method::HEAD)
-        && req
-            .headers()
-            .get_all(hyper::header::COOKIE)
-            .iter()
-            .all(|v| {
-                v.to_str()
-                    .is_ok_and(|c| cookies_ignorable(c, &rt.config.cache_ignore_cookies))
-            });
+        && (anonymous || rule.is_some_and(|r| r.force));
     let cache_key = cacheable.then(|| response_cache_key(&req, &host, &rt.config));
+    // Own the rule for the rest of the request — `req` is consumed further down.
+    let rule = rule.cloned();
 
     // Traffic shadow: decide (and sample) now, while `req` is still intact, what
     // to mirror. The mirror itself fires after the real response is built.
@@ -872,6 +882,7 @@ where
                     &resp,
                     &accept_encoding,
                     rt.config.cache_vary_user_agent,
+                    rule.as_ref(),
                 );
             }
             // Fire the shadow mirror off the request path: hash prod's body now,
@@ -884,7 +895,13 @@ where
                     crate::shadow::compare_owned(client, base, method, pq, ps, ph).await;
                 });
             }
-            let state = rcache::enabled().then_some("MISS");
+            // `PASS` makes a rule-bypassed path visible in the response, so you can
+            // tell "not cacheable" from "a rule said no" with curl.
+            let state = if passed {
+                Some("PASS")
+            } else {
+                rcache::enabled().then_some("MISS")
+            };
             #[cfg(feature = "otel")]
             let build_t0 = Instant::now();
             // ESI runs after the store above, so the cache keeps the tags and each
@@ -1122,6 +1139,19 @@ fn saint_active() -> bool {
     SAINT_UNTIL.load(std::sync::atomic::Ordering::Relaxed) > unix_secs()
 }
 
+/// The first `[[cache.rule]]` whose glob matches this path, if any.
+///
+/// Rules are the operator's cache policy, applied without touching the app: bypass a
+/// path entirely (`action = "pass"`), give a path a TTL the app never asked for, or
+/// cache it despite cookies. Evaluated per request, so matching is glob-based and
+/// allocation-free.
+fn cache_rule_for<'a>(
+    path: &str,
+    rules: &'a [crate::config::CacheRule],
+) -> Option<&'a crate::config::CacheRule> {
+    rules.iter().find(|r| rcache::glob_match(&r.path, path))
+}
+
 /// How many passes of ESI expansion to run — i.e. how deeply fragments may nest.
 const ESI_MAX_PASSES: usize = 3;
 /// Total fragment fetches allowed per request, to bound a page (or a loop) that
@@ -1240,7 +1270,13 @@ async fn esi_fragment(
     match rt.php.handle(request).await {
         Ok(Reply::Buffered(resp)) if resp.status == 200 => {
             if let Some(k) = &key {
-                maybe_store(k, &resp, "", config.cache_vary_user_agent);
+                maybe_store(
+                    k,
+                    &resp,
+                    "",
+                    config.cache_vary_user_agent,
+                    cache_rule_for(src.split('?').next().unwrap_or(src), &config.cache_rules),
+                );
             }
             Some(resp.body)
         }
@@ -1476,20 +1512,34 @@ fn response_cache_key<B>(req: &Request<B>, host: &str, cfg: &Config) -> Vec<u8> 
 /// Store a 200 response if the app opted in via an `Askr-Cache` header.
 /// `Set-Cookie` is stripped so a cached page can't pin one client's session
 /// onto every anonymous visitor.
-fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str, vary_ua: bool) {
+fn maybe_store(
+    key: &[u8],
+    resp: &askr_php::Response,
+    accept_encoding: &str,
+    vary_ua: bool,
+    rule: Option<&crate::config::CacheRule>,
+) {
     if resp.status != 200 {
         return;
     }
-    let Some(dir) = resp
+    let app_dir = resp
         .headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("askr-cache"))
         .map(|(_, v)| v.as_str())
-    else {
-        return;
-    };
-    let Some((ttl, swr, sie, tags)) = parse_cache_directive(dir) else {
-        return;
+        .and_then(parse_cache_directive);
+    // A rule's TTL is the operator's explicit policy, so it wins over the app's
+    // header — but the app's tags are kept, so a rule-cached page can still be
+    // invalidated with `askr_cache_forget_tag()`.
+    let (ttl, swr, sie, tags) = match (rule.and_then(|r| r.ttl), app_dir) {
+        (Some(ttl), app) => {
+            let r = rule.expect("ttl came from the rule");
+            let tags = app.map(|(_, _, _, t)| t).unwrap_or_default();
+            (ttl, r.swr, r.stale_if_error, tags)
+        }
+        (None, Some(d)) => d,
+        // Neither the app nor a rule asked for caching.
+        (None, None) => return,
     };
     let mut stored: Vec<(String, String)> = resp
         .headers
@@ -1645,6 +1695,9 @@ async fn refresh_entry(
     let script = docroot.join(front_controller);
     let script_name = format!("/{}", front_controller.display());
 
+    // Keep the path: the builder consumes `uri`, and the store below needs it to
+    // re-evaluate `[[cache.rule]]` for this URL.
+    let uri_path = uri.path().to_string();
     let mut builder = hyper::Request::builder().method(method).uri(uri);
     builder = builder.header(hyper::header::HOST, host);
     if !accept_encoding.is_empty() {
@@ -1675,6 +1728,7 @@ async fn refresh_entry(
             &resp,
             &accept_encoding,
             rt.config.cache_vary_user_agent,
+            cache_rule_for(&uri_path, &rt.config.cache_rules),
         );
     }
     rcache::end(&key);
@@ -2224,6 +2278,37 @@ mod tests {
             normalize_query("a[]=2&a[]=1", &[]),
             normalize_query("a[]=1&a[]=2", &[])
         );
+    }
+
+    #[test]
+    fn cache_rules_first_match_wins() {
+        let mk = |path: &str, action: Option<&str>, ttl: Option<u64>| crate::config::CacheRule {
+            path: path.to_string(),
+            action: action.map(str::to_owned),
+            ttl,
+            swr: 0,
+            stale_if_error: 0,
+            force: false,
+        };
+        let rules = vec![
+            mk("/admin/*", Some("pass"), None),
+            mk("/static/*", None, Some(86400)),
+            mk("/*", None, Some(60)),
+        ];
+        // Specific rules win over the catch-all because the first match is taken.
+        assert!(cache_rule_for("/admin/users", &rules).unwrap().is_pass());
+        assert_eq!(
+            cache_rule_for("/static/app.css", &rules).unwrap().ttl,
+            Some(86400)
+        );
+        assert_eq!(
+            cache_rule_for("/anything/else", &rules).unwrap().ttl,
+            Some(60)
+        );
+        // No rules at all: no policy.
+        assert!(cache_rule_for("/x", &[]).is_none());
+        // A glob that doesn't match leaves the path unruled.
+        assert!(cache_rule_for("/x", &[mk("/admin/*", Some("pass"), None)]).is_none());
     }
 
     #[test]

@@ -88,7 +88,7 @@ calling the bridge directly if you want the smoothest ride.
 - Response contract headers: the app-supplied **`Askr-Cache`** and **`Askr-ESI`**
   headers (both consumed, never forwarded), the `<esi:include>` / `<esi:remove>` tag
   syntax, and the
-  **`X-Askr-Cache: HIT|MISS|STALE|STALE-ERROR`** diagnostic header. When HTTP/3 is
+  **`X-Askr-Cache: HIT|MISS|PASS|STALE|STALE-ERROR`** diagnostic header. When HTTP/3 is
   on, TCP responses carry **`Alt-Svc: h3=…`**.
 
 ### 6. Build features
