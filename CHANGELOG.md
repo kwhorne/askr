@@ -5,6 +5,26 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Security
+
+- **Static file serving no longer discloses sources or dotfiles** (Askr-34). A request
+  whose path resolved to an existing file was served as static bytes with no
+  extension filtering, so:
+  - `GET /index.php` returned the **PHP source** instead of running it, and any other
+    `.php` under the document root (installers, legacy scripts, files holding
+    credentials) could be read the same way;
+  - dotfiles were served verbatim — with a document root pointed at an app root
+    (a common misconfiguration) `GET /.env` returned `APP_KEY` and database
+    credentials, and `/.git/config` was readable.
+
+  Paths ending in `.php`/`.php3-8`/`.phps`/`.pht`/`.phtml`/`.phar`, and any path with
+  a dot-component, now fall through to the front controller so the application answers
+  (normally a 404). `.well-known/` remains servable for ACME HTTP-01 and
+  `security.txt`. Askr still only ever executes the configured front controller — never
+  an arbitrary `.php` found on disk — so this path cannot execute an uploaded file
+  either. **Upgrade recommended for any deployment whose document root contains PHP
+  files beyond the front controller, or is not a dedicated `public/` directory.**
+
 - **stale-if-error & saint mode** (Askr-18) — an app can now survive its own backend
   failing. `header('Askr-Cache: 300, stale-if-error=86400')` (alias `sie=`) keeps the
   entry as a **failure fallback**: never served proactively, but when PHP answers

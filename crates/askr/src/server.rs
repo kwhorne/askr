@@ -553,9 +553,10 @@ where
     }
 
     // try_files: serve an existing static file directly (async stat, no blocking
-    // syscall on the async path).
+    // syscall on the async path). Sources and dotfiles are never served as static
+    // bytes — they fall through to the front controller (see `static_forbidden`).
     let rel = sanitize(req.uri().path());
-    if !rel.as_os_str().is_empty() {
+    if !rel.as_os_str().is_empty() && !static_forbidden(&rel) {
         let candidate = docroot.join(&rel);
         if let Ok(meta) = tokio::fs::metadata(&candidate).await {
             if meta.is_file() {
@@ -1742,6 +1743,44 @@ fn sanitize(path: &str) -> PathBuf {
     out
 }
 
+/// Paths that must never be served as static bytes:
+///
+/// - **PHP sources.** Serving `/index.php` returned the file's source instead of
+///   running it — source disclosure, and any other `.php` under the docroot leaked
+///   too (installers, legacy scripts, files holding credentials).
+/// - **Dotfiles and dot-directories** — `.env`, `.git/*`, `.htaccess`. A docroot
+///   pointed at an app root (a common misconfiguration) otherwise served secrets
+///   verbatim.
+///
+/// `.well-known/` stays allowed: ACME HTTP-01, `security.txt` and friends live
+/// there legitimately.
+///
+/// Blocked paths fall through to the front controller, so the app answers (a 404
+/// from the framework) instead of Askr handing out bytes. Note that Askr only ever
+/// *executes* the configured front controller — never an arbitrary `.php` found on
+/// disk — so an uploaded script can't be run through this path either.
+fn static_forbidden(rel: &Path) -> bool {
+    let dotted = rel.components().any(|c| match c {
+        Component::Normal(s) => {
+            let s = s.to_string_lossy();
+            s.starts_with('.') && s != ".well-known"
+        }
+        _ => false,
+    });
+    if dotted {
+        return true;
+    }
+    matches!(
+        rel.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "php" | "php3" | "php4" | "php5" | "php7" | "php8" | "phps" | "pht" | "phtml" | "phar"
+        )
+    )
+}
+
 fn mime_for(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("html") | Some("htm") => "text/html; charset=utf-8",
@@ -1773,6 +1812,31 @@ mod tests {
         assert_eq!(sanitize("/../../etc/passwd"), PathBuf::from("etc/passwd"));
         assert_eq!(sanitize("/a/../b/./c"), PathBuf::from("a/b/c"));
         assert!(sanitize("/").as_os_str().is_empty());
+    }
+
+    #[test]
+    fn static_serving_refuses_sources_and_dotfiles() {
+        // PHP sources are never handed out as bytes (and never executed from disk).
+        assert!(static_forbidden(Path::new("index.php")));
+        assert!(static_forbidden(Path::new("legacy/install.PHP")));
+        assert!(static_forbidden(Path::new("a.phtml")));
+        assert!(static_forbidden(Path::new("a.phar")));
+        assert!(static_forbidden(Path::new("a.php5")));
+        // Dotfiles and dot-directories: secrets and VCS metadata.
+        assert!(static_forbidden(Path::new(".env")));
+        assert!(static_forbidden(Path::new(".env.production")));
+        assert!(static_forbidden(Path::new(".git/config")));
+        assert!(static_forbidden(Path::new("sub/.htaccess")));
+        // `.well-known` is legitimate (ACME HTTP-01, security.txt).
+        assert!(!static_forbidden(Path::new(".well-known/security.txt")));
+        assert!(!static_forbidden(Path::new(
+            ".well-known/acme-challenge/tok123"
+        )));
+        // Normal assets are unaffected.
+        assert!(!static_forbidden(Path::new("build/app.js")));
+        assert!(!static_forbidden(Path::new("img/logo.png")));
+        assert!(!static_forbidden(Path::new("phpinfo.txt")));
+        assert!(!static_forbidden(Path::new("graphql")));
     }
 
     #[test]

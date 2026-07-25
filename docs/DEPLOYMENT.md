@@ -161,8 +161,17 @@ See [Admin](ADMIN.md) for scripting examples.
 
 ## Security notes
 
-- The admin plane has **no built-in auth** — bind it to `127.0.0.1` and reach it
-  via SSH / private network, or front it with your own auth.
+- The admin plane is **unauthenticated by default** — bind it to `127.0.0.1` and
+  reach it via SSH / private network, or set `ASKR_ADMIN_TOKEN` to require a
+  `Authorization: Bearer <token>` header on the API (see [Admin](ADMIN.md)). Askr
+  warns at startup if the admin plane is bound to a non-loopback address.
+- **Static files never expose sources or dotfiles.** A request that resolves to a
+  `.php`/`.phtml`/`.phar` file, or to any dotfile or dot-directory (`.env`,
+  `.git/*`, `.htaccess`), is *not* served as bytes — it falls through to the front
+  controller, so your app answers (normally a 404). `.well-known/` stays servable
+  for ACME HTTP-01 and `security.txt`. Askr also only ever executes the configured
+  front controller, never an arbitrary `.php` found on disk, so a file uploaded
+  into the docroot can't be run.
 - The entire server hot path is memory-safe Rust; PHP is the single `unsafe`
   frontier. On Linux, harden that boundary with `--sandbox` (seccomp no-exec +
   optional Landlock write-restriction) — see [Sandbox](SANDBOX.md).
