@@ -38,6 +38,9 @@ struct Entry {
     expires_at: u64,  // fresh deadline (unix secs; 0 = never)
     stale_until: u64, // hard deadline (unix secs; 0 = never). Between expires_at
     // and stale_until the entry is served stale while a background refresh runs.
+    error_until: u64, // stale-if-error deadline (unix secs; 0 = off). Past
+    // stale_until but within this, the entry is kept as a *fallback* and served
+    // only when the origin fails (5xx / handler error).
     status: u32,
     ntags: u32,
     tag_hash: [u64; MAX_TAGS],
@@ -336,12 +339,17 @@ pub struct Cached {
     /// True when past the fresh deadline but within the stale-while-revalidate
     /// window: serve this immediately, but trigger a background refresh.
     pub stale: bool,
+    /// True when the entry survives only inside its `stale-if-error` window: it
+    /// must NOT be served proactively, only as a fallback when the origin fails.
+    pub error_only: bool,
 }
 
 /// Look up a cached response and record a hit/miss. Use [`peek`] for the
 /// coalescing poll loop so repeated polls don't inflate the miss counter.
 pub fn get(key: &[u8]) -> Option<Cached> {
-    let hit = peek(key);
+    // An entry kept alive only by its stale-if-error window is not a hit: the
+    // request must run PHP, and only a failure may fall back to it.
+    let hit = peek(key).filter(|c| !c.error_only);
     if let Some(c) = counters() {
         if hit.is_some() {
             c.hits.fetch_add(1, Ordering::Relaxed);
@@ -350,6 +358,14 @@ pub fn get(key: &[u8]) -> Option<Cached> {
         }
     }
     hit
+}
+
+/// Look up an entry to serve as a **failure fallback**: the origin just returned
+/// 5xx (or the handler errored), so anything we still hold — stale or inside the
+/// `stale-if-error` window — beats an error page. Doesn't touch the counters (the
+/// miss was already counted when the request started).
+pub fn stale_on_error(key: &[u8]) -> Option<Cached> {
+    peek(key)
 }
 
 /// Look up a cached response without touching the hit/miss counters.
@@ -375,8 +391,12 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
             }
             let exp = ptr::read(ptr::addr_of!((*e).expires_at));
             let hard = ptr::read(ptr::addr_of!((*e).stale_until));
-            // Past the hard deadline ⇒ fully expired (a real miss).
-            if hard != 0 && hard < now {
+            let err_until = ptr::read(ptr::addr_of!((*e).error_until));
+            // Retain until the widest deadline: a stale-if-error window can outlive
+            // the stale-while-revalidate window (that's the point of it).
+            let retain = hard.max(err_until);
+            // Past every deadline ⇒ fully expired (a real miss).
+            if retain != 0 && retain < now {
                 ptr::write(ptr::addr_of_mut!((*e).state), 2); // tombstone, keep chain
                 break;
             }
@@ -398,6 +418,8 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
             }
             // Past the fresh deadline but within the stale window ⇒ serve stale.
             let swr_stale = exp != 0 && exp < now;
+            // Past the stale window too ⇒ only usable as an error fallback.
+            let error_only = swr_stale && (hard == 0 || hard < now);
             let status = ptr::read(ptr::addr_of!((*e).status)) as u16;
             let hlen = (ptr::read(ptr::addr_of!((*e).hdr_len)) as usize).min(HDR_MAX);
             let blen = (ptr::read(ptr::addr_of!((*e).body_len)) as usize).min(BODY_MAX);
@@ -409,7 +431,8 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
                 status,
                 headers: parse_hdr_blob(&hdr),
                 body,
-                stale: swr_stale,
+                stale: swr_stale && !error_only,
+                error_only,
             });
             break;
         }
@@ -419,6 +442,7 @@ pub fn peek(key: &[u8]) -> Option<Cached> {
 
 /// Store a response. `tags` are opaque byte strings. Returns false if too large
 /// or the cache is disabled.
+#[allow(clippy::too_many_arguments)]
 pub fn store(
     key: &[u8],
     status: u16,
@@ -426,6 +450,8 @@ pub fn store(
     body: &[u8],
     ttl: u64,
     swr: u64,
+    // `stale-if-error` grace, in seconds past the fresh deadline (0 = off).
+    sie: u64,
     tags: &[Vec<u8>],
 ) -> bool {
     let Some((p, slots)) = base() else {
@@ -445,6 +471,9 @@ pub fn store(
     } else {
         expires
     };
+    // The error window is measured from the fresh deadline too, so
+    // `stale-if-error` is independent of (and usually far longer than) `swr`.
+    let error_until = if ttl > 0 && sie > 0 { expires + sie } else { 0 };
 
     // Snapshot each tag's current generation, so a forget_tag that raced ahead
     // of this store still invalidates us.
@@ -473,6 +502,7 @@ pub fn store(
                     body,
                     expires,
                     stale_until,
+                    error_until,
                     ntags,
                     &th,
                     &tg,
@@ -502,6 +532,7 @@ pub fn store(
             body,
             expires,
             stale_until,
+            error_until,
             ntags,
             &th,
             &tg,
@@ -519,6 +550,7 @@ unsafe fn write_entry(
     body: &[u8],
     expires: u64,
     stale_until: u64,
+    error_until: u64,
     ntags: usize,
     th: &[u64; MAX_TAGS],
     tg: &[u64; MAX_TAGS],
@@ -527,6 +559,7 @@ unsafe fn write_entry(
     ptr::write(ptr::addr_of_mut!((*e).key_hash), h);
     ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
     ptr::write(ptr::addr_of_mut!((*e).stale_until), stale_until);
+    ptr::write(ptr::addr_of_mut!((*e).error_until), error_until);
     ptr::write(ptr::addr_of_mut!((*e).status), status as u32);
     ptr::write(ptr::addr_of_mut!((*e).ntags), ntags as u32);
     for i in 0..MAX_TAGS {
@@ -585,8 +618,13 @@ fn parse_hdr_blob(raw: &[u8]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
+    /// These tests share one process-wide region (and both `init` it), so run them
+    /// one at a time — parallel probing/eviction across them is a flake source.
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn store_get_and_tag_invalidation() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         init(64);
         assert!(enabled());
 
@@ -597,6 +635,7 @@ mod tests {
             &hdrs,
             b"<h1>posts</h1>",
             60,
+            0,
             0,
             &[b"posts".to_vec()]
         ));
@@ -619,19 +658,20 @@ mod tests {
             b"v2",
             60,
             0,
+            0,
             &[b"posts".to_vec()]
         ));
         assert_eq!(get(b"GET|/posts").unwrap().body, b"v2");
 
         // An untagged entry is unaffected by tag bumps.
-        assert!(store(b"GET|/about", 200, &hdrs, b"about", 0, 0, &[]));
+        assert!(store(b"GET|/about", 200, &hdrs, b"about", 0, 0, 0, &[]));
         forget_tag(b"posts");
         assert_eq!(get(b"GET|/about").unwrap().body, b"about");
 
         // Stale-while-revalidate: 1s fresh, +5s stale window. Fresh immediately;
         // past the fresh deadline it is served STALE (not a miss) until the hard
         // deadline.
-        assert!(store(b"GET|/swr", 200, &hdrs, b"swrbody", 1, 10, &[]));
+        assert!(store(b"GET|/swr", 200, &hdrs, b"swrbody", 1, 10, 0, &[]));
         assert!(!get(b"GET|/swr").unwrap().stale);
         // Sleep past the 1s fresh deadline (with margin for the second boundary),
         // staying inside the 10s stale window.
@@ -639,5 +679,37 @@ mod tests {
         let s = get(b"GET|/swr").expect("served stale");
         assert!(s.stale);
         assert_eq!(s.body, b"swrbody");
+    }
+
+    #[test]
+    fn stale_if_error_is_a_fallback_not_a_hit() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        init(64);
+        let hdrs = vec![("Content-Type".to_string(), "text/html".to_string())];
+
+        // 1s fresh, no swr window, but a long stale-if-error grace.
+        assert!(store(b"GET|/sie", 200, &hdrs, b"siebody", 1, 0, 3600, &[]));
+        // Fresh: a normal hit, and not an error-only entry.
+        let fresh = get(b"GET|/sie").expect("fresh hit");
+        assert!(!fresh.stale && !fresh.error_only);
+
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+
+        // Past the fresh deadline with no swr window, `get` must NOT serve it:
+        // the request has to run PHP.
+        assert!(
+            get(b"GET|/sie").is_none(),
+            "error-only entry must not be a hit"
+        );
+        // But it is still held, and usable as a failure fallback.
+        let fb = stale_on_error(b"GET|/sie").expect("fallback available");
+        assert!(fb.error_only);
+        assert_eq!(fb.body, b"siebody");
+
+        // Without stale-if-error, an expired entry is simply gone.
+        assert!(store(b"GET|/plain", 200, &hdrs, b"x", 1, 0, 0, &[]));
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        assert!(get(b"GET|/plain").is_none());
+        assert!(stale_on_error(b"GET|/plain").is_none());
     }
 }

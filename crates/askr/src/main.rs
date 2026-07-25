@@ -546,6 +546,7 @@ fn main() -> anyhow::Result<()> {
                     cache_strip_query: Vec::new(),
                     cache_ignore_cookies: Vec::new(),
                     cache_vary_user_agent: false,
+                    cache_saint_seconds: 0,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

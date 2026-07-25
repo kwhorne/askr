@@ -164,6 +164,7 @@ Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See
 | `strip_query_params` | list | Query parameters ignored when building the response-cache key. Trailing `*` globs (`"utm_*"`). PHP still receives the full query. |
 | `ignore_cookies` | list | Cookies that don't make a request non-cacheable (analytics: `"_ga"`, `"_gid"`, `"_fbp"`). Trailing `*` globs. Default: any cookie defeats caching. |
 | `vary_user_agent` | bool | Split the response-cache key on mobile vs desktop `User-Agent` (also sets `Vary: User-Agent`). Default `false`. |
+| `saint_seconds` | int | Saint mode: seconds to treat PHP as unhealthy after a `5xx`, during which requests holding a `stale-if-error` entry skip PHP entirely. `0` = off (default). |
 
 Cache-key normalisation example — tracking parameters and analytics cookies stop
 fragmenting the cache:

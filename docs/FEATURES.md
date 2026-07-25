@@ -49,6 +49,39 @@ store time, so hits and stale serves do zero per-request compression.
 - Only anonymous `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
   so a cached page can't pin one session onto every visitor.
 
+### stale-if-error & saint mode
+
+When the database falls over, the choice is between a 500 page and *slightly old
+content*. Most sites would rather serve the old content:
+
+```php
+// fresh 300s; for a whole day after that, this page may be served if PHP fails
+header('Askr-Cache: 300, stale-if-error=86400');
+```
+
+A `stale-if-error` window (alias `sie=`) keeps the entry as a **failure fallback**.
+It is never served proactively — past the fresh/`swr` window a request still runs
+PHP — but if PHP answers `5xx`, times out, or the worker dies, Askr serves the held
+response with `X-Askr-Cache: STALE-ERROR` instead of the error. The real failure is
+still logged, counted, and written to `--record-errors` for `askr replay`, so an
+outage stays visible in your telemetry while visitors keep browsing.
+
+**Saint mode** stops a dying backend from being hammered while it's down:
+
+```toml
+[cache]
+saint_seconds = 5   # 0 = off (default)
+```
+
+After a `5xx`, the worker treats PHP as unhealthy for that many seconds: requests
+that hold a `stale-if-error` entry are served straight from cache **without running
+PHP at all**, giving the database room to recover. Requests without a fallback still
+go through, so recovery is detected automatically — and a page that never opted into
+`stale-if-error` always gets the real error.
+
+The window is measured from the fresh deadline and is independent of `swr`, so the
+three can be combined: `Askr-Cache: 300, swr=60, stale-if-error=86400`.
+
 ### Cache-key normalisation
 
 By default the key is `method + host + path?query + encoding`, and *any* cookie

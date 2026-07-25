@@ -126,6 +126,9 @@ pub struct Config {
     pub cache_ignore_cookies: Vec<String>,
     /// Split the response-cache key on mobile vs desktop `User-Agent`.
     pub cache_vary_user_agent: bool,
+    /// Saint mode: seconds to treat PHP as unhealthy after a 5xx, during which a
+    /// request holding a `stale-if-error` entry skips PHP entirely (0 = off).
+    pub cache_saint_seconds: u64,
 }
 
 /// A virtual host: its docroot + front controller, matched by `hosts`.
@@ -620,6 +623,29 @@ where
             finish(&rt, &response, t_start, 0);
             return Ok(response);
         }
+        // Saint mode: PHP failed recently — don't queue more work onto a dying
+        // backend when the app told us this page may be served on error.
+        if saint_active() {
+            if let Some(response) = stale_error_fallback(key) {
+                tracing::warn!(
+                    path = %req.uri().path(),
+                    "saint mode: serving stale-if-error fallback without running PHP"
+                );
+                #[cfg(feature = "otel")]
+                otel_fast(
+                    &rt,
+                    req.method(),
+                    req.uri(),
+                    req.version(),
+                    t_start_wall,
+                    t_start,
+                    &response,
+                    "STALE-ERROR",
+                );
+                finish(&rt, &response, t_start, 0);
+                return Ok(response);
+            }
+        }
         match rcache::begin(key) {
             rcache::Lead::Leader => coalesce_leader = true,
             rcache::Lead::Follower => {
@@ -638,7 +664,9 @@ where
                     backoff = (backoff * 2).min(Duration::from_millis(16));
                     if !rcache::is_inflight(key) {
                         // Leader finished: read once (a HIT if it was cacheable).
-                        served = rcache::peek(key);
+                        // An entry alive only on its stale-if-error window is not
+                        // servable here — the leader's response wasn't cacheable.
+                        served = rcache::peek(key).filter(|c| !c.error_only);
                         break;
                     }
                 }
@@ -847,6 +875,27 @@ where
         }
     };
 
+    // stale-if-error (+ saint mode): the origin failed — a 5xx from PHP or a dead /
+    // timed-out worker (502). If the app marked this page usable on failure and we
+    // still hold it, serve that instead of shipping the error to the client. One
+    // place covers both paths, and the coalescing release below still runs.
+    if response.status().as_u16() >= 500 {
+        saint_mark(rt.config.cache_saint_seconds);
+        if let Some(fallback) = cache_key.as_ref().and_then(|k| stale_error_fallback(k)) {
+            // Record the *real* failure for `askr replay` first — the substituted
+            // response won't trip the status check further down.
+            if let (Some(dir), Some(req)) = (&config.record_dir, &record_copy) {
+                crate::record::record_failure(dir, req, response.status().as_u16());
+            }
+            tracing::warn!(
+                status = response.status().as_u16(),
+                path = %parts.uri.path(),
+                "origin failed; serving stale-if-error fallback"
+            );
+            response = fallback;
+        }
+    }
+
     // Advertise HTTP/3 so TCP (h1/h2) clients can upgrade to QUIC.
     #[cfg(feature = "http3")]
     if config.http3 {
@@ -1009,6 +1058,42 @@ fn finish(rt: &Runtime, response: &Response<ResBody>, t_start: Instant, php_us: 
     }
 }
 
+/// Unix seconds until which the local PHP backend is treated as unhealthy
+/// ("saint mode"). Per worker process: each one notices failures on its own, and
+/// no shared-memory write is needed on the failure path.
+static SAINT_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Note that PHP just failed: hold the backend in saint mode for `secs` so the
+/// next requests prefer a stale fallback over hammering a dying app (0 = off).
+fn saint_mark(secs: u64) {
+    if secs > 0 {
+        SAINT_UNTIL.store(unix_secs() + secs, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn saint_active() -> bool {
+    SAINT_UNTIL.load(std::sync::atomic::Ordering::Relaxed) > unix_secs()
+}
+
+/// Serve a held entry as a **failure fallback** (`stale-if-error`): the origin
+/// returned 5xx or the handler errored, and stale content beats an error page.
+fn stale_error_fallback(key: &[u8]) -> Option<Response<ResBody>> {
+    let c = rcache::stale_on_error(key)?;
+    let mut resp = cached_response(c);
+    resp.headers_mut().insert(
+        hyper::header::HeaderName::from_static("x-askr-cache"),
+        hyper::header::HeaderValue::from_static("STALE-ERROR"),
+    );
+    Some(resp)
+}
+
 /// Match a cookie/parameter name against a pattern with an optional trailing
 /// `*` wildcard (`utm_*`). Case-insensitive.
 fn name_matches(pat: &str, name: &str) -> bool {
@@ -1131,7 +1216,7 @@ fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str, var
     else {
         return;
     };
-    let Some((ttl, swr, tags)) = parse_cache_directive(dir) else {
+    let Some((ttl, swr, sie, tags)) = parse_cache_directive(dir) else {
         return;
     };
     let mut stored: Vec<(String, String)> = resp
@@ -1168,7 +1253,7 @@ fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str, var
     if !vary.is_empty() {
         stored.push((hyper::header::VARY.to_string(), vary.join(", ")));
     }
-    rcache::store(key, resp.status, &stored, &body, ttl, swr, &tags);
+    rcache::store(key, resp.status, &stored, &body, ttl, swr, sie, &tags);
 }
 
 fn storable_header(name: &str) -> bool {
@@ -1182,11 +1267,23 @@ fn storable_header(name: &str) -> bool {
         || name.eq_ignore_ascii_case("vary"))
 }
 
-/// Parse a directive like `60, swr=600, tags=posts,homepage` →
-/// `(ttl=60, swr=600, [posts, homepage])`. `swr` (stale-while-revalidate) is the
-/// extra window, after the fresh TTL, during which the stale entry is served
-/// while a background refresh runs; it defaults to 0 (no stale serving).
-fn parse_cache_directive(v: &str) -> Option<(u64, u64, Vec<Vec<u8>>)> {
+/// Seconds from a `name=` parameter inside a cache directive (0 when absent).
+fn directive_secs(v: &str, name: &str) -> u64 {
+    v.find(name)
+        .and_then(|i| v[i + name.len()..].split([',', ';', ' ']).next())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Parse a directive like `60, swr=600, stale-if-error=86400, tags=posts,homepage`
+/// → `(ttl=60, swr=600, sie=86400, [posts, homepage])`.
+///
+/// - `swr` (stale-while-revalidate): window after the fresh TTL during which the
+///   stale entry is served *proactively* while a background refresh runs.
+/// - `stale-if-error` (alias `sie`): window after the fresh TTL during which the
+///   entry is kept as a **failure fallback** only — served when the origin returns
+///   5xx or the handler errors, never proactively. Usually far longer than `swr`.
+fn parse_cache_directive(v: &str) -> Option<(u64, u64, u64, Vec<Vec<u8>>)> {
     let (head, tagstr) = match v.find("tags=") {
         Some(i) => (&v[..i], &v[i + 5..]),
         None => (v, ""),
@@ -1194,18 +1291,15 @@ fn parse_cache_directive(v: &str) -> Option<(u64, u64, Vec<Vec<u8>>)> {
     let ttl = head
         .split([',', ';', ' '])
         .find_map(|t| t.trim().parse::<u64>().ok())?;
-    let swr = v
-        .find("swr=")
-        .and_then(|i| v[i + 4..].split([',', ';', ' ']).next())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+    let swr = directive_secs(v, "swr=");
+    let sie = directive_secs(v, "stale-if-error=").max(directive_secs(v, "sie="));
     let tags = tagstr
         .split([',', ';', ' '])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.as_bytes().to_vec())
         .collect();
-    Some((ttl, swr, tags))
+    Some((ttl, swr, sie, tags))
 }
 
 /// Trigger a single background refresh of a stale cache entry so a page in its
@@ -1367,7 +1461,14 @@ fn cached_response(c: rcache::Cached) -> Response<ResBody> {
     for (name, value) in &c.headers {
         builder = builder.header(name, value);
     }
-    builder = builder.header("X-Askr-Cache", if c.stale { "STALE" } else { "HIT" });
+    let state = if c.error_only {
+        "STALE-ERROR"
+    } else if c.stale {
+        "STALE"
+    } else {
+        "HIT"
+    };
+    builder = builder.header("X-Askr-Cache", state);
     builder
         .body(full(Bytes::from(c.body)))
         .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "askr: bad response"))
@@ -1750,6 +1851,24 @@ mod tests {
             normalize_query("a[]=2&a[]=1", &[]),
             normalize_query("a[]=1&a[]=2", &[])
         );
+    }
+
+    #[test]
+    fn cache_directive_parses_stale_if_error() {
+        // ttl only
+        assert_eq!(parse_cache_directive("60"), Some((60, 0, 0, vec![])));
+        // swr + stale-if-error + tags, in one directive
+        let (ttl, swr, sie, tags) =
+            parse_cache_directive("300, swr=60, stale-if-error=86400, tags=posts,home").unwrap();
+        assert_eq!((ttl, swr, sie), (300, 60, 86400));
+        assert_eq!(tags, vec![b"posts".to_vec(), b"home".to_vec()]);
+        // `sie=` is accepted as a short alias
+        assert_eq!(parse_cache_directive("30, sie=600").unwrap().2, 600);
+        // stale-if-error without swr: the grace window stands on its own
+        let (ttl, swr, sie, _) = parse_cache_directive("300, stale-if-error=86400").unwrap();
+        assert_eq!((ttl, swr, sie), (300, 0, 86400));
+        // a bare directive with no ttl is not cacheable
+        assert!(parse_cache_directive("tags=posts").is_none());
     }
 
     #[test]

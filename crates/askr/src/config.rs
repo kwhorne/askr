@@ -229,6 +229,11 @@ pub struct CacheSection {
     /// that render different HTML per device.
     #[serde(default)]
     pub vary_user_agent: bool,
+    /// Saint mode: after PHP returns 5xx (or a worker dies), treat the backend as
+    /// unhealthy for this many seconds — requests holding a `stale-if-error` entry
+    /// are then served from cache without running PHP. 0 = off (default).
+    #[serde(default)]
+    pub saint_seconds: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -490,6 +495,7 @@ impl FileConfig {
                 cache_strip_query: self.cache.strip_query_params.clone(),
                 cache_ignore_cookies: self.cache.ignore_cookies.clone(),
                 cache_vary_user_agent: self.cache.vary_user_agent,
+                cache_saint_seconds: self.cache.saint_seconds,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

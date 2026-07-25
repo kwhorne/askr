@@ -5,6 +5,23 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **stale-if-error & saint mode** (Askr-18) — an app can now survive its own backend
+  failing. `header('Askr-Cache: 300, stale-if-error=86400')` (alias `sie=`) keeps the
+  entry as a **failure fallback**: never served proactively, but when PHP answers
+  `5xx`, times out, or the worker dies, Askr serves the held response with
+  `X-Askr-Cache: STALE-ERROR` instead of the error page. The real failure is still
+  logged, counted in metrics, and recorded for `askr replay`, so the outage stays
+  visible while visitors keep browsing.
+- New `[cache] saint_seconds` (default `0` = off): after a `5xx`, the worker treats
+  PHP as unhealthy for that long and serves `stale-if-error` entries **without running
+  PHP**, giving a struggling database room to recover. Requests with no fallback still
+  go through, so recovery is detected on its own.
+- The `stale-if-error` window is measured from the fresh deadline and is independent
+  of `swr`, so `300, swr=60, stale-if-error=86400` behaves as all three.
+- Fixed alongside: the request-coalescing follower path could serve an entry that was
+  only alive inside its `stale-if-error` window; followers now ignore those, as they
+  must (they're fallbacks, not hits).
+
 - **Smart cache-key normalisation** (Askr-20) — tracking parameters and analytics
   cookies no longer shred the response-cache hit rate. New `[cache]` keys:
   - `strip_query_params` — parameters ignored when building the cache key (trailing
