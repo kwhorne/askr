@@ -120,6 +120,12 @@ pub struct Config {
     pub redirects: Vec<crate::config::RedirectRule>,
     /// Virtual hosts routed by the `Host` header (empty = single-site).
     pub sites: Vec<Site>,
+    /// Query parameters stripped from the response-cache key (trailing `*` globs).
+    pub cache_strip_query: Vec<String>,
+    /// Cookies that don't defeat response cacheability (trailing `*` globs).
+    pub cache_ignore_cookies: Vec<String>,
+    /// Split the response-cache key on mobile vs desktop `User-Agent`.
+    pub cache_vary_user_agent: bool,
 }
 
 /// A virtual host: its docroot + front controller, matched by `hosts`.
@@ -556,12 +562,21 @@ where
     }
 
     // --- response cache: read before touching PHP (#1) -----------------
-    // Only anonymous (no Cookie) GET/HEAD requests are cacheable — a request
-    // that carries a session/auth cookie may see user-specific content.
+    // Only anonymous GET/HEAD requests are cacheable — a request that carries a
+    // session/auth cookie may see user-specific content. Cookies listed in
+    // `[cache] ignore_cookies` (analytics like `_ga`) don't count as identity,
+    // so a visitor who only has those is still served from the shared cache.
     let cacheable = rcache::enabled()
         && matches!(*req.method(), Method::GET | Method::HEAD)
-        && !req.headers().contains_key(hyper::header::COOKIE);
-    let cache_key = cacheable.then(|| response_cache_key(&req));
+        && req
+            .headers()
+            .get_all(hyper::header::COOKIE)
+            .iter()
+            .all(|v| {
+                v.to_str()
+                    .is_ok_and(|c| cookies_ignorable(c, &rt.config.cache_ignore_cookies))
+            });
+    let cache_key = cacheable.then(|| response_cache_key(&req, &rt.config));
 
     // Traffic shadow: decide (and sample) now, while `req` is still intact, what
     // to mirror. The mirror itself fires after the real response is built.
@@ -794,7 +809,12 @@ where
             // Cache store: the app opts in per-response with an `Askr-Cache`
             // header (which we consume, never forwarding it to the client).
             if let Some(key) = &cache_key {
-                maybe_store(key, &resp, &accept_encoding);
+                maybe_store(
+                    key,
+                    &resp,
+                    &accept_encoding,
+                    rt.config.cache_vary_user_agent,
+                );
             }
             // Fire the shadow mirror off the request path: hash prod's body now,
             // then compare on a background task without touching the client.
@@ -989,18 +1009,83 @@ fn finish(rt: &Runtime, response: &Response<ResBody>, t_start: Instant, php_us: 
     }
 }
 
-/// Cache key: `METHOD \0 host \0 path?query`.
-fn response_cache_key<B>(req: &Request<B>) -> Vec<u8> {
+/// Match a cookie/parameter name against a pattern with an optional trailing
+/// `*` wildcard (`utm_*`). Case-insensitive.
+fn name_matches(pat: &str, name: &str) -> bool {
+    match pat.strip_suffix('*') {
+        Some(prefix) => {
+            let (n, p) = (name.as_bytes(), prefix.as_bytes());
+            n.len() >= p.len() && n[..p.len()].eq_ignore_ascii_case(p)
+        }
+        None => name.eq_ignore_ascii_case(pat),
+    }
+}
+
+/// True when every cookie in a `Cookie` header is on the ignore list, i.e. the
+/// request carries no identity and may still be served from the shared cache.
+/// An empty ignore list means "any cookie defeats caching" (the default).
+fn cookies_ignorable(header: &str, ignore: &[String]) -> bool {
+    if ignore.is_empty() {
+        return false;
+    }
+    header.split(';').all(|c| {
+        let name = c.split('=').next().unwrap_or("").trim();
+        name.is_empty() || ignore.iter().any(|p| name_matches(p, name))
+    })
+}
+
+/// Normalise a query string for the cache key: drop stripped parameters, then
+/// sort what's left so `?a=1&b=2` and `?b=2&a=1` share one entry.
+///
+/// Sorting is skipped when a name repeats: PHP builds arrays from repeated names
+/// (`a[]=1&a[]=2`), where order is meaningful and reordering would collide two
+/// requests that render differently.
+fn normalize_query(query: &str, strip: &[String]) -> String {
+    let mut pairs: Vec<&str> = query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            let name = p.split('=').next().unwrap_or(p);
+            !strip.iter().any(|s| name_matches(s, name))
+        })
+        .collect();
+    let mut names: Vec<&str> = pairs
+        .iter()
+        .map(|p| p.split('=').next().unwrap_or(p))
+        .collect();
+    names.sort_unstable();
+    if names.windows(2).all(|w| w[0] != w[1]) {
+        pairs.sort_unstable();
+    }
+    pairs.join("&")
+}
+
+/// Coarse device class for the cache key when `vary_user_agent` is on.
+fn ua_class(ua: &str) -> &'static str {
+    const MOBILE: [&str; 5] = ["Mobi", "Android", "iPhone", "iPad", "iPod"];
+    if MOBILE.iter().any(|m| ua.contains(m)) {
+        "m"
+    } else {
+        "d"
+    }
+}
+
+/// Cache key: `METHOD \0 host \0 path?normalised-query \0 encoding \0 device`.
+fn response_cache_key<B>(req: &Request<B>, cfg: &Config) -> Vec<u8> {
     let host = req
         .headers()
         .get(hyper::header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let pq = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
+    // Normalised path+query: tracking parameters are dropped from the *key* only
+    // — PHP still receives the full, untouched query string.
+    let path = req.uri().path();
+    let query = normalize_query(req.uri().query().unwrap_or(""), &cfg.cache_strip_query);
+    let pq = if query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{query}")
+    };
     // Vary the key on the negotiated content-encoding so each encoding caches its
     // own *already-compressed* bytes. Without this, one uncompressed entry is
     // shared by all clients and every HIT recompresses the same body.
@@ -1011,12 +1096,22 @@ fn response_cache_key<B>(req: &Request<B>) -> Vec<u8> {
         .and_then(crate::compress::negotiate)
         .map(|e| e.header())
         .unwrap_or("id");
+    let device = if cfg.cache_vary_user_agent {
+        req.headers()
+            .get(hyper::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(ua_class)
+            .unwrap_or("d")
+    } else {
+        ""
+    };
     format!(
-        "{}\0{}\0{}\0{}",
+        "{}\0{}\0{}\0{}\0{}",
         req.method().as_str(),
         host.to_ascii_lowercase(),
         pq,
-        enc
+        enc,
+        device
     )
     .into_bytes()
 }
@@ -1024,7 +1119,7 @@ fn response_cache_key<B>(req: &Request<B>) -> Vec<u8> {
 /// Store a 200 response if the app opted in via an `Askr-Cache` header.
 /// `Set-Cookie` is stripped so a cached page can't pin one client's session
 /// onto every anonymous visitor.
-fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str) {
+fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str, vary_ua: bool) {
     if resp.status != 200 {
         return;
     }
@@ -1053,20 +1148,26 @@ fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str) {
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
+    let mut vary: Vec<&str> = Vec::new();
     let body = match crate::compress::maybe(&resp.body, content_type, accept_encoding) {
         Some((enc, compressed)) => {
             stored.push((
                 hyper::header::CONTENT_ENCODING.to_string(),
                 enc.header().to_string(),
             ));
-            stored.push((
-                hyper::header::VARY.to_string(),
-                "Accept-Encoding".to_string(),
-            ));
+            vary.push("Accept-Encoding");
             compressed
         }
         None => resp.body.clone(),
     };
+    // The key splits on device class, so tell shared caches downstream too —
+    // otherwise a proxy could hand mobile HTML to a desktop client.
+    if vary_ua {
+        vary.push("User-Agent");
+    }
+    if !vary.is_empty() {
+        stored.push((hyper::header::VARY.to_string(), vary.join(", ")));
+    }
     rcache::store(key, resp.status, &stored, &body, ttl, swr, &tags);
 }
 
@@ -1127,14 +1228,33 @@ fn spawn_swr_refresh<B>(rt: &Arc<Runtime>, key: &[u8], req: &Request<B>, peer: S
     };
     let host = header(hyper::header::HOST);
     let accept_encoding = header(hyper::header::ACCEPT_ENCODING);
+    // With `vary_user_agent`, the key splits on device class — so the refresh has
+    // to render as the same class, or desktop HTML lands under the mobile key.
+    let user_agent = if rt.config.cache_vary_user_agent {
+        header(hyper::header::USER_AGENT)
+    } else {
+        String::new()
+    };
     tokio::spawn(async move {
-        refresh_entry(rt, key, method, uri, host, accept_encoding, peer).await;
+        refresh_entry(
+            rt,
+            key,
+            method,
+            uri,
+            host,
+            accept_encoding,
+            user_agent,
+            peer,
+        )
+        .await;
     });
 }
 
 /// Re-run the front controller for `key` and re-store the fresh response. Only
 /// anonymous, cacheable GET/HEADs reach here, so the request is fully determined
-/// by method + host + path + Accept-Encoding (no body, no cookies).
+/// by method + host + path + Accept-Encoding (+ User-Agent when the key varies on
+/// device class) — no body, no cookies.
+#[allow(clippy::too_many_arguments)]
 async fn refresh_entry(
     rt: Arc<Runtime>,
     key: Vec<u8>,
@@ -1142,6 +1262,7 @@ async fn refresh_entry(
     uri: hyper::Uri,
     host: String,
     accept_encoding: String,
+    user_agent: String,
     peer: SocketAddr,
 ) {
     let config = &rt.config;
@@ -1154,6 +1275,9 @@ async fn refresh_entry(
     builder = builder.header(hyper::header::HOST, host);
     if !accept_encoding.is_empty() {
         builder = builder.header(hyper::header::ACCEPT_ENCODING, &accept_encoding);
+    }
+    if !user_agent.is_empty() {
+        builder = builder.header(hyper::header::USER_AGENT, &user_agent);
     }
     let Ok(built) = builder.body(()) else {
         rcache::end(&key);
@@ -1172,7 +1296,12 @@ async fn refresh_entry(
     );
     // Only a buffered response is cacheable; a streaming one is skipped.
     if let Ok(Reply::Buffered(resp)) = rt.php.handle(request).await {
-        maybe_store(&key, &resp, &accept_encoding);
+        maybe_store(
+            &key,
+            &resp,
+            &accept_encoding,
+            rt.config.cache_vary_user_agent,
+        );
     }
     rcache::end(&key);
 }
@@ -1573,5 +1702,70 @@ mod tests {
         assert_eq!(out.headers().get("X-Test").unwrap(), "yes");
         // hyper computes framing; our explicit Content-Length is stripped.
         assert!(out.headers().get(hyper::header::CONTENT_LENGTH).is_none());
+    }
+
+    #[test]
+    fn name_matches_exact_and_glob() {
+        assert!(name_matches("gclid", "gclid"));
+        assert!(name_matches("GCLID", "gclid")); // case-insensitive
+        assert!(!name_matches("gclid", "gclid2"));
+        assert!(name_matches("utm_*", "utm_source"));
+        assert!(name_matches("utm_*", "utm_"));
+        assert!(!name_matches("utm_*", "utm"));
+        assert!(!name_matches("utm_*", "campaign"));
+        // A trailing-* pattern must not panic on multi-byte input.
+        assert!(!name_matches("utm_*", "æøå"));
+    }
+
+    #[test]
+    fn cookies_only_analytics_stay_cacheable() {
+        let ignore = vec!["_ga".to_string(), "_gid".to_string(), "_fbp*".to_string()];
+        // Analytics-only visitor: still anonymous.
+        assert!(cookies_ignorable("_ga=GA1.1.22; _gid=x", &ignore));
+        assert!(cookies_ignorable("_fbp_extra=1", &ignore));
+        // A session cookie is identity — not cacheable.
+        assert!(!cookies_ignorable("_ga=1; laravel_session=abc", &ignore));
+        assert!(!cookies_ignorable("laravel_session=abc", &ignore));
+        // Empty ignore list keeps the old behaviour: any cookie defeats caching.
+        assert!(!cookies_ignorable("_ga=1", &[]));
+    }
+
+    #[test]
+    fn query_normalisation_strips_and_sorts() {
+        let strip = vec!["utm_*".to_string(), "gclid".to_string()];
+        // Tracking params dropped, real params kept.
+        assert_eq!(normalize_query("utm_source=x&id=7&gclid=y", &strip), "id=7");
+        // Param order doesn't fragment the cache.
+        assert_eq!(
+            normalize_query("b=2&a=1", &strip),
+            normalize_query("a=1&b=2", &strip)
+        );
+        // All-tracking query collapses onto the bare path entry.
+        assert_eq!(normalize_query("utm_source=x", &strip), "");
+        // Repeated names (PHP arrays) keep their original order — sorting them
+        // would collide two requests that render differently.
+        assert_eq!(normalize_query("a[]=2&a[]=1", &[]), "a[]=2&a[]=1");
+        assert_eq!(normalize_query("a[]=1&a[]=2", &[]), "a[]=1&a[]=2");
+        assert_ne!(
+            normalize_query("a[]=2&a[]=1", &[]),
+            normalize_query("a[]=1&a[]=2", &[])
+        );
+    }
+
+    #[test]
+    fn ua_class_splits_mobile_from_desktop() {
+        assert_eq!(
+            ua_class("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Mobile/15E148"),
+            "m"
+        );
+        assert_eq!(
+            ua_class("Mozilla/5.0 (Linux; Android 14) Chrome/120 Mobile"),
+            "m"
+        );
+        assert_eq!(
+            ua_class("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"),
+            "d"
+        );
+        assert_eq!(ua_class(""), "d");
     }
 }

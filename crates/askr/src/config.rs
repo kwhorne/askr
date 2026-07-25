@@ -215,6 +215,20 @@ pub struct CacheSection {
     /// invalidation (`Askr-Cache` header + `askr_cache_forget_tag`). ~140 KB each.
     #[serde(default)]
     pub response_slots: usize,
+    /// Query parameters ignored when building the response-cache key. Trailing
+    /// `*` globs (`utm_*`). Tracking params otherwise fragment the cache into a
+    /// separate entry per visitor.
+    #[serde(default)]
+    pub strip_query_params: Vec<String>,
+    /// Cookies that do *not* make a request non-cacheable (analytics cookies
+    /// like `_ga`). A request whose cookies are all ignorable is still treated
+    /// as anonymous. Trailing `*` globs supported.
+    #[serde(default)]
+    pub ignore_cookies: Vec<String>,
+    /// Split the response-cache key on mobile vs desktop `User-Agent`, for apps
+    /// that render different HTML per device.
+    #[serde(default)]
+    pub vary_user_agent: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -473,6 +487,9 @@ impl FileConfig {
                 force_https: self.server.force_https,
                 redirects: self.redirect.clone(),
                 sites,
+                cache_strip_query: self.cache.strip_query_params.clone(),
+                cache_ignore_cookies: self.cache.ignore_cookies.clone(),
+                cache_vary_user_agent: self.cache.vary_user_agent,
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

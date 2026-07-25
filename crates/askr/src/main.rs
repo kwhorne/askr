@@ -542,6 +542,10 @@ fn main() -> anyhow::Result<()> {
                     force_https,
                     redirects: Vec::new(),
                     sites: Vec::new(),
+                    // Cache-key normalisation is config-file only (list-valued).
+                    cache_strip_query: Vec::new(),
+                    cache_ignore_cookies: Vec::new(),
+                    cache_vary_user_agent: false,
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);

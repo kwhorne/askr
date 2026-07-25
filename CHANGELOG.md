@@ -3,6 +3,25 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+- **Smart cache-key normalisation** (Askr-20) — tracking parameters and analytics
+  cookies no longer shred the response-cache hit rate. New `[cache]` keys:
+  - `strip_query_params` — parameters ignored when building the cache key (trailing
+    `*` globs, e.g. `utm_*`), so `/p?id=7`, `/p?id=7&utm_source=fb` and
+    `/p?utm_source=x&id=7&gclid=z` share one entry. PHP still receives the full,
+    untouched query string.
+  - `ignore_cookies` — cookies that don't count as identity (`_ga`, `_gid`, `_fbp`).
+    Previously *any* cookie made a request uncacheable, so one analytics cookie made
+    a whole audience bypass the cache; now such a visitor is served the same entry as
+    a cookie-less one. Unlisted cookies (sessions, auth) still defeat caching.
+  - `vary_user_agent` — split the key on a coarse mobile/desktop class and emit
+    `Vary: User-Agent`; stale-while-revalidate refreshes forward the original
+    `User-Agent` so a refresh renders as the class it's stored under.
+- Query parameters are also **order-normalised** (`?a=1&b=2` = `?b=2&a=1`), skipped
+  when a name repeats (`a[]=1&a[]=2`) since PHP builds an order-sensitive array there.
+- Cached entries now emit a single merged `Vary` header instead of one per concern.
+
 ## 1.0.0 — 2026-07-23
 
 **Askr is 1.0.** The stable surface is now **frozen under SemVer** — see

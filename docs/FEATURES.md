@@ -46,8 +46,45 @@ the request-coalescing inflight table so N concurrent stale hits trigger just on
 recompute). Past `swr` it's a normal miss again. Compression is applied once at
 store time, so hits and stale serves do zero per-request compression.
 
-- Only cookie-less `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
+- Only anonymous `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
   so a cached page can't pin one session onto every visitor.
+
+### Cache-key normalisation
+
+By default the key is `method + host + path?query + encoding`, and *any* cookie
+makes a request non-cacheable. On a real site that's brutal: `?utm_source=…` gives
+every campaign visitor a private cache entry, and a single Google Analytics cookie
+makes the whole audience uncacheable. Three `[cache]` keys fix that:
+
+```toml
+[cache]
+response_slots = 512
+# Tracking params don't fragment the cache (trailing * globs)
+strip_query_params = ["utm_*", "gclid", "fbclid", "_ga"]
+# Analytics cookies aren't identity — these visitors stay cacheable
+ignore_cookies = ["_ga", "_gid", "_fbp"]
+# Optional: cache mobile and desktop HTML separately
+vary_user_agent = false
+```
+
+With that config, `/p?id=7`, `/p?id=7&utm_source=fb` and
+`/p?utm_source=x&id=7&gclid=z` all share **one** entry, and a visitor carrying only
+`_ga`/`_gid` is served from the same entry as a cookie-less visitor.
+
+Details worth knowing:
+
+- **Stripping affects the cache key only.** PHP still receives the complete,
+  untouched query string, so analytics and attribution code keeps working.
+- **Parameter order is normalised**: `?a=1&b=2` and `?b=2&a=1` share an entry.
+  Sorting is skipped when a name repeats (`a[]=1&a[]=2`), because PHP builds an
+  array there and the order changes the response.
+- **A cookie that isn't on the list still defeats caching** — a `laravel_session`
+  or auth cookie is never treated as anonymous. Keep the list to cookies you know
+  the server ignores.
+- `vary_user_agent` splits the key on a coarse mobile/desktop class *and* sets
+  `Vary: User-Agent`, so a shared proxy downstream can't hand mobile HTML to a
+  desktop client. Background stale-while-revalidate refreshes forward the original
+  `User-Agent`, so a refresh re-renders as the same class it's stored under.
 - Responses carry `X-Askr-Cache: HIT|MISS|STALE`; hit-rate shows on the dashboard.
 - `askr_cache_flush()` clears the response cache too.
 
