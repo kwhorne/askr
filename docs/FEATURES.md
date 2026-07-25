@@ -49,6 +49,63 @@ store time, so hits and stale serves do zero per-request compression.
 - Only anonymous `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
   so a cached page can't pin one session onto every visitor.
 
+### ESI — one page, many TTLs
+
+The hard part of caching isn't the cache, it's the *one dynamic thing* on an
+otherwise static page. A product page could sit in cache for a day if it weren't for
+the cart widget in the corner. Edge-Side Includes solve that: the page is cached
+**with holes**, and Askr fills the holes on the way out.
+
+```php
+// The shell: cached for an hour, tags and all
+header('Askr-Cache: 3600');
+header('Askr-ESI: on');            // opt in — Askr only scans bodies that ask
+?>
+<html><body>
+  <esi:include src="/_esi/header"/>   <!-- its own 24h TTL -->
+  <main>Article body…</main>
+  <esi:include src="/_esi/cart"/>     <!-- no Askr-Cache header ⇒ per request -->
+  <esi:remove><p>Shown only by caches that don't speak ESI</p></esi:remove>
+</body></html>
+```
+
+Each fragment is an **ordinary request through your front controller**, so it routes
+like any other URL and carries its own `Askr-Cache` header — which means its own TTL,
+its own tags, and its own `PURGE`. A real run of the page above, three times in a row:
+
+```
+<html>SHELL=42d2 [HEADER cached=07fd][CART live=70afc0]</html>
+<html>SHELL=42d2 [HEADER cached=07fd][CART live=785e09]</html>
+<html>SHELL=42d2 [HEADER cached=07fd][CART live=db8c94]</html>
+```
+
+The shell and header are byte-identical (served from cache, PHP never ran for them);
+the cart is fresh every time. `PURGE /_esi/header` swaps the header out and leaves the
+shell alone.
+
+What you should know:
+
+- **Opt-in per response.** Without `Askr-ESI: on` a body is never scanned, so pages
+  that happen to contain the text `<esi:` are untouched, and non-ESI traffic pays
+  nothing (the pre-check is one substring search).
+- **Fragments nest**, up to 3 passes — a cached fragment may itself contain includes,
+  each with an independent TTL.
+- **A broken fragment never breaks the page.** A non-200, a timeout or a stream
+  attempt logs a warning and leaves the hole empty. Up to 32 fragments per request.
+- **`src` must be a same-origin absolute path.** Absolute URLs, protocol-relative
+  `//host`, schemes and `..` are refused — an ESI tag must never become an outbound
+  fetch (that would make the server an SSRF proxy for anything that can influence a
+  template).
+- **Assembled per request, so compression happens after assembly.** ESI shells are
+  stored uncompressed; the finished page is compressed on the way out (`Vary:
+  Accept-Encoding`), which costs a little CPU that a fully static cached page doesn't
+  pay.
+- Streaming responses (PHP `flush()`) bypass the cache and therefore ESI.
+- **Known limit:** because the cache key includes the negotiated encoding, an ESI
+  shell is stored once per encoding class your clients negotiate (typically br and
+  gzip). The bodies are identical and uncompressed, so this costs a few extra slots
+  and one render per class — not correctness.
+
 ### PURGE & BAN over HTTP
 
 Tag invalidation covers "this content changed". Sometimes you need to invalidate by

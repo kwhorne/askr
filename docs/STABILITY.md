@@ -85,8 +85,9 @@ calling the bridge directly if you want the smoothest ride.
 - Cache-invalidation methods Askr answers itself: **`PURGE <url>`** and **`BAN`**
   (with the **`X-Ban-Url`** glob header). Both are authenticated with
   `ASKR_ADMIN_TOKEN`, or restricted to loopback when no token is set.
-- Response contract headers: the app-supplied **`Askr-Cache`** request-to-cache
-  header (consumed, never forwarded) and the
+- Response contract headers: the app-supplied **`Askr-Cache`** and **`Askr-ESI`**
+  headers (both consumed, never forwarded), the `<esi:include>` / `<esi:remove>` tag
+  syntax, and the
   **`X-Askr-Cache: HIT|MISS|STALE|STALE-ERROR`** diagnostic header. When HTTP/3 is
   on, TCP responses carry **`Alt-Svc: h3=…`**.
 

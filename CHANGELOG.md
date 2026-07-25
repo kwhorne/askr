@@ -5,6 +5,32 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **ESI — Edge-Side Includes** (Askr-16). A page can now be cached *with holes* and
+  assembled per request, so the one dynamic widget on an otherwise static page stops
+  making the whole page uncacheable:
+
+  ```php
+  header('Askr-Cache: 3600');
+  header('Askr-ESI: on');
+  echo '<esi:include src="/_esi/cart"/>';
+  ```
+
+  The shell is stored **with its tags intact** and expanded on the way out, so it can
+  sit in cache for an hour while `/_esi/cart` — an ordinary request through the front
+  controller, with its own `Askr-Cache` header — is rendered per request. Every hole
+  gets its own TTL, tags and `PURGE`. `<esi:remove>` fallback blocks are stripped.
+  Fragments nest up to 3 passes; up to 32 per request.
+
+  - Opt-in per response: a body without `Askr-ESI: on` is never scanned, so non-ESI
+    traffic pays one substring search.
+  - A failing fragment (non-200, error, stream attempt) logs a warning and leaves the
+    hole empty — it never takes the page down.
+  - `src` must be a same-origin absolute path; absolute URLs, protocol-relative
+    `//host`, schemes and `..` are refused, so an ESI tag can't become an outbound
+    fetch (SSRF).
+  - ESI shells are stored uncompressed and the assembled page is compressed on the
+    way out. Known limit: a shell is stored once per encoding class clients negotiate.
+
 - **HTTP `PURGE` and `BAN` cache invalidation** (Askr-19) — invalidate by URL, not just
   by tag:
 

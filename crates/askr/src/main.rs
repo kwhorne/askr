@@ -16,6 +16,7 @@ mod cgi;
 mod compress;
 mod config;
 mod doctor;
+mod esi;
 #[cfg(feature = "http3")]
 mod http3;
 mod metrics;

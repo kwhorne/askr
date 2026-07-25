@@ -615,12 +615,30 @@ where
         if let Some(c) = rcache::get(key) {
             // Stale-while-revalidate: serve the stale body now, and trigger one
             // background refresh (coalesced) so PHP runs off the request path.
+            let state = if c.stale { "STALE" } else { "HIT" };
             #[cfg(feature = "otel")]
-            let cache_state = if c.stale { "STALE" } else { "HIT" };
+            let cache_state = state;
             if c.stale {
                 spawn_swr_refresh(&rt, key, &req, peer);
             }
-            let response = cached_response(c);
+            // ESI: the cached shell holds the tags — assemble the fragments now, so a
+            // page can sit in cache for a day while a cart fragment is per-request.
+            let response = if esi_requested(&c.headers) && crate::esi::has_tags(&c.body) {
+                let expanded =
+                    esi_expand(&rt, &host, docroot, front_controller, peer, c.body).await;
+                build_response(
+                    askr_php::Response {
+                        status: c.status,
+                        php_status: c.status as i32,
+                        headers: c.headers,
+                        body: expanded,
+                    },
+                    Some(state),
+                    &accept_encoding,
+                )
+            } else {
+                cached_response(c)
+            };
             #[cfg(feature = "otel")]
             otel_fast(
                 &rt,
@@ -869,6 +887,16 @@ where
             let state = rcache::enabled().then_some("MISS");
             #[cfg(feature = "otel")]
             let build_t0 = Instant::now();
+            // ESI runs after the store above, so the cache keeps the tags and each
+            // client gets its own assembly.
+            let resp = if esi_requested(&resp.headers) && crate::esi::has_tags(&resp.body) {
+                let mut resp = resp;
+                resp.body =
+                    esi_expand(&rt, &host, docroot, front_controller, peer, resp.body).await;
+                resp
+            } else {
+                resp
+            };
             let built = build_response(resp, state, &accept_encoding);
             #[cfg(feature = "otel")]
             otel_phases.push(crate::otel::Phase {
@@ -1092,6 +1120,144 @@ fn saint_mark(secs: u64) {
 
 fn saint_active() -> bool {
     SAINT_UNTIL.load(std::sync::atomic::Ordering::Relaxed) > unix_secs()
+}
+
+/// How many passes of ESI expansion to run — i.e. how deeply fragments may nest.
+const ESI_MAX_PASSES: usize = 3;
+/// Total fragment fetches allowed per request, to bound a page (or a loop) that
+/// asks for hundreds of includes.
+const ESI_MAX_INCLUDES: usize = 32;
+
+/// Did the app opt this response into ESI processing (`Askr-ESI: on`)?
+fn esi_requested(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("askr-esi")
+            && (v.trim().eq_ignore_ascii_case("on") || v.trim() == "1")
+    })
+}
+
+/// Expand `<esi:include>` tags, fetching each fragment from the response cache or,
+/// on a miss, from PHP.
+///
+/// Runs up to [`ESI_MAX_PASSES`] passes so a fragment may itself contain includes;
+/// a pass that substitutes nothing ends the loop. Iterating instead of recursing
+/// keeps this a plain `async fn` (no boxed futures on the response path).
+async fn esi_expand(
+    rt: &Arc<Runtime>,
+    host: &str,
+    docroot: &Path,
+    front_controller: &Path,
+    peer: SocketAddr,
+    body: Vec<u8>,
+) -> Vec<u8> {
+    let mut body = body;
+    let mut budget = ESI_MAX_INCLUDES;
+    for _ in 0..ESI_MAX_PASSES {
+        if !crate::esi::has_tags(&body) {
+            break;
+        }
+        let plan = crate::esi::plan(&body);
+        if !plan
+            .iter()
+            .any(|s| matches!(s, crate::esi::Segment::Include(_)))
+        {
+            break; // only pass-through tags left
+        }
+        let mut out = Vec::with_capacity(body.len());
+        for seg in plan {
+            match seg {
+                crate::esi::Segment::Literal(a, b) => out.extend_from_slice(&body[a..b]),
+                crate::esi::Segment::Include(src) => {
+                    if budget == 0 {
+                        tracing::warn!(
+                            limit = ESI_MAX_INCLUDES,
+                            "esi: include budget exhausted, leaving fragment empty"
+                        );
+                        continue;
+                    }
+                    budget -= 1;
+                    match esi_fragment(rt, host, docroot, front_controller, peer, &src).await {
+                        Some(bytes) => out.extend_from_slice(&bytes),
+                        // A broken fragment must not take the page down with it.
+                        None => tracing::warn!(src = %src, "esi: fragment failed, left empty"),
+                    }
+                }
+            }
+        }
+        body = out;
+    }
+    body
+}
+
+/// Fetch one ESI fragment: its own cache entry first, then PHP.
+///
+/// The fragment is an ordinary request through the front controller, so it carries
+/// its own `Askr-Cache` header — that's what gives every hole in the page an
+/// independent TTL, tag set and invalidation.
+async fn esi_fragment(
+    rt: &Arc<Runtime>,
+    host: &str,
+    docroot: &Path,
+    front_controller: &Path,
+    peer: SocketAddr,
+    src: &str,
+) -> Option<Vec<u8>> {
+    if !crate::esi::safe_src(src) {
+        tracing::warn!(src = %src, "esi: refusing non-same-origin fragment src");
+        return None;
+    }
+    let uri: hyper::Uri = src.parse().ok()?;
+    // A synthetic anonymous GET: no cookies, no Accept-Encoding (fragments are
+    // stored uncompressed, since they're spliced into a larger body).
+    let req = hyper::Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header(hyper::header::HOST, host)
+        .body(())
+        .ok()?;
+
+    let key = rcache::enabled().then(|| response_cache_key(&req, host, &rt.config));
+    if let Some(k) = &key {
+        if let Some(c) = rcache::get(k) {
+            return Some(c.body);
+        }
+    }
+
+    let config = &rt.config;
+    let script = docroot.join(front_controller);
+    let script_name = format!("/{}", front_controller.display());
+    let (parts, _) = req.into_parts();
+    let request = cgi::build_request(
+        &parts,
+        Vec::new(),
+        docroot,
+        &script,
+        &script_name,
+        peer,
+        config.https,
+        config.listen.port(),
+    );
+    match rt.php.handle(request).await {
+        Ok(Reply::Buffered(resp)) if resp.status == 200 => {
+            if let Some(k) = &key {
+                maybe_store(k, &resp, "", config.cache_vary_user_agent);
+            }
+            Some(resp.body)
+        }
+        Ok(Reply::Buffered(resp)) => {
+            tracing::warn!(src = %src, status = resp.status, "esi: fragment returned non-200");
+            None
+        }
+        // A fragment can't stream: it has to be spliced into a larger body.
+        Ok(Reply::Stream { .. }) => {
+            tracing::warn!(src = %src, "esi: fragment tried to stream; not supported");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(src = %src, error = %e, "esi: fragment failed");
+            None
+        }
+    }
 }
 
 /// Constant-time bearer check against `ASKR_ADMIN_TOKEN`.
@@ -1339,6 +1505,14 @@ fn maybe_store(key: &[u8], resp: &askr_php::Response, accept_encoding: &str, var
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
+    // An ESI page is cached with its tags intact and assembled on the way out, so it
+    // must be stored *uncompressed* — otherwise the fragments couldn't be spliced in
+    // without inflating it on every hit. Compression happens after assembly instead.
+    let accept_encoding = if esi_requested(&resp.headers) {
+        ""
+    } else {
+        accept_encoding
+    };
     let mut vary: Vec<&str> = Vec::new();
     let body = match crate::compress::maybe(&resp.body, content_type, accept_encoding) {
         Some((enc, compressed)) => {
@@ -1520,6 +1694,7 @@ fn stream_response(
         if name.eq_ignore_ascii_case("Content-Length")
             || name.eq_ignore_ascii_case("Transfer-Encoding")
             || name.eq_ignore_ascii_case("Askr-Cache")
+            || name.eq_ignore_ascii_case("Askr-ESI")
         {
             continue;
         }
@@ -1595,6 +1770,7 @@ fn build_response(
         if name.eq_ignore_ascii_case("Content-Length")
             || name.eq_ignore_ascii_case("Transfer-Encoding")
             || name.eq_ignore_ascii_case("Askr-Cache")
+            || name.eq_ignore_ascii_case("Askr-ESI")
         {
             continue;
         }
