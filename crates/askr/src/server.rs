@@ -1770,6 +1770,23 @@ fn static_forbidden(rel: &Path) -> bool {
     if dotted {
         return true;
     }
+    // Editor and deploy leftovers: `index.php.bak`, `config.php~`, `db.php.save`.
+    // A `.php.<anything>` file is still PHP source, and nobody serves `~`/`.bak`
+    // on purpose. nginx and Apache hand these out by default — Askr ships with no
+    // config to add rules to, so it refuses them itself.
+    let name = rel
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if name.contains(".php.") || name.ends_with('~') {
+        return true;
+    }
+    const LEFTOVER: [&str; 8] = [
+        ".bak", ".orig", ".save", ".swp", ".swo", ".old", ".rej", ".tmp",
+    ];
+    if LEFTOVER.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
     matches!(
         rel.extension()
             .and_then(|e| e.to_str())
@@ -1832,7 +1849,18 @@ mod tests {
         assert!(!static_forbidden(Path::new(
             ".well-known/acme-challenge/tok123"
         )));
-        // Normal assets are unaffected.
+        // Editor / deploy leftovers — `.php.bak` is still PHP source.
+        assert!(static_forbidden(Path::new("index.php.bak")));
+        assert!(static_forbidden(Path::new("index.php.orig")));
+        assert!(static_forbidden(Path::new("db.php.save")));
+        assert!(static_forbidden(Path::new("index.PHP.BAK")));
+        assert!(static_forbidden(Path::new("config.php~")));
+        assert!(static_forbidden(Path::new("notes.txt~")));
+        assert!(static_forbidden(Path::new("sub/logo.png.bak")));
+        // Normal assets are unaffected — including ones that merely *contain* a
+        // leftover-looking word.
+        assert!(!static_forbidden(Path::new("img/photo.old.png")));
+        assert!(!static_forbidden(Path::new("build/vendor.bak.js")));
         assert!(!static_forbidden(Path::new("build/app.js")));
         assert!(!static_forbidden(Path::new("img/logo.png")));
         assert!(!static_forbidden(Path::new("phpinfo.txt")));

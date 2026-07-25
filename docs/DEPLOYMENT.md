@@ -172,6 +172,14 @@ See [Admin](ADMIN.md) for scripting examples.
   for ACME HTTP-01 and `security.txt`. Askr also only ever executes the configured
   front controller, never an arbitrary `.php` found on disk, so a file uploaded
   into the docroot can't be run.
+- **Editor/deploy leftovers are refused too** — anything containing `.php.` or ending
+  in `~`, `.bak`, `.orig`, `.save`, `.swp`, `.swo`, `.old`, `.rej`, `.tmp`. A stray
+  `index.php.bak` is still source code.
+- **Symlinks are followed**, including out of the document root — `php artisan
+  storage:link` depends on exactly that, and nginx/Apache behave the same way. Askr
+  will not read outside the docroot on its own (traversal, percent-encoded traversal
+  and NUL tricks are all rejected), but a symlink you place there *is* published.
+  Keep the docroot free of links you don't mean to expose.
 - The entire server hot path is memory-safe Rust; PHP is the single `unsafe`
   frontier. On Linux, harden that boundary with `--sandbox` (seccomp no-exec +
   optional Landlock write-restriction) — see [Sandbox](SANDBOX.md).

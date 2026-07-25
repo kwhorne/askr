@@ -3,6 +3,30 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+### Security
+
+- **Editor and deploy leftovers are no longer served** (Askr-35). A follow-up probe
+  sweep after Askr-34 found the same disclosure class one step over: `index.php.bak`,
+  `config.php~`, `db.php.save` and `index.php.orig` were served verbatim — still PHP
+  source, just with a suffix. Any filename containing `.php.`, ending in `~`, or
+  ending in `.bak`/`.orig`/`.save`/`.swp`/`.swo`/`.old`/`.rej`/`.tmp` now falls through
+  to the front controller. Assets that merely *look* similar (`photo.old.png`,
+  `vendor.bak.js`) are unaffected.
+
+  nginx and Apache serve these by default too — the difference is that Askr ships with
+  no config file to add rules to, so it refuses them itself.
+
+- Documented (and deliberately **not** changed): Askr follows symlinks out of the
+  document root, because `php artisan storage:link` creates exactly that and blocking
+  it would break uploads for most Laravel apps. This matches nginx
+  (`disable_symlinks off`) and Apache (`FollowSymLinks`) defaults. Keep the docroot
+  free of symlinks you don't intend to publish.
+- Verified as *not* vulnerable in the same sweep: percent-encoded traversal
+  (`%2e%2e`, `..%2f`), embedded-NUL paths, trailing-dot paths, and directory listing
+  (there is none — directories fall through to the app).
+
 ## 1.0.1 — 2026-07-25
 
 ### Security
