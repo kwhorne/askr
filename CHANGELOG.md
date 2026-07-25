@@ -3,7 +3,15 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
-## Unreleased
+## 1.1.0 — 2026-07-25
+
+The Varnish-grade cache release. This one adds **ESI**, **`PURGE`/`BAN`** and
+**per-path cache rules**, completing the set that 1.0.1 started with `stale-if-error`
+and cache-key normalisation. Askr now does what people reach for Varnish for
+**in-process**, with no extra hop — plus tag invalidation Varnish doesn't have.
+
+Every addition is a new default-off `[cache]` key or an opt-in response header, so this
+is a drop-in for 1.0.x per [STABILITY.md](docs/STABILITY.md).
 
 - **Declarative cache rules** (Askr-17) — `[[cache.rule]]` sets response-cache policy
   per path from `askr.toml`, for apps you can't edit:
