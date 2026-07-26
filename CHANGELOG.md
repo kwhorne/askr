@@ -3,6 +3,45 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+- **Rate limiting in the Rust layer** (Askr-41) — `[[ratelimit]]` rules refuse abusive
+  traffic before PHP is woken, in the same layer that serves cache hits:
+
+  ```toml
+  [server]
+  trusted_proxies = ["10.0.0.0/8"]
+
+  [[ratelimit]]
+  path = "/login"
+  limit = 5
+  window = 300
+
+  [[ratelimit]]
+  path = "/api/*"
+  limit = 60
+  window = 60
+  by = "header:X-Api-Key"
+  burst = 20
+  ```
+
+  Token buckets live in shared memory mapped before the fork, so **a limit spans the
+  whole worker fleet** rather than each process keeping its own count — the thing
+  FPM + nginx can't do without Redis. Refused requests get `429` with `Retry-After`,
+  `X-RateLimit-Limit` and `X-RateLimit-Remaining`; `askr_ratelimit_blocked_total` is
+  exported to Prometheus.
+
+  Count by client IP, a header, or a cookie. First match wins. Reserved `/askr/*`
+  endpoints are exempt so a limit can't silently kill SSE or the Pusher WebSocket.
+  Under table pressure the limiter **fails open** — wrongly refusing legitimate
+  traffic is the worse failure for a web server.
+
+- New `[server] trusted_proxies` (IPs or CIDRs). `X-Forwarded-For` is believed **only**
+  when the peer is a trusted proxy, and then the rightmost non-proxy hop wins —
+  otherwise anyone could rotate a fake client address and walk past every limit. With
+  limits configured and no trusted proxies set, Askr warns at startup (behind a load
+  balancer every client would otherwise share one bucket).
+
 ## 1.1.0 — 2026-07-25
 
 The Varnish-grade cache release. This one adds **ESI**, **`PURGE`/`BAN`** and

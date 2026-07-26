@@ -47,6 +47,9 @@ pub struct FileConfig {
     /// Virtual hosts: `[[site]] hosts = [...] root = "…"` — route by Host header.
     #[serde(default)]
     pub site: Vec<SiteSpec>,
+    /// Rate limits: `[[ratelimit]] path = "/api/*" limit = 60`.
+    #[serde(default)]
+    pub ratelimit: Vec<RateLimitRule>,
 }
 
 /// A virtual host: one or more `hosts` (exact or `*.suffix`) served from `root`
@@ -121,6 +124,36 @@ impl CacheRule {
     }
 }
 
+/// A rate-limit rule: `[[ratelimit]]`.
+///
+/// Enforced in the Rust layer before PHP is woken, with token buckets in shared
+/// memory — so the limit applies across the whole worker fleet, not per process.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitRule {
+    /// Path glob, e.g. `/api/*`. Matched against the request path (no query).
+    pub path: String,
+    /// Requests allowed per `window`.
+    pub limit: u64,
+    /// Window length in seconds.
+    #[serde(default = "default_rl_window")]
+    pub window: u64,
+    /// Identity to count by: `ip`, `header:<Name>`, or `cookie:<name>`.
+    #[serde(default = "default_rl_by")]
+    pub by: String,
+    /// Extra tokens a bursty client may accumulate on top of `limit`.
+    #[serde(default)]
+    pub burst: u64,
+}
+
+fn default_rl_window() -> u64 {
+    60
+}
+
+fn default_rl_by() -> String {
+    "ip".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidecarSpec {
@@ -170,6 +203,11 @@ pub struct ServerSection {
     /// state, `https`, or an `X-Forwarded-Proto` header to decide.
     #[serde(default)]
     pub force_https: bool,
+    /// Proxies whose `X-Forwarded-For` may be believed, as IPs or CIDRs
+    /// (`10.0.0.0/8`). Without this, a forwarded header is ignored — otherwise
+    /// anyone could rotate a fake client IP and walk straight past a rate limit.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
     /// Structured (JSON) access log destination: a file path, or "-" for stdout.
     pub access_log: Option<PathBuf>,
     /// Serve HTTP/3 (QUIC) on the TLS port (requires TLS; build with `http3`).
@@ -324,6 +362,7 @@ impl Default for ServerSection {
             listen: "127.0.0.1:8000".into(),
             root: PathBuf::from("public"),
             front: default_front(),
+            trusted_proxies: Vec::new(),
             workers: default_workers(),
             workers_min: None,
             workers_max: None,
@@ -475,6 +514,55 @@ impl FileConfig {
             );
         }
 
+        // Rate-limit rules: same fail-at-load discipline as [[cache.rule]].
+        for r in &self.ratelimit {
+            anyhow::ensure!(
+                !(r.path.starts_with('^') || r.path.contains(".*") || r.path.ends_with('$')),
+                "[[ratelimit]] path is a glob, not a regex — use \"/api/*\" instead of \"^/api/.*\": {}",
+                r.path
+            );
+            anyhow::ensure!(
+                r.path.starts_with('/'),
+                "[[ratelimit]] path must start with '/': {}",
+                r.path
+            );
+            anyhow::ensure!(
+                r.limit > 0,
+                "[[ratelimit]] for {} needs limit > 0 (remove the rule to disable it)",
+                r.path
+            );
+            anyhow::ensure!(
+                r.window > 0,
+                "[[ratelimit]] for {} needs window > 0",
+                r.path
+            );
+            let by_ok = r.by == "ip"
+                || r.by
+                    .strip_prefix("header:")
+                    .is_some_and(|n| !n.trim().is_empty())
+                || r.by
+                    .strip_prefix("cookie:")
+                    .is_some_and(|n| !n.trim().is_empty());
+            anyhow::ensure!(
+                by_ok,
+                "[[ratelimit]] unknown `by` value \"{}\" — use \"ip\", \"header:X-Api-Key\" or \"cookie:session\"",
+                r.by
+            );
+        }
+        for p in &self.server.trusted_proxies {
+            anyhow::ensure!(
+                crate::server::parse_cidr(p).is_some(),
+                "server.trusted_proxies entry is not an IP or CIDR: {p}"
+            );
+        }
+        if !self.ratelimit.is_empty() && self.server.trusted_proxies.is_empty() {
+            tracing::warn!(
+                "rate limiting is on but server.trusted_proxies is empty — X-Forwarded-For is \
+                 ignored and limits count the peer address. Set trusted_proxies if Askr runs \
+                 behind a load balancer, or every client will share one bucket."
+            );
+        }
+
         let workers = match self.server.workers.as_str() {
             "auto" => cpus.max(1),
             n => n
@@ -580,6 +668,13 @@ impl FileConfig {
                 cache_vary_user_agent: self.cache.vary_user_agent,
                 cache_saint_seconds: self.cache.saint_seconds,
                 cache_rules: self.cache.rule.clone(),
+                ratelimits: self.ratelimit.clone(),
+                trusted_proxies: self
+                    .server
+                    .trusted_proxies
+                    .iter()
+                    .filter_map(|p| crate::server::parse_cidr(p))
+                    .collect(),
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),

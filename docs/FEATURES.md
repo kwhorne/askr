@@ -49,6 +49,59 @@ store time, so hits and stale serves do zero per-request compression.
 - Only anonymous `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
   so a cached page can't pin one session onto every visitor.
 
+### Rate limiting before PHP wakes up
+
+A single client hammering an expensive route shouldn't be able to spend your whole
+worker pool. Askr enforces limits in the Rust layer, in the same place that serves
+cache hits — so a refused request never costs a PHP cycle:
+
+```toml
+[server]
+# Believe X-Forwarded-For only from these proxies (IPs or CIDRs)
+trusted_proxies = ["10.0.0.0/8"]
+
+[[ratelimit]]
+path = "/login"
+limit = 5
+window = 300          # 5 attempts per 5 minutes, per IP
+
+[[ratelimit]]
+path = "/api/*"
+limit = 60
+window = 60
+by = "header:X-Api-Key"
+burst = 20            # allow bursts on top of the steady rate
+```
+
+First match wins. Refused requests get `429` with `Retry-After`, `X-RateLimit-Limit`
+and `X-RateLimit-Remaining`. `askr_ratelimit_blocked_total` is exported to Prometheus.
+
+| Key | Meaning |
+| --- | --- |
+| `path` | Path glob (`*`, `?`), must start with `/`. |
+| `limit` | Requests allowed per `window`. |
+| `window` | Window length in seconds (default `60`). |
+| `by` | Identity to count: `ip` (default), `header:<Name>`, `cookie:<name>`. |
+| `burst` | Extra tokens a bursty client may accumulate on top of `limit`. |
+
+Things worth knowing:
+
+- **The limit is enforced across the whole worker fleet**, not per process. The token
+  buckets live in shared memory mapped before the fork — which is exactly what
+  FPM + nginx can't do without an external store like Redis.
+- **`X-Forwarded-For` is ignored unless the peer is in `trusted_proxies`.** Believing
+  it unconditionally would let anyone rotate a fake client address and walk straight
+  past every limit. With no trusted proxies configured, Askr warns at startup and
+  counts the peer address — which behind a load balancer means *every* client shares
+  one bucket, so set it.
+- Reserved `/askr/*` endpoints are exempt: a limit that silently killed SSE or the
+  Pusher WebSocket would be a nasty surprise.
+- If the bucket table is full, Askr **fails open** — a client may get a fresh
+  allowance rather than being wrongly refused. Refusing legitimate traffic to save a
+  few kilobytes is the worse failure for a web server.
+- A request that can't produce the configured identity (no such header or cookie)
+  isn't limited: the rule simply doesn't apply to it.
+
 ### Cache rules — policy without touching the app
 
 Everything above assumes you can edit the application. Sometimes you can't: a legacy

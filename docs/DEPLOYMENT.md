@@ -185,6 +185,10 @@ See [Admin](ADMIN.md) for scripting examples.
   optional Landlock write-restriction) — see [Sandbox](SANDBOX.md).
 - Run as a non-root user (`User=www-data`) and keep `--max-body-size` sane for
   your app to bound request memory.
+- Add `[[ratelimit]]` rules for login and API paths so one client can't spend the
+  whole worker pool — refused requests never reach PHP. Behind a load balancer, set
+  `[server] trusted_proxies`, or `X-Forwarded-For` is ignored and every client shares
+  one bucket. Askr warns at startup if limits are configured without it.
 
 ## Kernels & io_uring
 

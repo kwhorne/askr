@@ -35,6 +35,7 @@ typos fail fast in `config-check`.
 | `header_read_timeout` | int | `15` | Seconds a client may take to send request headers (slowloris guard). |
 | `https` | bool | `false` | Force HTTPS in `$_SERVER` (e.g. behind a TLS terminator). Implied by TLS. |
 | `force_https` | bool | `false` | Redirect plain HTTP to HTTPS (308), using the connection's TLS state / `https` / `X-Forwarded-Proto`. |
+| `trusted_proxies` | list | `[]` | Proxies whose `X-Forwarded-For` may be believed, as IPs or CIDRs (`"10.0.0.0/8"`). Required for correct client identity in [`[[ratelimit]]`](#ratelimit) behind a load balancer. |
 | `workers_min` | int | = `workers` | CoW autoscaling floor (with `--cow`). |
 | `workers_max` | int | = `workers` | CoW autoscaling ceiling (> min enables autoscaling). |
 | `access_log` | path | — | JSON access log per request; `-` for stdout. Off if unset. |
@@ -165,6 +166,31 @@ Enable the shared-memory cache (`askr_cache_*`, and the Laravel driver). See
 | `ignore_cookies` | list | Cookies that don't make a request non-cacheable (analytics: `"_ga"`, `"_gid"`, `"_fbp"`). Trailing `*` globs. Default: any cookie defeats caching. |
 | `vary_user_agent` | bool | Split the response-cache key on mobile vs desktop `User-Agent` (also sets `Vary: User-Agent`). Default `false`. |
 | `saint_seconds` | int | Saint mode: seconds to treat PHP as unhealthy after a `5xx`, during which requests holding a `stale-if-error` entry skip PHP entirely. `0` = off (default). |
+
+### `[[ratelimit]]`
+
+Rate limits enforced in the Rust layer before PHP is woken, with token buckets in
+shared memory (so a limit spans the whole worker fleet). **First match wins.** See
+[Features](FEATURES.md#rate-limiting-before-php-wakes-up).
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `path` | string | Path glob (`*`, `?`), must start with `/`. Globs, not regexes. |
+| `limit` | int | Requests allowed per `window`. Must be > 0. |
+| `window` | int | Window length in seconds. Default `60`. |
+| `by` | string | Identity counted: `ip` (default), `header:<Name>`, `cookie:<name>`. |
+| `burst` | int | Extra tokens a bursty client may accumulate on top of `limit`. |
+
+```toml
+[[ratelimit]]
+path = "/login"
+limit = 5
+window = 300
+```
+
+Refused requests get `429` with `Retry-After`. Reserved `/askr/*` endpoints are exempt.
+Set `[server] trusted_proxies` when running behind a load balancer, or `X-Forwarded-For`
+is ignored and every client shares one bucket.
 
 #### `[[cache.rule]]`
 

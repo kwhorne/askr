@@ -323,6 +323,12 @@ fn prometheus() -> Response<Full<Bytes>> {
     );
     push_counter(
         &mut s,
+        "askr_ratelimit_blocked_total",
+        "Requests refused by a [[ratelimit]] rule before reaching PHP.",
+        &m.ratelimit_blocked.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
         "askr_shadow_total",
         "Requests mirrored to the shadow upstream.",
         &m.shadow_total.load(Relaxed).to_string(),

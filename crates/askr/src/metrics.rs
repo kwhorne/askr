@@ -37,6 +37,9 @@ pub struct Metrics {
     pub cache_evictions: AtomicU64,
     /// KV cache writes rejected because the value exceeds the largest slot (64 KB).
     pub cache_oversize: AtomicU64,
+    /// Requests refused by a `[[ratelimit]]` rule. In shared memory so the
+    /// master's admin thread sees the total across all worker processes.
+    pub ratelimit_blocked: AtomicU64,
     /// Traffic-shadow outcomes: mirrored requests, matches, mismatches, errors.
     pub shadow_total: AtomicU64,
     pub shadow_match: AtomicU64,

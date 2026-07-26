@@ -27,6 +27,7 @@ mod otel;
 mod php;
 mod pusher;
 mod queue;
+mod ratelimit;
 mod rcache;
 mod record;
 mod sandbox;
@@ -550,6 +551,9 @@ fn main() -> anyhow::Result<()> {
                     cache_saint_seconds: 0,
                     // Cache rules are config-file only (they're table-valued).
                     cache_rules: Vec::new(),
+                    // Rate limits and trusted proxies are config-file only.
+                    ratelimits: Vec::new(),
+                    trusted_proxies: Vec::new(),
                 };
                 let w = workers.unwrap_or_else(default_workers).max(1);
                 let wmin = workers_min.unwrap_or(w).max(1);
@@ -588,6 +592,11 @@ fn main() -> anyhow::Result<()> {
             }
             if broadcast || config.pusher {
                 broadcast::init(); // the Pusher endpoints ride the broadcast ring
+            }
+            if !config.ratelimits.is_empty() {
+                // One shared bucket table: a limit must hold across the whole fleet,
+                // not per worker process. ~32 bytes per bucket.
+                ratelimit::init(4096);
             }
             queue::warn_if_unavailable();
             let queue_slots = QUEUE_CAP.load(Ordering::SeqCst);
