@@ -19,6 +19,39 @@ const NBUCKETS: usize = 13; // one extra "+Inf" overflow bucket
 /// Shared counters. `#[repr(C)]` for a stable cross-process layout; all-zero is
 /// a valid initial state (anonymous shared pages are zeroed), so we never run a
 /// constructor in the mapping.
+/// Must be >= `supervisor::MAX_WORKERS`; slots beyond it are simply not attributed.
+pub const STAT_SLOTS: usize = 512;
+
+/// One prefork slot's request counters.
+#[repr(C)]
+#[derive(Default)]
+pub struct WorkerStat {
+    pub requests: AtomicU64,
+    pub errors: AtomicU64,
+    /// Sum of total request microseconds, for a mean-latency comparison.
+    pub us_sum: AtomicU64,
+}
+
+impl WorkerStat {
+    /// Zero the slot — called before spawning a worker into it, so a canary's
+    /// counters describe exactly that worker's life rather than its predecessors'.
+    pub fn reset(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.requests.store(0, Relaxed);
+        self.errors.store(0, Relaxed);
+        self.us_sum.store(0, Relaxed);
+    }
+
+    /// `(requests, errors, mean_us)`
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let r = self.requests.load(Relaxed);
+        let e = self.errors.load(Relaxed);
+        let us = self.us_sum.load(Relaxed);
+        (r, e, us.checked_div(r).unwrap_or(0))
+    }
+}
+
 #[repr(C)]
 pub struct Metrics {
     pub requests: AtomicU64,
@@ -40,6 +73,11 @@ pub struct Metrics {
     /// Requests refused by a `[[ratelimit]]` rule. In shared memory so the
     /// master's admin thread sees the total across all worker processes.
     pub ratelimit_blocked: AtomicU64,
+    /// Per-worker counters, indexed by prefork slot. The canary gate compares the
+    /// new worker against the rest of the fleet in the same window, which a
+    /// fleet-wide total can't express: without attribution, errors from the *old*
+    /// workers count against the canary.
+    pub per_worker: [WorkerStat; STAT_SLOTS],
     /// Traffic-shadow outcomes: mirrored requests, matches, mismatches, errors.
     pub shadow_total: AtomicU64,
     pub shadow_match: AtomicU64,

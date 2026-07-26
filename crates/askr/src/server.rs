@@ -1116,7 +1116,20 @@ fn finish(rt: &Runtime, response: &Response<ResBody>, t_start: Instant, php_us: 
     if let Some(m) = crate::metrics::Metrics::get() {
         let total_us = t_start.elapsed().as_micros() as u64;
         let bytes = response.body().size_hint().exact().unwrap_or(0);
-        m.record(response.status().as_u16(), bytes, php_us, total_us);
+        let status = response.status().as_u16();
+        m.record(status, bytes, php_us, total_us);
+        // Per-worker attribution for the canary gate: which worker served this,
+        // and did it fail? A fleet-wide total can't answer that.
+        if let Some(st) = m
+            .per_worker
+            .get(crate::supervisor::MY_SLOT.load(Ordering::Relaxed))
+        {
+            st.requests.fetch_add(1, Ordering::Relaxed);
+            st.us_sum.fetch_add(total_us, Ordering::Relaxed);
+            if status >= 500 {
+                st.errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
     if rt.recycle_after > 0 {
         let n = rt.served.fetch_add(1, Ordering::SeqCst) + 1;

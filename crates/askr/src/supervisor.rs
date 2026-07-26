@@ -43,13 +43,144 @@ pub(crate) static CANARY_ENABLED: AtomicBool = AtomicBool::new(false);
 pub(crate) static CANARY_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) static CANARY_DEADLINE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static CANARY_ERR_BASE: AtomicU64 = AtomicU64::new(0);
-pub(crate) const CANARY_WINDOW_SECS: u64 = 5;
-pub(crate) const CANARY_ERR_THRESHOLD: u64 = 3;
+/// Fleet totals (slots 1..) captured when the canary started, so the comparison
+/// window matches the canary's own lifetime.
+pub(crate) static CANARY_FLEET_REQ: AtomicU64 = AtomicU64::new(0);
+pub(crate) static CANARY_FLEET_ERR: AtomicU64 = AtomicU64::new(0);
+pub(crate) static CANARY_FLEET_US: AtomicU64 = AtomicU64::new(0);
+/// Outcome of the last rollout, for `/api/status`. An atomic rather than a string
+/// behind a lock because `on_reload` is a **signal handler** — taking a mutex there
+/// isn't async-signal-safe.
+/// 0 = idle, 1 = rolling, 2 = ok, 3 = aborted, 4 = inconclusive.
+pub(crate) static ROLLOUT_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn rollout_state_str() -> &'static str {
+    match ROLLOUT_STATE.load(Ordering::SeqCst) {
+        1 => "rolling",
+        2 => "ok",
+        3 => "aborted",
+        4 => "inconclusive",
+        _ => "idle",
+    }
+}
+
+/// Tunables, set from `[reload]` before the supervisor starts.
+pub(crate) static CANARY_WINDOW: AtomicU64 = AtomicU64::new(5);
+pub(crate) static CANARY_MIN_REQUESTS: AtomicU64 = AtomicU64::new(20);
+/// Percentage points of error rate the canary may exceed the fleet by, ×100.
+pub(crate) static CANARY_MAX_ERR_RATE: AtomicU64 = AtomicU64::new(200);
+/// Mean-latency factor vs the fleet, ×100 (300 = 3×).
+pub(crate) static CANARY_MAX_LAT_FACTOR: AtomicU64 = AtomicU64::new(300);
+
+/// Why the canary gate decided what it did.
+pub(crate) enum Verdict {
+    Healthy { requests: u64, err_pct: f64 },
+    Inconclusive { requests: u64, needed: u64 },
+    Unhealthy { reason: String },
+}
+
+/// Compare the canary (slot 0) against the rest of the fleet over the same window.
+///
+/// The comparison is *relative* and *concurrent*: an absolute error count measured
+/// fleet-wide can't tell a bad new worker from a site that always serves a few 5xx,
+/// and it charges the canary for errors the old workers produced.
+pub(crate) fn canary_verdict(web: usize, alive: bool) -> Verdict {
+    if !alive {
+        return Verdict::Unhealthy {
+            reason: "canary worker died".to_string(),
+        };
+    }
+    let Some(m) = crate::metrics::Metrics::get() else {
+        return Verdict::Inconclusive {
+            requests: 0,
+            needed: 0,
+        };
+    };
+    let (c_req, c_err, c_mean) = m.per_worker[0].snapshot();
+    let min_req = CANARY_MIN_REQUESTS.load(Ordering::SeqCst);
+    if c_req < min_req {
+        return Verdict::Inconclusive {
+            requests: c_req,
+            needed: min_req,
+        };
+    }
+    // Fleet deltas over the canary's window only.
+    let (f_req_now, f_err_now, f_us_now) = fleet_totals(0, web);
+    let f_req = f_req_now.saturating_sub(CANARY_FLEET_REQ.load(Ordering::SeqCst));
+    let f_err = f_err_now.saturating_sub(CANARY_FLEET_ERR.load(Ordering::SeqCst));
+    let f_us = f_us_now.saturating_sub(CANARY_FLEET_US.load(Ordering::SeqCst));
+
+    let c_rate = c_err as f64 * 100.0 / c_req as f64;
+    let f_rate = if f_req > 0 {
+        f_err as f64 * 100.0 / f_req as f64
+    } else {
+        0.0
+    };
+    let max_over = CANARY_MAX_ERR_RATE.load(Ordering::SeqCst) as f64 / 100.0;
+    if c_rate > f_rate + max_over {
+        return Verdict::Unhealthy {
+            reason: format!(
+                "error rate {c_rate:.2}% vs fleet {f_rate:.2}% (allowed +{max_over:.2} points)"
+            ),
+        };
+    }
+
+    // Latency is only compared when the fleet has enough traffic of its own to be a
+    // meaningful baseline — otherwise a quiet fleet makes any canary look slow.
+    if f_req >= min_req {
+        let f_mean = f_us / f_req.max(1);
+        let factor = CANARY_MAX_LAT_FACTOR.load(Ordering::SeqCst) as f64 / 100.0;
+        if f_mean > 0 && (c_mean as f64) > f_mean as f64 * factor {
+            return Verdict::Unhealthy {
+                reason: format!(
+                    "mean latency {}ms vs fleet {}ms (allowed {factor:.1}x)",
+                    c_mean / 1000,
+                    f_mean / 1000
+                ),
+            };
+        }
+    }
+    Verdict::Healthy {
+        requests: c_req,
+        err_pct: c_rate,
+    }
+}
+
+/// Sum the per-worker counters for slots `range`, as `(requests, errors, us)`.
+pub(crate) fn fleet_totals(skip_slot: usize, web: usize) -> (u64, u64, u64) {
+    let Some(m) = crate::metrics::Metrics::get() else {
+        return (0, 0, 0);
+    };
+    use std::sync::atomic::Ordering::Relaxed;
+    let (mut r, mut e, mut us) = (0u64, 0u64, 0u64);
+    for i in 0..web.min(crate::metrics::STAT_SLOTS) {
+        if i == skip_slot {
+            continue;
+        }
+        let st = &m.per_worker[i];
+        r += st.requests.load(Relaxed);
+        e += st.errors.load(Relaxed);
+        us += st.us_sum.load(Relaxed);
+    }
+    (r, e, us)
+}
 // Crash-loop guard: a worker that dies within BOOT_FAIL_SECS of being spawned is a
 // boot failure (bad TLS cert, bad config, panic on startup) rather than normal
 // recycling. If enough boot failures pile up within FASTFAIL_WINDOW_SECS the master
 // gives up instead of respawning forever and burning a core.
 pub(crate) static SPAWN_AT: [AtomicU64; MAX_WORKERS] = [const { AtomicU64::new(0) }; MAX_WORKERS];
+
+/// This process's prefork slot, set in the child right after fork. The master
+/// leaves it at `usize::MAX`. Workers use it to attribute their own request
+/// counters, which is what lets the canary gate compare one worker to the rest.
+/// Slots held empty on purpose: a canary that failed its gate is drained and not
+/// respawned, so a known-bad worker doesn't keep serving a slice of traffic.
+/// Cleared when the next reload starts.
+pub(crate) static QUARANTINED: [AtomicBool; MAX_WORKERS] =
+    [const { AtomicBool::new(false) }; MAX_WORKERS];
+
+pub(crate) static MY_SLOT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
 pub(crate) static FASTFAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static FASTFAIL_WINDOW: AtomicU64 = AtomicU64::new(0);
 pub(crate) const BOOT_FAIL_SECS: u64 = 3;
@@ -85,6 +216,10 @@ pub struct Status {
     pub queue_ready: usize,
     pub queue_total: usize,
     pub queue_oldest_secs: u64,
+    /// Outcome of the last canary rollout: idle | rolling | ok | aborted |
+    /// inconclusive. `aborted` means a deploy was stopped and the fleet is still
+    /// running the previous code.
+    pub rollout: &'static str,
 }
 
 pub fn status() -> Status {
@@ -108,6 +243,7 @@ pub fn status() -> Status {
         queue_ready,
         queue_total,
         queue_oldest_secs: queue_oldest_ms / 1000,
+        rollout: rollout_state_str(),
     }
 }
 
@@ -269,6 +405,13 @@ pub(crate) fn supervise(
     // the worker and exits); in the parent it records the pid.
     let spawn_slot = |i: usize| {
         let kind = kind_of(i);
+        // Zero this slot's counters *before* the fork, so a fresh worker's stats
+        // describe its own life and not its predecessor's.
+        if let Some(m) = crate::metrics::Metrics::get() {
+            if let Some(st) = m.per_worker.get(i) {
+                st.reset();
+            }
+        }
         // SAFETY: fork before any tokio runtime exists on this thread; the child
         // builds its own. Only async-signal-safe work runs pre-exec.
         match unsafe { libc::fork() } {
@@ -281,6 +424,7 @@ pub(crate) fn supervise(
                     libc::signal(libc::SIGHUP, libc::SIG_IGN);
                     libc::signal(libc::SIGTERM, libc::SIG_DFL);
                 }
+                MY_SLOT.store(i, Ordering::SeqCst);
                 let code = match kind {
                     Kind::Web => {
                         let inherited = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
@@ -435,6 +579,15 @@ pub(crate) fn supervise(
                             // Survived long enough to be healthy — clear the streak.
                             FASTFAIL_COUNT.store(0, Ordering::SeqCst);
                         }
+                        if QUARANTINED[i].load(Ordering::SeqCst) {
+                            tracing::warn!(
+                                pid,
+                                worker = i,
+                                "quarantined slot stays empty until the next reload \
+                                 (failed canary) — running with one worker fewer"
+                            );
+                            continue;
+                        }
                         tracing::info!(pid, worker = i, "worker exited; respawning");
                         RESPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
                         spawn_slot(i);
@@ -451,23 +604,78 @@ pub(crate) fn supervise(
             }
         }
 
+        // Refill any empty web slot that isn't deliberately quarantined. Without
+        // this, a slot emptied by a failed canary would stay empty forever: the
+        // next reload clears the quarantine but has no live PID to roll, so the
+        // gate would see a dead canary and abort again on every attempt.
+        for i in 0..web.min(MAX_WORKERS) {
+            if CHILDREN[i].load(Ordering::SeqCst) == 0 && !QUARANTINED[i].load(Ordering::SeqCst) {
+                tracing::info!(worker = i, "filling empty worker slot");
+                spawn_slot(i);
+            }
+        }
+
         // Canary gate: once the window elapses, decide whether to roll the rest.
         if CANARY_ACTIVE.load(Ordering::SeqCst)
             && now_secs() >= CANARY_DEADLINE.load(Ordering::SeqCst)
         {
             CANARY_ACTIVE.store(false, Ordering::SeqCst);
-            let new_errors = error_count().saturating_sub(CANARY_ERR_BASE.load(Ordering::SeqCst));
             let alive = CHILDREN[0].load(Ordering::SeqCst) != 0;
-            if alive && new_errors <= CANARY_ERR_THRESHOLD {
-                tracing::info!(new_errors, "canary healthy — rolling the rest");
-                RELOAD_CURSOR.store(1, Ordering::SeqCst);
-                roll_next();
-            } else {
-                tracing::error!(
-                    new_errors,
-                    canary_alive = alive,
-                    "canary UNHEALTHY — aborting reload; remaining workers keep old code"
-                );
+            let verdict = canary_verdict(web, alive);
+            match verdict {
+                Verdict::Healthy { requests, err_pct } => {
+                    tracing::info!(
+                        requests,
+                        err_pct = format!("{err_pct:.2}%"),
+                        "canary healthy — rolling the rest"
+                    );
+                    ROLLOUT_STATE.store(2, Ordering::SeqCst);
+                    RELOAD_CURSOR.store(1, Ordering::SeqCst);
+                    roll_next();
+                }
+                // Not enough traffic to judge. Don't block the deploy on no
+                // evidence — but say so, because a silent pass looks like a pass.
+                Verdict::Inconclusive { requests, needed } => {
+                    tracing::warn!(
+                        requests,
+                        needed,
+                        "canary saw too little traffic to judge — rolling the rest anyway \
+                         (lower reload.canary_min_requests or raise reload.canary_window \
+                         to make this conclusive)"
+                    );
+                    ROLLOUT_STATE.store(4, Ordering::SeqCst);
+                    RELOAD_CURSOR.store(1, Ordering::SeqCst);
+                    roll_next();
+                }
+                Verdict::Unhealthy { reason } => {
+                    tracing::error!(
+                        reason = %reason,
+                        canary_alive = alive,
+                        "canary UNHEALTHY — aborting reload"
+                    );
+                    ROLLOUT_STATE.store(3, Ordering::SeqCst);
+                    // Draining the bad canary matters as much as not rolling the
+                    // rest: leaving it up means the failed deploy still serves
+                    // 1/N of traffic. Respawning it would just boot the same bad
+                    // build, so the slot is quarantined until the next reload.
+                    // Never below one worker — an empty fleet is worse than a bad one.
+                    let pid = CHILDREN[0].load(Ordering::SeqCst);
+                    if web > 1 && pid > 0 {
+                        QUARANTINED[0].store(true, Ordering::SeqCst);
+                        unsafe { libc::kill(pid, libc::SIGTERM) };
+                        tracing::warn!(
+                            pid,
+                            "draining the failed canary; the fleet keeps serving on \
+                             {} worker(s). Fix the deploy and reload again.",
+                            web - 1
+                        );
+                    } else {
+                        tracing::error!(
+                            "only one worker configured — keeping the failed canary up, \
+                             because no workers at all is worse"
+                        );
+                    }
+                }
             }
         }
 
@@ -800,8 +1008,24 @@ pub(crate) fn roll_next() {
 extern "C" fn on_reload(_sig: libc::c_int) {
     if CANARY_ENABLED.load(Ordering::SeqCst) {
         CANARY_ERR_BASE.store(error_count(), Ordering::SeqCst);
-        CANARY_DEADLINE.store(now_secs() + CANARY_WINDOW_SECS, Ordering::SeqCst);
+        // Snapshot the fleet so the canary is compared against the *same* window.
+        // Atomics only in here: this is a signal handler.
+        let web = WORKER_COUNT.load(Ordering::SeqCst);
+        let (fr, fe, fus) = fleet_totals(0, web);
+        CANARY_FLEET_REQ.store(fr, Ordering::SeqCst);
+        CANARY_FLEET_ERR.store(fe, Ordering::SeqCst);
+        CANARY_FLEET_US.store(fus, Ordering::SeqCst);
+        CANARY_DEADLINE.store(
+            now_secs() + CANARY_WINDOW.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
         CANARY_ACTIVE.store(true, Ordering::SeqCst);
+        ROLLOUT_STATE.store(1, Ordering::SeqCst);
+        // A new deploy gets a clean slate: refill any slot a previous failed
+        // canary left quarantined.
+        for q in QUARANTINED.iter().take(web) {
+            q.store(false, Ordering::SeqCst);
+        }
         // Roll only slot 0 (the canary); the reaper rolls the rest if healthy.
         let pid = CHILDREN[0].load(Ordering::SeqCst);
         if pid > 0 {

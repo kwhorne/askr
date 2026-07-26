@@ -5,6 +5,40 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **Canary rollouts are now judged against the fleet, and a failed canary is drained**
+  (Askr-40). Canary reload already aborted a bad rollout, but the decision compared an
+  **absolute, fleet-wide** 5xx count (>3 in 5s) — which charges the canary for errors
+  the *old* workers produced, so on any site with a normal error baseline every reload
+  aborted, while a canary that served no traffic at all passed.
+
+  Askr now keeps **per-worker counters in shared memory** and compares the canary
+  against the rest of the fleet over the same window:
+
+  ```toml
+  [reload]
+  canary = true
+  canary_window = 5
+  canary_min_requests = 20       # below this: "inconclusive", roll on with a warning
+  canary_max_error_rate = 2.0    # percentage points above the fleet
+  canary_max_latency_factor = 3.0
+  ```
+
+  ```
+  ERROR canary UNHEALTHY — aborting reload
+        reason=error rate 63.35% vs fleet 0.00% (allowed +2.00 points)
+  ```
+
+- **A failed canary is drained and its slot quarantined**, instead of being left to
+  serve a broken deploy from 1/N of the fleet. Respawning it would only boot the same
+  bad build, so the slot stays empty until the next reload clears the quarantine and
+  refills it. Never below one worker — an empty fleet is worse than a bad one.
+- Rollout outcome is exposed in `/api/status` as `rollout`
+  (`rolling`/`ok`/`aborted`/`inconclusive`).
+- Documented honestly: in **worker mode** the surviving workers hold the previous app
+  in memory, so an abort really does keep old code serving; in **per-request mode**
+  every worker reads current files from disk, so the gate detects and drains but can't
+  roll back code that's no longer on disk.
+
 - **Rate limiting in the Rust layer** (Askr-41) — `[[ratelimit]]` rules refuse abusive
   traffic before PHP is woken, in the same layer that serves cache hits:
 

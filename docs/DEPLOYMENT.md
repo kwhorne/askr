@@ -102,19 +102,54 @@ they roll.
 ### Canary reload (zero-bad-deploy)
 
 Add `--canary` (or `[reload] canary = true`) and a reload rolls **one** worker
-first, watches it for a few seconds, and only rolls the rest if it stays healthy
-(alive, no error spike). If the new code is broken, the reload **aborts** — one
-worker is affected instead of the whole fleet, and the master logs an alert:
+first, watches it, and only rolls the rest if it stays healthy. If the new code is
+broken the rollout **aborts**, and the failed canary is drained so it stops serving
+traffic at all:
 
 ```
-INFO  canary healthy — rolling the rest        # good deploy → continues
-ERROR canary UNHEALTHY — aborting reload;       # bad deploy → stops
-      remaining workers keep old code
+INFO  canary healthy — rolling the rest requests=695 err_pct="0.00%"
+ERROR canary UNHEALTHY — aborting reload
+      reason=error rate 63.35% vs fleet 0.00% (allowed +2.00 points)
+WARN  draining the failed canary; the fleet keeps serving on 3 worker(s)
 ```
 
-Health is judged from process liveness and the aggregate 5xx/error rate during
-the canary window, so it catches boot fatals and crashes. Fix the code and
-reload again to recover.
+The canary is compared **against the rest of the fleet in the same window**, using
+per-worker counters in shared memory. That matters: an absolute, fleet-wide error
+count can't tell a bad new worker from a site that always serves a few 5xx, and it
+charges the canary for errors the *old* workers produced.
+
+```toml
+[reload]
+canary = true
+canary_window = 5              # seconds to watch
+canary_min_requests = 20       # below this the verdict is "inconclusive"
+canary_max_error_rate = 2.0    # percentage points above the fleet
+canary_max_latency_factor = 3.0
+```
+
+The outcome shows up in `/api/status` as `rollout`: `rolling`, `ok`, `aborted` or
+`inconclusive`.
+
+What each verdict means:
+
+- **ok** — the canary matched the fleet; the rest of the workers rolled.
+- **aborted** — the rollout stopped, and the bad canary was **drained and its slot
+  quarantined**, so you run one worker short on the old code rather than serving a
+  broken deploy from 1/N of the fleet. Respawning it would only boot the same bad
+  build. Fix the code and reload again: the quarantine clears and the slot refills.
+  With only one worker configured the canary is kept alive instead — no workers at
+  all is worse than a bad one.
+- **inconclusive** — the canary served fewer than `canary_min_requests`, so there was
+  nothing to judge. The rollout **continues** (a deploy shouldn't be blocked by an
+  absence of evidence) and logs a warning. On a quiet site, raise `canary_window` or
+  lower `canary_min_requests` to make the gate meaningful.
+
+> **Worker mode vs per-request mode.** In worker mode the surviving workers hold the
+> *previous* app in memory, so an abort genuinely keeps the old code serving. In
+> per-request mode every worker reads the current files from disk, so a bad deploy
+> affects all of them regardless — the gate still detects it and drains the canary,
+> but it can't roll you back to code that's no longer on disk. Deploy atomically
+> (symlink swap) if you rely on this.
 
 ## TLS
 

@@ -257,6 +257,10 @@ broadcast ring.
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `canary` | bool | Canary reload: roll one worker and health-check it before rolling the rest. |
+| `canary_window` | int | Seconds to watch the canary. Default `5`. |
+| `canary_min_requests` | int | Requests the canary must serve for a verdict; below this the rollout is `inconclusive` and continues with a warning. Default `20`. |
+| `canary_max_error_rate` | float | Percentage points of error rate the canary may exceed the fleet by. Default `2.0`. |
+| `canary_max_latency_factor` | float | Mean-latency factor vs the fleet. Default `3.0`. |
 
 ### Example
 

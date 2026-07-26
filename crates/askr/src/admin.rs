@@ -182,7 +182,7 @@ fn status_json(info: &Info) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"workers":[{workers}],"pids":[{pids}]}}"#,
+        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"rollout":"{ro}","workers":[{workers}],"pids":[{pids}]}}"#,
         ver = env!("CARGO_PKG_VERSION"),
         listen = info.server_listen,
         mode = info.mode,
@@ -195,6 +195,7 @@ fn status_json(info: &Info) -> String {
         qr = s.queue_ready,
         qt = s.queue_total,
         qo = s.queue_oldest_secs,
+        ro = s.rollout,
     )
 }
 

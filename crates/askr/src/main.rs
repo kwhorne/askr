@@ -472,6 +472,14 @@ fn main() -> anyhow::Result<()> {
                     std::env::set_var("ASKR_APP_BASE", base);
                 }
                 CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
+                CANARY_WINDOW.store(r.canary_window, Ordering::SeqCst);
+                CANARY_MIN_REQUESTS.store(r.canary_min_requests, Ordering::SeqCst);
+                CANARY_MAX_ERR_RATE
+                    .store((r.canary_max_error_rate * 100.0) as u64, Ordering::SeqCst);
+                CANARY_MAX_LAT_FACTOR.store(
+                    (r.canary_max_latency_factor * 100.0) as u64,
+                    Ordering::SeqCst,
+                );
                 WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
                 WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
                 QUEUE_CAP.store(r.queue_slots, Ordering::SeqCst);

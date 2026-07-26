@@ -329,12 +329,54 @@ pub struct BroadcastSection {
     pub enabled: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReloadSection {
     /// Canary reload: roll one worker and health-check it before the rest.
     #[serde(default)]
     pub canary: bool,
+    /// Seconds the canary must survive before the rest of the fleet is rolled.
+    #[serde(default = "default_canary_window")]
+    pub canary_window: u64,
+    /// Requests the canary must serve before its numbers mean anything. Below
+    /// this the rollout is "inconclusive" and continues — with a warning.
+    #[serde(default = "default_canary_min_requests")]
+    pub canary_min_requests: u64,
+    /// Percentage points of error rate the canary may exceed the fleet by.
+    #[serde(default = "default_canary_max_error_rate")]
+    pub canary_max_error_rate: f64,
+    /// Mean-latency factor the canary may exceed the fleet by (3.0 = 3×).
+    #[serde(default = "default_canary_max_latency_factor")]
+    pub canary_max_latency_factor: f64,
+}
+
+fn default_canary_window() -> u64 {
+    5
+}
+fn default_canary_min_requests() -> u64 {
+    20
+}
+fn default_canary_max_error_rate() -> f64 {
+    2.0
+}
+fn default_canary_max_latency_factor() -> f64 {
+    3.0
+}
+
+// Hand-written so an absent `[reload]` section gets the same values as the serde
+// defaults above. `#[derive(Default)]` would zero them, which would mean "abort on
+// any canary error at all" — a booby trap for anyone who never writes a [reload]
+// section.
+impl Default for ReloadSection {
+    fn default() -> Self {
+        ReloadSection {
+            canary: false,
+            canary_window: default_canary_window(),
+            canary_min_requests: default_canary_min_requests(),
+            canary_max_error_rate: default_canary_max_error_rate(),
+            canary_max_latency_factor: default_canary_max_latency_factor(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -426,6 +468,10 @@ pub struct Resolved {
     pub response_cache_slots: usize,
     pub broadcast: bool,
     pub canary_reload: bool,
+    pub canary_window: u64,
+    pub canary_min_requests: u64,
+    pub canary_max_error_rate: f64,
+    pub canary_max_latency_factor: f64,
 }
 
 impl FileConfig {
@@ -698,6 +744,10 @@ impl FileConfig {
             response_cache_slots: self.cache.response_slots,
             broadcast: self.broadcast.enabled,
             canary_reload: self.reload.canary,
+            canary_window: self.reload.canary_window.max(1),
+            canary_min_requests: self.reload.canary_min_requests,
+            canary_max_error_rate: self.reload.canary_max_error_rate.max(0.0),
+            canary_max_latency_factor: self.reload.canary_max_latency_factor.max(1.0),
         })
     }
 }
