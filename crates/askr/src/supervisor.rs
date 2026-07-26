@@ -179,6 +179,11 @@ pub(crate) static SPAWN_AT: [AtomicU64; MAX_WORKERS] = [const { AtomicU64::new(0
 pub(crate) static QUARANTINED: [AtomicBool; MAX_WORKERS] =
     [const { AtomicBool::new(false) }; MAX_WORKERS];
 
+/// Where to persist the response cache on graceful shutdown, and the app stamp
+/// that must match for it to be loaded again. Set once at startup.
+pub(crate) static CACHE_PERSIST: std::sync::OnceLock<(std::path::PathBuf, u64)> =
+    std::sync::OnceLock::new();
+
 pub(crate) static MY_SLOT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(usize::MAX);
 pub(crate) static FASTFAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -608,10 +613,16 @@ pub(crate) fn supervise(
         // this, a slot emptied by a failed canary would stay empty forever: the
         // next reload clears the quarantine but has no live PID to roll, so the
         // gate would see a dead canary and abort again on every attempt.
-        for i in 0..web.min(MAX_WORKERS) {
-            if CHILDREN[i].load(Ordering::SeqCst) == 0 && !QUARANTINED[i].load(Ordering::SeqCst) {
-                tracing::info!(worker = i, "filling empty worker slot");
-                spawn_slot(i);
+        //
+        // Never during shutdown — draining workers empty their slots, and refilling
+        // them there would fight the shutdown and the master would never exit.
+        if !SHUTDOWN.load(Ordering::SeqCst) {
+            for i in 0..web.min(MAX_WORKERS) {
+                if CHILDREN[i].load(Ordering::SeqCst) == 0 && !QUARANTINED[i].load(Ordering::SeqCst)
+                {
+                    tracing::info!(worker = i, "filling empty worker slot");
+                    spawn_slot(i);
+                }
             }
         }
 
@@ -725,6 +736,16 @@ pub(crate) fn supervise(
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Persist the response cache now that every worker is reaped: the region is
+    // quiescent, so no slot can be captured mid-lock.
+    if let Some((path, stamp)) = CACHE_PERSIST.get() {
+        match crate::rcache::dump(path, *stamp) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(entries = n, path = %path.display(), "response cache saved"),
+            Err(e) => tracing::warn!(error = %e, path = %path.display(),
+                "could not save the response cache"),
+        }
     }
     tracing::info!("askr master exiting");
     Ok(())

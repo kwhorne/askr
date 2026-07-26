@@ -5,6 +5,34 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **The response cache can survive a restart** (Askr-42) — `[cache] persist` writes the
+  shared region to disk on graceful shutdown and loads it at boot, so a restart doesn't
+  pay a cold-cache stampede:
+
+  ```toml
+  [cache]
+  persist = "/var/lib/askr/rcache.bin"
+  persist_key = "git-sha"   # optional; a deploy then invalidates by construction
+  ```
+
+  The first request after a restart is a `HIT` with a byte-identical body, and tag
+  invalidation still works on restored entries — the tag generations are saved with
+  them, which they must be, or every restored entry would look tag-invalidated.
+
+  This replaces the "predictive cache warming" idea it was filed against: warming
+  would need per-URL frequency data, synthetic requests for every key variant, and it
+  risks a warm-up storm competing with real traffic right after a deploy — when the
+  system is most fragile. Keeping the bytes is simpler and exact.
+
+  Refused unless the build, entry layout and cache size match; refused when the
+  application changed (stamped with the front controller's size and mtime, plus
+  `persist_key` when set); expired entries dropped on load; slot locks zeroed so a boot
+  can't inherit a held lock; only graceful shutdowns write a dump.
+
+- Fixed a shutdown hang introduced with the canary quarantine work: the "refill empty
+  worker slots" pass respawned draining workers during shutdown, so the master could
+  never exit. It now skips while shutting down.
+
 - **Canary rollouts are now judged against the fleet, and a failed canary is drained**
   (Askr-40). Canary reload already aborted a bad rollout, but the decision compared an
   **absolute, fleet-wide** 5xx count (>3 in 5s) — which charges the canary for errors

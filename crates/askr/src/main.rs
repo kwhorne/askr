@@ -464,6 +464,8 @@ fn main() -> anyhow::Result<()> {
                 cache_slots,
                 cache_large_slots,
                 response_cache,
+                cache_persist,
+                cache_persist_key,
                 broadcast,
             ) = if let Some(path) = config_file {
                 let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
@@ -500,6 +502,8 @@ fn main() -> anyhow::Result<()> {
                     r.cache_slots,
                     r.cache_large_slots,
                     r.response_cache_slots,
+                    r.cache_persist,
+                    r.cache_persist_key,
                     r.broadcast,
                 )
             } else {
@@ -587,6 +591,9 @@ fn main() -> anyhow::Result<()> {
                     cache_slots,
                     cache_large_slots,
                     response_cache,
+                    // Cache persistence is config-file only.
+                    None,
+                    None,
                     broadcast,
                 )
             };
@@ -597,6 +604,16 @@ fn main() -> anyhow::Result<()> {
             }
             if response_cache > 0 {
                 rcache::init(response_cache);
+                // Warm start: reload the cache we saved on the last graceful stop,
+                // so a restart doesn't pay a cold-cache stampede.
+                if let Some(path) = cache_persist.clone() {
+                    let stamp = app_stamp(&config, cache_persist_key.as_deref());
+                    let n = rcache::restore(&path, stamp);
+                    if n > 0 {
+                        tracing::info!(entries = n, "response cache restored from disk");
+                    }
+                    let _ = supervisor::CACHE_PERSIST.set((path, stamp));
+                }
             }
             if broadcast || config.pusher {
                 broadcast::init(); // the Pusher endpoints ride the broadcast ring
@@ -1020,6 +1037,32 @@ fn resolve_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let canonical = std::fs::canonicalize(&root)
         .map_err(|e| anyhow::anyhow!("bad --root {}: {e}", root.display()))?;
     Ok(canonical)
+}
+
+/// Identify the deployed application, so a saved response cache can't be restored
+/// on top of different code.
+///
+/// Mixes an explicit release key (when the operator sets one — the reliable
+/// signal) with the front controller's mtime and size, which changes on the common
+/// deploy shapes: a symlink swap points at a different file, and composer/build
+/// steps rewrite it. An rsync-in-place deploy that only touches views won't change
+/// it, which is exactly why `persist_key` exists.
+fn app_stamp(config: &server::Config, key: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if let Some(k) = key {
+        k.hash(&mut h);
+    }
+    let front = config.docroot.join(&config.front_controller);
+    if let Ok(md) = std::fs::metadata(&front) {
+        md.len().hash(&mut h);
+        if let Ok(m) = md.modified() {
+            if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                d.as_secs().hash(&mut h);
+            }
+        }
+    }
+    h.finish()
 }
 
 #[cfg(test)]

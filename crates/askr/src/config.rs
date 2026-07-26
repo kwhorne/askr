@@ -319,6 +319,14 @@ pub struct CacheSection {
     /// Declarative per-path cache policy: `[[cache.rule]]`. First match wins.
     #[serde(default)]
     pub rule: Vec<CacheRule>,
+    /// Persist the response cache to this file on graceful shutdown and load it
+    /// again at boot, so a restart doesn't start cold. Unset = off.
+    #[serde(default)]
+    pub persist: Option<PathBuf>,
+    /// Optional release identifier. When set, a dump only loads if it matches —
+    /// set it to your release SHA so a deploy can't resurrect pre-deploy HTML.
+    #[serde(default)]
+    pub persist_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -466,6 +474,8 @@ pub struct Resolved {
     pub cache_slots: usize,
     pub cache_large_slots: usize,
     pub response_cache_slots: usize,
+    pub cache_persist: Option<PathBuf>,
+    pub cache_persist_key: Option<String>,
     pub broadcast: bool,
     pub canary_reload: bool,
     pub canary_window: u64,
@@ -742,6 +752,8 @@ impl FileConfig {
             cache_slots: self.cache.slots,
             cache_large_slots: self.cache.large_slots,
             response_cache_slots: self.cache.response_slots,
+            cache_persist: self.cache.persist.clone(),
+            cache_persist_key: self.cache.persist_key.clone(),
             broadcast: self.broadcast.enabled,
             canary_reload: self.reload.canary,
             canary_window: self.reload.canary_window.max(1),

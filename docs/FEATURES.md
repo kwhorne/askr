@@ -287,6 +287,40 @@ go through, so recovery is detected automatically — and a page that never opte
 The window is measured from the fresh deadline and is independent of `swr`, so the
 three can be combined: `Askr-Cache: 300, swr=60, stale-if-error=86400`.
 
+### Surviving a restart
+
+An empty cache after a restart means every hot page pays for PHP again at once.
+Coalescing keeps that from becoming a stampede and stale-while-revalidate covers hot
+pages afterwards, but the first request per URL still pays. Askr can simply keep the
+cache instead:
+
+```toml
+[cache]
+response_slots = 512
+persist = "/var/lib/askr/rcache.bin"
+persist_key = "git-sha-or-release-tag"   # optional but recommended
+```
+
+On a **graceful** shutdown the region is written to disk once every worker is
+reaped — so no slot can be captured mid-lock — and read back at boot. The first
+request after a restart is a `HIT` with a byte-identical body, and tag invalidation
+keeps working on restored entries (the tag generations are saved alongside them).
+
+Guards, because a wrong cache is worse than a cold one:
+
+- **The dump is refused** unless the build, the entry layout and the cache size all
+  match. A file from a different Askr version is never reinterpreted.
+- **It's refused when the application changed.** Askr stamps the dump with the front
+  controller's size and mtime, which changes on the common deploy shapes (a symlink
+  swap points at a different file; build steps rewrite it). An rsync-in-place deploy
+  that only touches views won't change it — which is exactly why `persist_key` exists.
+  Set it to your release SHA and a deploy invalidates the cache by construction.
+- **Expired entries are dropped on load**, so a dump read a week later is effectively
+  empty rather than stale.
+- Every slot lock is zeroed on load, so a boot can never inherit a held lock.
+- Only graceful shutdowns write a dump. After a crash there is nothing to restore,
+  which is the right default: the region could have been mid-write.
+
 ### Cache-key normalisation
 
 By default the key is `method + host + path?query + encoding`, and *any* cookie

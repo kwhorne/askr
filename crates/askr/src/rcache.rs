@@ -756,6 +756,179 @@ fn parse_hdr_blob(raw: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
+// --- persistence across restarts ----------------------------------------
+//
+// The region is a flat array of `Entry` with everything stored inline (no
+// pointers), so it can be written to disk verbatim and mapped back on boot. That
+// makes a restart cost nothing instead of paying a cold-cache stampede — without
+// the synthetic warm-up requests a log-driven warmer would need.
+
+/// File header. Any mismatch makes the dump unusable, on purpose: a layout change
+/// must invalidate old files rather than reinterpret their bytes.
+#[repr(C)]
+struct DumpHeader {
+    magic: [u8; 8],
+    version: u32,
+    entry_size: u32,
+    slots: u64,
+    tag_slots: u64,
+    /// Identifies the deployed application; a mismatch drops the cache.
+    app_stamp: u64,
+    saved_at: u64,
+}
+
+const DUMP_MAGIC: [u8; 8] = *b"ASKRRC01";
+const DUMP_VERSION: u32 = 1;
+
+/// Write the response cache and its tag generations to `path`.
+///
+/// Call only when the workers are gone: a dump taken mid-flight could capture a
+/// slot lock in the held state, and `restore` would then hand a deadlock to the
+/// next boot. (`restore` zeroes the locks anyway — belt and braces.)
+pub fn dump(path: &std::path::Path, app_stamp: u64) -> std::io::Result<usize> {
+    use std::io::Write;
+    let Some((p, slots)) = base() else {
+        return Ok(0);
+    };
+    let tp = TAGS_PTR.load(Ordering::Acquire);
+    if tp.is_null() {
+        return Ok(0);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Write to a temp file and rename, so a crash mid-write can't leave a torn
+    // dump that the next boot would try to read.
+    let tmp = path.with_extension("tmp");
+    let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+
+    let hdr = DumpHeader {
+        magic: DUMP_MAGIC,
+        version: DUMP_VERSION,
+        entry_size: std::mem::size_of::<Entry>() as u32,
+        slots: slots as u64,
+        tag_slots: TAG_SLOTS as u64,
+        app_stamp,
+        saved_at: now_secs(),
+    };
+    // SAFETY: plain old data, written as bytes and validated on read.
+    let hdr_bytes = unsafe {
+        std::slice::from_raw_parts(
+            &hdr as *const DumpHeader as *const u8,
+            std::mem::size_of::<DumpHeader>(),
+        )
+    };
+    f.write_all(hdr_bytes)?;
+
+    // SAFETY: the region is quiescent (no workers left) and sized `slots`.
+    let entries =
+        unsafe { std::slice::from_raw_parts(p as *const u8, slots * std::mem::size_of::<Entry>()) };
+    f.write_all(entries)?;
+    // SAFETY: tag table, fixed size.
+    let tags = unsafe {
+        std::slice::from_raw_parts(tp as *const u8, TAG_SLOTS * std::mem::size_of::<TagGen>())
+    };
+    f.write_all(tags)?;
+    f.flush()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
+
+    // Count what was actually worth saving, for the log line.
+    let now = now_secs();
+    let mut live = 0usize;
+    for i in 0..slots {
+        // SAFETY: quiescent region.
+        unsafe {
+            let e = p.add(i);
+            if ptr::read(ptr::addr_of!((*e).state)) == 1 {
+                let hard = ptr::read(ptr::addr_of!((*e).stale_until));
+                let err = ptr::read(ptr::addr_of!((*e).error_until));
+                let retain = hard.max(err);
+                if retain == 0 || retain >= now {
+                    live += 1;
+                }
+            }
+        }
+    }
+    Ok(live)
+}
+
+/// Load a dump written by [`dump`]. Returns how many live entries were restored.
+///
+/// Silently returns 0 when the file is missing, from another build, or describes a
+/// different layout — a cache is an optimisation, and refusing to start over a
+/// stale file would be the wrong trade.
+pub fn restore(path: &std::path::Path, app_stamp: u64) -> usize {
+    use std::io::Read;
+    let Some((p, slots)) = base() else {
+        return 0;
+    };
+    let tp = TAGS_PTR.load(Ordering::Acquire);
+    if tp.is_null() {
+        return 0;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut hdr_buf = vec![0u8; std::mem::size_of::<DumpHeader>()];
+    if f.read_exact(&mut hdr_buf).is_err() {
+        return 0;
+    }
+    // SAFETY: reading POD out of a byte buffer of exactly its size.
+    let hdr: DumpHeader = unsafe { ptr::read_unaligned(hdr_buf.as_ptr() as *const DumpHeader) };
+    if hdr.magic != DUMP_MAGIC
+        || hdr.version != DUMP_VERSION
+        || hdr.entry_size != std::mem::size_of::<Entry>() as u32
+        || hdr.slots != slots as u64
+        || hdr.tag_slots != TAG_SLOTS as u64
+    {
+        tracing::info!("response cache dump ignored (different build or cache size)");
+        return 0;
+    }
+    if hdr.app_stamp != app_stamp {
+        tracing::info!("response cache dump ignored (application changed since it was written)");
+        return 0;
+    }
+
+    let esize = slots * std::mem::size_of::<Entry>();
+    let tsize = TAG_SLOTS * std::mem::size_of::<TagGen>();
+    let mut buf = vec![0u8; esize + tsize];
+    if f.read_exact(&mut buf).is_err() {
+        tracing::warn!("response cache dump is truncated; ignoring");
+        return 0;
+    }
+    // SAFETY: mapped before any fork, so nothing else is touching the region yet;
+    // sizes were validated against the header above.
+    unsafe {
+        ptr::copy_nonoverlapping(buf.as_ptr(), p as *mut u8, esize);
+        ptr::copy_nonoverlapping(buf.as_ptr().add(esize), tp as *mut u8, tsize);
+    }
+
+    // Free every slot lock and drop anything already past its deadline, so a boot
+    // never inherits a held lock or serves content that expired while we were down.
+    let now = now_secs();
+    let mut live = 0usize;
+    for i in 0..slots {
+        // SAFETY: pre-fork, exclusive access.
+        unsafe {
+            let e = p.add(i);
+            (*e).lock.store(0, Ordering::Relaxed);
+            if ptr::read(ptr::addr_of!((*e).state)) != 1 {
+                continue;
+            }
+            let hard = ptr::read(ptr::addr_of!((*e).stale_until));
+            let err = ptr::read(ptr::addr_of!((*e).error_until));
+            let retain = hard.max(err);
+            if retain != 0 && retain < now {
+                ptr::write(ptr::addr_of_mut!((*e).state), 0);
+            } else {
+                live += 1;
+            }
+        }
+    }
+    live
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
