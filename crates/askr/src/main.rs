@@ -39,6 +39,7 @@ mod squeue;
 mod squeue_sql;
 mod supervisor;
 mod tls;
+mod tune;
 mod upgrade;
 mod upload;
 mod worker;
@@ -361,6 +362,22 @@ enum Command {
 
     /// Pre-flight checks: PHP build, extensions, and platform support.
     Doctor {
+        /// Extra php.ini lines (e.g. to load opcache).
+        #[arg(long)]
+        ini: Option<String>,
+    },
+
+    /// Measure the app and suggest workers, memory caps and cache sizes.
+    Tune {
+        /// Document root (defaults to ./public).
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Front controller, relative to the root.
+        #[arg(long, default_value = "index.php")]
+        front: String,
+        /// How many requests to sample.
+        #[arg(long, default_value_t = 30)]
+        requests: usize,
         /// Extra php.ini lines (e.g. to load opcache).
         #[arg(long)]
         ini: Option<String>,
@@ -723,6 +740,15 @@ fn main() -> anyhow::Result<()> {
             } else {
                 supervise(listener, config, ini, workers, admin_listen, sidecars)
             }
+        }
+        Command::Tune {
+            root,
+            front,
+            requests,
+            ini,
+        } => {
+            let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
+            tune::run(root, front, requests.clamp(1, 10_000), ini)
         }
         Command::Doctor { ini } => {
             let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());

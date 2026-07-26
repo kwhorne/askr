@@ -5,7 +5,7 @@ askr <command> [options]
 ```
 
 Commands: [`serve`](#askr-serve), [`test`](#askr-test), [`replay`](#askr-replay),
-[`doctor`](#askr-doctor), [`config-check`](#askr-config-check),
+[`doctor`](#askr-doctor), [`tune`](#askr-tune), [`config-check`](#askr-config-check),
 [`upgrade`](#askr-upgrade). Run `askr <command> --help` for the built-in help.
 
 Global: `-V`/`--version`, `-h`/`--help`. Logging verbosity is `RUST_LOG` (e.g.
@@ -136,6 +136,37 @@ askr replay /var/lib/askr/errors/<id>.json
 Pre-flight checks: PHP build, extensions (required + recommended), platform
 (io_uring probe on Linux). `--ini <LINES>` to load opcache. Exit non-zero on
 critical failure.
+
+## `askr tune`
+
+Measure the app and print an `askr.toml` you can paste, with one line of reasoning
+per number:
+
+```bash
+askr tune --root public --requests 30
+```
+
+```
+  PHP boot              182.4 ms
+  Request (mean)        24.9 ms wall, 0.1 ms CPU
+  RSS after warm-up     94 MB
+
+  Suggested askr.toml:
+
+    [server]
+    workers = 64          # only 1% CPU-bound (waits on I/O) ⇒ more workers than cores
+    max_rss_mb = 220      # 2× observed peak (110 MB); memory grew 0.31 MB/request
+```
+
+It runs your front controller in-process a number of times and measures boot time,
+wall vs **CPU** time per request (that ratio is what decides whether more workers
+than cores will help), memory growth, and response size.
+
+There is deliberately **no HTTP load generator**: Askr's own
+[benchmarks](BENCHMARKS.md) show PHP is ~99.5 % of request time, so the interpreter
+is the thing worth measuring. The output also prints what it *didn't* cover — one
+route, no cookies, no concurrency — because a wrong recommendation is worse than
+none. Run it against a copy of production data, not an empty database.
 
 ## `askr config-check`
 

@@ -20,8 +20,8 @@ any of them requires a major bump (`2.0`) and a deprecation period (below).
 
 ### 1. CLI — subcommands and flags
 
-- Subcommands: `serve`, `test`, `replay`, `doctor`, `config-check`, `upgrade`,
-  `status`.
+- Subcommands: `serve`, `test`, `replay`, `doctor`, `tune`, `config-check`,
+  `upgrade`, `status`.
 - Every documented `--flag` on those commands: its name, whether it takes a value,
   and its meaning. Default values may be tuned across minor versions when they are
   purely performance defaults (e.g. the auto worker count) — never when a default

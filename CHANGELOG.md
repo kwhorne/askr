@@ -5,6 +5,27 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **`askr tune`** (Askr-43) — measure the app, then print an `askr.toml` you can paste,
+  with one line of reasoning per number:
+
+  ```
+  PHP boot              182.4 ms
+  Request (mean)        24.9 ms wall, 0.1 ms CPU
+
+    [server]
+    workers = 64          # only 1% CPU-bound (waits on I/O) ⇒ more workers than cores
+    max_rss_mb = 220      # 2× observed peak; memory grew 0.31 MB/request
+  ```
+
+  It runs the front controller in-process and measures boot time, **wall vs CPU time**
+  per request — that ratio is what decides whether more workers than cores will help —
+  plus memory growth and response size.
+
+  No HTTP load generator, on purpose: Askr's own benchmarks show PHP is ~99.5 % of
+  request time, so the interpreter is what's worth measuring. The output ends by
+  stating what it *didn't* cover (one route, no cookies, no concurrency), because a
+  confidently wrong `max_rss_mb` buys you a recycling storm.
+
 - **The response cache can survive a restart** (Askr-42) — `[cache] persist` writes the
   shared region to disk on graceful shutdown and loads it at boot, so a restart doesn't
   pay a cold-cache stampede:
