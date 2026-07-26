@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v1.1.0</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v1.2.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
 **A standalone, memory-safe PHP application server, in Rust.**
@@ -41,7 +41,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v1.1.0; ARCH=$(uname -m)
+VER=v1.2.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -81,7 +81,7 @@ Everything lives in [`docs/`](docs/README.md):
 - [Benchmarks](docs/BENCHMARKS.md) — vs FrankenPHP, FPM+nginx, RoadRunner (reproducible)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 
-## What works today (1.1.0)
+## What works today (1.2.0)
 
 - Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
 - **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -99,6 +99,13 @@ Everything lives in [`docs/`](docs/README.md):
   policy for apps you can't edit
 - **`stale-if-error` + saint mode**: keep serving held content when PHP or the
   database falls over, with the real failure still logged and recorded
+- **The cache survives restarts** — saved on graceful shutdown, restored at boot,
+  so a restart doesn't pay a cold-cache stampede
+- **Rate limiting** (`[[ratelimit]]`) enforced across the whole worker fleet from
+  shared memory, before PHP is woken — no Redis needed for it
+- **Canary deploys that stop themselves**: the new worker is compared against the
+  rest of the fleet, and a failed canary is drained instead of serving a bad build
+- **`askr tune`** — measures your app and prints the config it should have
 - **Request coalescing**: identical cold-cache requests run PHP once (no stampede)
 - **Pusher-compatible WebSocket** (`--pusher`): drop-in Reverb — Echo works with
   no frontend change (WS `/app/{key}` + trigger `POST /apps/{id}/events`)
@@ -172,6 +179,7 @@ Everything lives in [`docs/`](docs/README.md):
 | **1.0.0** — 🎉 stable release: the surface is frozen under SemVer ([STABILITY.md](docs/STABILITY.md)); stress-validated at tens of millions of requests, 100% success | ✅ |
 | **1.0.1** — security: static serving never discloses PHP sources or dotfiles (`.env`); `stale-if-error` + saint mode; smart cache-key normalisation | ✅ |
 | **1.1.0** — Varnish-grade cache: **ESI** fragment assembly, HTTP **`PURGE`/`BAN`**, declarative per-path **`[[cache.rule]]`** — all in-process | ✅ |
+| **1.2.0** — operations: fleet-wide **rate limiting** before PHP, canary judged against the fleet + failed canary drained, **cache survives restarts**, `askr tune` | ✅ |
 | **Post-1.0** — durable-tier polish, per-site worker pools, and the experiments tracked in the issue tracker (AI/LLM cache, Varnish-grade edge cache, P2P cluster). | 🔭 |
 
 1.0 is a frozen, stress-validated base. The benchmark against FrankenPHP/FPM/RoadRunner

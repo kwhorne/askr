@@ -3,7 +3,15 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
-## Unreleased
+## 1.2.0 — 2026-07-26
+
+The operations release. 1.1 made Askr fast to *serve*; this one makes it safer to
+**run**: refuse abusive traffic before PHP wakes up, stop a bad deploy at one worker
+and drain it, keep the cache across a restart, and get a starting config measured
+from your own app rather than guessed.
+
+Every addition is a new default-off config key or a new subcommand, so 1.2.0 is a
+drop-in for 1.1.x per [STABILITY.md](docs/STABILITY.md).
 
 - **`askr tune`** (Askr-43) — measure the app, then print an `askr.toml` you can paste,
   with one line of reasoning per number:

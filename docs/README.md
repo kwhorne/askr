@@ -5,7 +5,7 @@ embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
 memory-safe hot path, and — in worker mode — boots your app once and serves many
 requests against it, eliminating per-request framework bootstrap.
 
-> Version **1.1.0**. Production target is Linux; development also works on macOS.
+> Version **1.2.0**. Production target is Linux; development also works on macOS.
 
 ## Start here
 
@@ -39,7 +39,7 @@ requests against it, eliminating per-request framework bootstrap.
 Install a self-contained release (Linux x86_64 / arm64) and serve a Laravel app:
 
 ```bash
-VER=v1.1.0; ARCH=$(uname -m)
+VER=v1.2.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -53,7 +53,7 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
 Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md).
 Building from source: [Building](BUILDING.md).
 
-## What works today (1.1.0)
+## What works today (1.2.0)
 
 - Embedded PHP (non-ZTS) running real Laravel 12, **~9× the per-request/FPM model**
 - Multi-core via one worker **process per core** on a shared listen socket
@@ -65,7 +65,9 @@ Building from source: [Building](BUILDING.md).
 - **Broadcasting** — SSE + `askr_broadcast()`, plus a **Pusher-compatible WebSocket** (`--pusher`, drop-in Reverb with auth)
 - **Response cache** with tag invalidation, **ESI** fragment assembly, `PURGE`/`BAN`,
   `stale-if-error`, per-path `[[cache.rule]]`, request **coalescing**, `askr_defer()`
-  post-response work
+  post-response work — and it survives restarts
+- **Fleet-wide rate limiting** before PHP wakes up, and canary deploys that abort
+  and drain themselves on regression
 - **Multipart uploads** (`$_FILES`) + response **compression** (br/gzip)
 - **Record & replay** failing requests (`--record-errors` / `askr replay`)
 - Graceful **recycling** + auto-respawn + crash resilience
