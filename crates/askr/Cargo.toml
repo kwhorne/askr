@@ -46,7 +46,7 @@ instant-acme = "0.8.5"
 # Optional L2 durable-queue backend (elyra-9): a SQL Anywhere / SQLite database
 # implementing docs/STORAGE_BACKEND.md against sql-anywhere's QUEUE_CONTRACT.md.
 # Off by default so the standard build and CI are unaffected.
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
 # Optional observability sink: ship logs/metrics to ElyraSQL over the MySQL wire
 # protocol (docs/OBSERVABILITY.md). Off by default so the standard build/CI are
