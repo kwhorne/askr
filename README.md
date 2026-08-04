@@ -86,7 +86,9 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 - [Hosting multiple domains](docs/HOSTING.md) — virtual hosts, redirects, multi-domain TLS
 - [Stability & compatibility](docs/STABILITY.md) — the 1.0 contract + deprecation policy
 - [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
-- [Docker](docs/DOCKER.md) — one container replaces app+nginx+redis+queue+cron (GHCR, multi-arch)
+- [Docker](docs/DOCKER.md) — one container replaces app+nginx+redis+queue+cron (GHCR, multi-arch).
+  `docker compose up` on an app you already have:
+  [`examples/docker/quickstart.yml`](examples/docker/quickstart.yml)
 - [Power features](docs/FEATURES.md) — response cache + tags, coalescing, Pusher WS, defer, autoscaling, record/replay, test runner
 - [Shared cache](docs/CACHE.md) — `askr_cache_*` + Laravel driver (no Redis)
 - [Broadcasting](docs/BROADCAST.md) — live updates via SSE (no Reverb/Pusher)

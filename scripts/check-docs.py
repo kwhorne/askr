@@ -40,13 +40,18 @@ def main() -> int:
             continue
         base = os.path.dirname(f) or "."
         body = open(f, encoding="utf-8").read()
-        for m in re.finditer(r"\]\((([A-Za-z0-9_./-]*\.md)?)(#([A-Za-z0-9_-]+))?\)", body):
-            target, anchor = m.group(2), m.group(4)
+        # Any relative link, not just .md — docs point at quickstart.yml, askr.toml,
+        # example PHP scripts. A stale reference to one of those rots just as quietly,
+        # and this checker missed them until a compose file was added.
+        for m in re.finditer(r"\]\(([^)\s]*?)(#([A-Za-z0-9_-]+))?\)", body):
+            target, anchor = m.group(1), m.group(3)
+            if re.match(r"^[a-z][a-z0-9+.-]*:", target) or target.startswith("//"):
+                continue  # external / mailto
             path = os.path.normpath(os.path.join(base, target)) if target else f
-            if target and not os.path.isfile(path):
+            if target and not os.path.exists(path):
                 broken.append(f"{f} -> {target} (no such file)")
                 continue
-            if anchor:
+            if anchor and path.endswith(".md"):
                 if path not in cache:
                     cache[path] = anchors(path)
                 if anchor.lower() not in cache[path]:

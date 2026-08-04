@@ -69,6 +69,10 @@ composer require kwhorne/askr-laravel
 That's it — the service provider is auto-discovered. Nothing to add to
 `config/app.php`.
 
+> Want to run this in Docker rather than installing Askr locally?
+> [`examples/docker/quickstart.yml`](../examples/docker/quickstart.yml) serves the project
+> you're in with `docker compose up` — worker mode and a response cache already set.
+
 **Versions track the server.** The package is released alongside Askr with the same
 version number, so pair `askr-laravel` `1.4.x` with an Askr `1.4.x` server. They're
 loosely coupled — the drivers talk to whatever regions the running server exposes — but

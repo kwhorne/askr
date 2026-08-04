@@ -4,7 +4,39 @@ A ready-made scaffold: **one container** that runs the web workers, the queue,
 the scheduler, the shared cache and broadcasting — replacing the usual
 app + nginx + redis + queue + cron stack.
 
-## Use it
+## Two ways to use Askr with compose
+
+This directory holds both, and they're for different moments:
+
+| File | What it does | Use it when |
+|---|---|---|
+| [`quickstart.yml`](quickstart.yml) | **Bind-mounts** your project into the published image. No build. | Trying Askr, or day-to-day development |
+| [`docker-compose.yml`](docker-compose.yml) + [`Dockerfile`](Dockerfile) | **Bakes** your code into an image. | Production |
+
+The distinction matters more than it looks. `quickstart.yml` mounts a directory, so
+editing code takes effect immediately — ideal locally, wrong in production, where you
+want a deploy to be a new immutable image rather than a mutated directory.
+
+### quickstart.yml — serve an app you already have
+
+```bash
+cp quickstart.yml /path/to/your/app/docker-compose.yml
+cd /path/to/your/app && docker compose up
+# → http://localhost:8080     (admin/metrics on 127.0.0.1:9000)
+```
+
+Or keep it here and point it somewhere:
+
+```bash
+ASKR_APP_PATH=~/code/my-app docker compose -f quickstart.yml up
+docker compose -f quickstart.yml down
+```
+
+`vendor/` must already be installed — Askr serves your project, it doesn't build it. It
+starts in **worker mode** (Laravel booted once, the Octane model), with a response cache
+and a 30-second `stop_grace_period` so `down` drains in-flight requests.
+
+### The production scaffold
 
 Copy the four files here to your Laravel project **root**:
 
