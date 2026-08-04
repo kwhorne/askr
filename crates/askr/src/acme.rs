@@ -9,6 +9,12 @@
 //!
 //! On obtain, `<cache>/cert.pem` + `<cache>/key.pem` are written (plus an account
 //! and a `renew_at` marker); workers build their `TlsAcceptor` from those.
+//!
+//! The plain-HTTP listener (`spawn_front`) lives for the whole process, not just for an
+//! issuance. That's what lets `force_https` actually redirect: a TLS listener never sees
+//! a plain-HTTP request, so without something on port 80 a visitor typing `http://…`
+//! got a connection failure. One listener now answers challenges *and* redirects, so
+//! there's no second process fighting for the port.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -61,6 +67,33 @@ pub fn key_path(dir: &Path) -> PathBuf {
 }
 
 /// True if there's no cached cert or the renewal marker has passed.
+/// Write a file only the owner can read.
+///
+/// `std::fs::write` uses the process umask, which is typically 022 — so a TLS private key
+/// and the ACME account credentials landed as 0644, readable by every local user. The
+/// mode is set at creation rather than chmod'ed afterwards, so there's no window where
+/// the key exists with wider permissions.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    // An existing file keeps its old mode, so tighten it too (an upgrade from a version
+    // that wrote 0644 must not leave the key readable).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 pub fn needs_renewal(dir: &Path) -> bool {
     if !cert_path(dir).exists() || !key_path(dir).exists() {
         return true;
@@ -115,7 +148,7 @@ async fn load_or_create_account(cfg: &AcmeConfig) -> anyhow::Result<Account> {
         .await
         .context("acme: creating account")?;
     if let Ok(json) = serde_json::to_vec(&creds) {
-        let _ = std::fs::write(&cred_path, json);
+        let _ = write_private(&cred_path, &json);
     }
     Ok(account)
 }
@@ -124,12 +157,23 @@ async fn obtain(cfg: &AcmeConfig) -> anyhow::Result<()> {
     anyhow::ensure!(!cfg.domains.is_empty(), "acme: no domains");
     std::fs::create_dir_all(&cfg.cache_dir).context("acme: creating cache dir")?;
 
-    let challenges: Challenges = Arc::new(Mutex::new(HashMap::new()));
-    let listener = TcpListener::bind(cfg.challenge_addr)
-        .await
-        .with_context(|| format!("acme: binding challenge server on {}", cfg.challenge_addr))?;
-    let ch = challenges.clone();
-    let server = tokio::spawn(async move { challenge_loop(listener, ch).await });
+    // Prefer the long-lived front: it already owns the challenge port, so binding a
+    // second listener here would simply fail. Only fall back to a temporary one when no
+    // front is running (a bare `obtain` with no server, e.g. in tests).
+    let (challenges, server) = match FRONT.get() {
+        Some(front) => (front.clone(), None),
+        None => {
+            let challenges: Challenges = Arc::new(Mutex::new(HashMap::new()));
+            let listener = TcpListener::bind(cfg.challenge_addr)
+                .await
+                .with_context(|| {
+                    format!("acme: binding challenge server on {}", cfg.challenge_addr)
+                })?;
+            let ch = challenges.clone();
+            let task = tokio::spawn(async move { challenge_loop(listener, ch, false).await });
+            (challenges, Some(task))
+        }
+    };
 
     tracing::info!(domains = ?cfg.domains, "acme: obtaining certificate");
     let account = load_or_create_account(cfg).await?;
@@ -173,12 +217,19 @@ async fn obtain(cfg: &AcmeConfig) -> anyhow::Result<()> {
         .await
         .context("acme: fetching certificate")?;
 
-    std::fs::write(key_path(&cfg.cache_dir), key_pem).context("acme: writing key")?;
+    write_private(&key_path(&cfg.cache_dir), key_pem.as_bytes()).context("acme: writing key")?;
     std::fs::write(cert_path(&cfg.cache_dir), cert_pem).context("acme: writing cert")?;
     let renew_at = now_secs() + cfg.renew_after_days * 86_400;
     let _ = std::fs::write(cfg.cache_dir.join("renew_at"), renew_at.to_string());
 
-    server.abort();
+    // Only tear down a listener we created. The front outlives every issuance.
+    if let Some(task) = server {
+        task.abort();
+    }
+    // Challenge tokens are single-use; leaving them served forever is pointless surface.
+    if let Ok(mut m) = challenges.lock() {
+        m.clear();
+    }
     tracing::info!(
         cert = %cert_path(&cfg.cache_dir).display(),
         "acme: certificate obtained"
@@ -186,14 +237,78 @@ async fn obtain(cfg: &AcmeConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Serve HTTP-01 challenge responses; 404 for everything else.
+/// The long-lived plain-HTTP listener's challenge map, if one is running.
 ///
-/// This listener is temporary — bound for an issuance/renewal and aborted afterwards
-/// (see `obtain`). So port 80 is unoccupied the rest of the time, and `force_https`
-/// can't redirect real visitors when Askr terminates TLS itself: there's no plain-HTTP
-/// listener for them to arrive on. Documented in HOSTING.md; a persistent :80 responder
-/// that both answers challenges and redirects is the fix.
-async fn challenge_loop(listener: TcpListener, challenges: Challenges) {
+/// `obtain` publishes tokens here instead of binding its own listener, so an issuance
+/// never has to fight the front for port 80 — and the front can therefore stay up
+/// between renewals, which is the whole point.
+static FRONT: std::sync::OnceLock<Challenges> = std::sync::OnceLock::new();
+
+/// Start the plain-HTTP front on `addr` for the lifetime of the process.
+///
+/// Answers ACME HTTP-01 challenges, and when `redirect` is set sends everything else to
+/// `https://<host><path>` with a 308. Idempotent: calling it twice is a no-op.
+///
+/// Binding port 80 can legitimately fail (no privileges, something else already there),
+/// and that must not stop a server from serving HTTPS — so failure is a warning, not an
+/// error.
+pub fn spawn_front(addr: SocketAddr, redirect: bool) {
+    if FRONT.get().is_some() {
+        return;
+    }
+    let challenges: Challenges = Arc::new(Mutex::new(HashMap::new()));
+    if FRONT.set(challenges.clone()).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("askr-http-front".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!(error = %e, "http front: runtime");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let listener = match TcpListener::bind(addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!(
+                            %addr, error = %e,
+                            "http front: could not bind (privileges? port in use?) — \
+                             plain-HTTP requests will not be answered or redirected"
+                        );
+                        return;
+                    }
+                };
+                tracing::info!(%addr, redirect, "http front listening");
+                challenge_loop(listener, challenges, redirect).await;
+            });
+        })
+        .ok();
+}
+
+/// Where an HTTP request on the front should be sent, or `None` to answer it here.
+///
+/// Pure so the redirect can be tested without a socket. Keeps the request's host (so
+/// virtual hosts survive) and its path + query, and refuses a missing or malformed host
+/// rather than emitting `https:///path`.
+pub(crate) fn redirect_location(host: Option<&str>, path_and_query: &str) -> Option<String> {
+    let host = host?.trim();
+    if host.is_empty() || host.contains('/') || host.contains(char::is_whitespace) {
+        return None;
+    }
+    // Strip a plain-HTTP port so we don't redirect to https://example.com:80/.
+    let host = host.strip_suffix(":80").unwrap_or(host);
+    Some(format!("https://{host}{path_and_query}"))
+}
+
+/// Serve HTTP-01 challenge responses; redirect or 404 for everything else.
+async fn challenge_loop(listener: TcpListener, challenges: Challenges, redirect: bool) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
@@ -205,14 +320,46 @@ async fn challenge_loop(listener: TcpListener, challenges: Challenges) {
                 let challenges = challenges.clone();
                 async move {
                     let path = req.uri().path();
-                    let body = path
-                        .strip_prefix("/.well-known/acme-challenge/")
-                        .and_then(|token| challenges.lock().unwrap().get(token).cloned());
-                    let resp = match body {
-                        Some(key_auth) => Response::builder()
-                            .status(StatusCode::OK)
-                            .header(hyper::header::CONTENT_TYPE, "text/plain")
-                            .body(Full::new(Bytes::from(key_auth)))
+                    // A challenge always wins over the redirect: sending the ACME
+                    // validator to HTTPS would break issuance for a domain whose
+                    // certificate doesn't exist yet.
+                    let body =
+                        path.strip_prefix("/.well-known/acme-challenge/")
+                            .and_then(|token| {
+                                challenges
+                                    .lock()
+                                    .map(|m| m.get(token).cloned())
+                                    .unwrap_or(None)
+                            });
+                    if let Some(key_auth) = body {
+                        return Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(hyper::header::CONTENT_TYPE, "text/plain")
+                                .body(Full::new(Bytes::from(key_auth)))
+                                .unwrap(),
+                        );
+                    }
+                    let pq = req
+                        .uri()
+                        .path_and_query()
+                        .map(|p| p.as_str())
+                        .unwrap_or("/")
+                        .to_string();
+                    let host = req
+                        .headers()
+                        .get(hyper::header::HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    let location = redirect
+                        .then(|| redirect_location(host.as_deref(), &pq))
+                        .flatten();
+                    let resp = match location {
+                        Some(to) => Response::builder()
+                            .status(StatusCode::PERMANENT_REDIRECT)
+                            .header(hyper::header::LOCATION, to)
+                            .header(hyper::header::CONTENT_LENGTH, "0")
+                            .body(Full::new(Bytes::new()))
                             .unwrap(),
                         None => Response::builder()
                             .status(StatusCode::NOT_FOUND)
@@ -246,6 +393,60 @@ mod tests {
         String::from_utf8_lossy(&buf).into_owned()
     }
 
+    #[test]
+    fn redirect_location_keeps_host_path_and_query() {
+        assert_eq!(
+            redirect_location(Some("example.com"), "/a/b?c=1"),
+            Some("https://example.com/a/b?c=1".to_string())
+        );
+        // A plain-HTTP port must not survive into the https URL.
+        assert_eq!(
+            redirect_location(Some("example.com:80"), "/"),
+            Some("https://example.com/".to_string())
+        );
+        // No host, or a host that would let someone steer the Location header
+        // somewhere else entirely, is answered here instead of redirected.
+        assert_eq!(redirect_location(None, "/"), None);
+        assert_eq!(redirect_location(Some(""), "/"), None);
+        assert_eq!(redirect_location(Some("evil.com/x"), "/"), None);
+        assert_eq!(redirect_location(Some("a b"), "/"), None);
+    }
+
+    /// A challenge must win over the redirect: sending the ACME validator to HTTPS
+    /// would break issuance for a domain that has no certificate yet — the exact
+    /// situation ACME exists to resolve.
+    #[tokio::test]
+    async fn challenge_wins_over_redirect_and_the_rest_is_redirected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let challenges: Challenges = Arc::new(Mutex::new(HashMap::new()));
+        challenges
+            .lock()
+            .unwrap()
+            .insert("tok123".to_string(), "tok123.keyauth".to_string());
+        tokio::spawn(challenge_loop(listener, challenges, true));
+
+        let ch = http_get(addr, "/.well-known/acme-challenge/tok123").await;
+        assert!(ch.contains(" 200 "), "{ch}");
+        assert!(ch.contains("tok123.keyauth"), "{ch}");
+
+        let other = http_get(addr, "/pricing?ref=x").await;
+        assert!(other.contains(" 308 "), "{other}");
+        assert!(other.contains("https://x/pricing?ref=x"), "{other}");
+    }
+
+    /// With redirects off (no `force_https`) the front stays a challenge server, so
+    /// enabling ACME can't silently start bouncing traffic somebody didn't ask to bounce.
+    #[tokio::test]
+    async fn without_redirect_enabled_the_front_only_serves_challenges() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let challenges: Challenges = Arc::new(Mutex::new(HashMap::new()));
+        tokio::spawn(challenge_loop(listener, challenges, false));
+        let r = http_get(addr, "/pricing").await;
+        assert!(r.contains(" 404 "), "{r}");
+    }
+
     #[tokio::test]
     async fn http01_challenge_serving() {
         let challenges: Challenges = Arc::new(Mutex::new(HashMap::new()));
@@ -255,7 +456,7 @@ mod tests {
             .insert("tok123".to_string(), "tok123.keyauth".to_string());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(challenge_loop(listener, challenges));
+        tokio::spawn(challenge_loop(listener, challenges, false));
 
         // Known token → 200 with the key authorization.
         let ok = http_get(addr, "/.well-known/acme-challenge/tok123").await;

@@ -98,7 +98,7 @@ docker compose logs -f                               # PHP diagnostics land here
 into an image so a deploy is a new image rather than a mutated directory — that's
 [`examples/docker/docker-compose.yml`](../examples/docker/docker-compose.yml) with its
 `Dockerfile`, read-only root filesystem and a volume for `storage/`. Pin an exact version
-(`askr:1.4.1`), not `:1.4` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
+(`askr:1.4.2`), not `:1.4` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
 
 Then skip to [step 4: the Laravel side](#4-the-laravel-side).
 
@@ -112,7 +112,7 @@ Nothing is installed system-wide and no system PHP is touched.
 ### B1. Download and unpack
 
 ```bash
-VER=v1.4.1; ARCH=$(uname -m)
+VER=v1.4.2; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz
 cd askr-${VER#v}-linux-$ARCH
@@ -268,26 +268,30 @@ force_https = true
 host, path and query. "Is this request secure?" is decided from the connection's own TLS,
 then `[server] https = true`, then `X-Forwarded-Proto: https`.
 
-**But read this before assuming port 80 is handled.** `force_https` can only redirect a
-request that *reaches* Askr over plain HTTP. When Askr terminates TLS itself, its
-listener is HTTPS-only — so there's nothing on port 80 to redirect, and
-`http://example.com` fails to connect rather than being sent onward. Depending on your
-route above:
+**One thing to know:** `force_https` can only redirect a request that *reaches* Askr over
+plain HTTP, and a TLS listener never sees one. So something has to listen on port 80.
 
-- **Route 2 (your own certificate):** run a second, plain-HTTP Askr on `:80` with
-  `force_https = true` next to the TLS one. Verified: it answers
-  `308 → https://example.com/`.
-- **Route 1 (ACME):** you can't do that today, because Askr's HTTP-01 challenge server
-  needs port 80 during issuance and renewal and the two would fight over the bind. If
-  you need the redirect as well, terminate `:80` at a load balancer, or use your own
-  certificate (route 2) with the redirect instance.
+- **Route 1 (ACME): already done.** The challenge listener stays up for the whole process
+  and redirects everything that isn't a challenge, so `--force-https` is all you add. A
+  challenge always wins over the redirect — otherwise a domain could never get its first
+  certificate.
+- **Route 2 (your own certificate):** name the plain port yourself:
+
+  ```toml
+  [server]
+  force_https = true
+  http_redirect = "0.0.0.0:80"
+  ```
+
+  (or `--http-redirect 0.0.0.0:80`). Verified: `308 → https://example.com/pricing?ref=x`,
+  path and query preserved.
 - **Behind a load balancer or CDN:** the balancer redirects, and `force_https` covers
   anything that slips through via `X-Forwarded-Proto` — set
   [`trusted_proxies`](CONFIGURATION.md) so that header is believed only from your
   balancer.
 
-`force_https` is still worth setting in all three cases: it's what protects you when a
-request arrives unencrypted by a route you didn't plan for.
+Binding `:80` needs privileges just like `:443`, and if it fails Askr warns and keeps
+serving HTTPS rather than refusing to start.
 
 If you also want `www` → apex, that's a `[[redirect]]` rule:
 **[HOSTING.md](HOSTING.md#2-redirects--wwwapex-and-httphttps)**.

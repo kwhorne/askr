@@ -6,14 +6,14 @@
 # recompile — we drop in the relocatable release package (binary + libphp with
 # rpath $ORIGIN/lib), so this build is just fetch + package.
 #
-#   docker build --build-arg ASKR_VERSION=1.4.1 -t askr .
+#   docker build --build-arg ASKR_VERSION=1.4.2 -t askr .
 #
 # Multi-arch: buildx sets TARGETARCH (amd64 / arm64); we fetch the matching
 # tarball. See docs/DOCKER.md for the app-image and compose examples.
 
 # ---- fetch the relocatable release tarball ----
 FROM ubuntu:24.04 AS fetch
-ARG ASKR_VERSION=1.4.1
+ARG ASKR_VERSION=1.4.2
 # "" = the default build; "-full" pulls the sql-backend + observ tarball.
 ARG ASKR_VARIANT=""
 ARG TARGETARCH
@@ -33,11 +33,17 @@ RUN set -eux; \
     esac; \
     # --retry-all-errors so a Docker build kicked off by the same tag push waits
     # for the release job to finish uploading the asset (404 → retry).
-    curl -fsSL --retry 30 --retry-delay 20 --retry-all-errors \
-      -o /tmp/askr.tgz \
-      "https://github.com/kwhorne/askr/releases/download/v${ASKR_VERSION}/askr-${ASKR_VERSION}-linux-${A}${ASKR_VARIANT}.tar.gz"; \
+    TGZ="askr-${ASKR_VERSION}-linux-${A}${ASKR_VARIANT}.tar.gz"; \
+    BASE="https://github.com/kwhorne/askr/releases/download/v${ASKR_VERSION}/${TGZ}"; \
+    curl -fsSL --retry 30 --retry-delay 20 --retry-all-errors -o "/tmp/${TGZ}" "$BASE"; \
+    # Verify before unpacking. A .sha256 is published next to every tarball, so building
+    # without checking it left a supply-chain step on the table for no reason: a corrupted
+    # or tampered asset would have been unpacked and shipped. The checksum file names the
+    # tarball, so running sha256sum -c from /tmp resolves it; a mismatch fails the build.
+    curl -fsSL --retry 30 --retry-delay 20 --retry-all-errors -o "/tmp/${TGZ}.sha256" "${BASE}.sha256"; \
+    ( cd /tmp && sha256sum -c "${TGZ}.sha256" ); \
     mkdir -p /opt/askr; \
-    tar xzf /tmp/askr.tgz -C /opt/askr --strip-components=1
+    tar xzf "/tmp/${TGZ}" -C /opt/askr --strip-components=1
 
 # ---- minimal runtime ----
 FROM ubuntu:24.04 AS runtime
@@ -77,8 +83,12 @@ EXPOSE 8000 9000
 
 # Uses the built-in admin API. Enable the admin plane on 127.0.0.1:9000 in your
 # config for this to work.
+# /healthz, not /api/status: the latter returns PIDs and memory figures, so it's gated
+# by ASKR_ADMIN_TOKEN — and a probe that needs a credential eventually reports a healthy
+# container as unhealthy and gets it restarted. /healthz is unauthenticated by design and
+# answers liveness only.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s \
-  CMD curl -sf http://127.0.0.1:9000/api/status || exit 1
+  CMD curl -sf http://127.0.0.1:9000/healthz || exit 1
 
 # askr-run.sh wires up the libphp path + opcache (validate_timestamps=0).
 # docker stop → SIGTERM → graceful drain; docker kill -s HUP → rolling reload.

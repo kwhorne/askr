@@ -17,6 +17,7 @@ mod compress;
 mod config;
 mod doctor;
 mod esi;
+mod ffi;
 #[cfg(feature = "http3")]
 mod http3;
 mod metrics;
@@ -160,6 +161,15 @@ enum Command {
         /// www→apex are configured via `[[redirect]]` in askr.toml.)
         #[arg(long)]
         force_https: bool,
+
+        /// Answer plain HTTP on this address and redirect it to HTTPS (308).
+        ///
+        /// A TLS listener never sees a plain-HTTP request, so `--force-https` alone
+        /// cannot redirect someone who typed `http://`. This binds the plain port (use
+        /// `0.0.0.0:80`) so they can be. With `--acme` it's automatic on `--acme-http`,
+        /// since ACME already owns that port. Requires `--force-https`.
+        #[arg(long)]
+        http_redirect: Option<SocketAddr>,
 
         /// Seconds a client may take to finish the TLS handshake (slowloris guard).
         #[arg(long, default_value = "10")]
@@ -454,6 +464,7 @@ fn main() -> anyhow::Result<()> {
             shadow_sample,
             http3,
             force_https,
+            http_redirect,
             tls_handshake_timeout,
             header_read_timeout,
             tls_cert,
@@ -592,6 +603,7 @@ fn main() -> anyhow::Result<()> {
                     tls_handshake_timeout,
                     header_read_timeout,
                     force_https,
+                    http_redirect,
                     redirects: Vec::new(),
                     sites: Vec::new(),
                     // Cache-key normalisation is config-file only (list-valued).
@@ -704,6 +716,12 @@ fn main() -> anyhow::Result<()> {
                     ca_root: acme_ca_root.clone(),
                     renew_after_days: 60,
                 };
+                // Start the plain-HTTP front *before* the first issuance, so one
+                // listener owns the challenge port for the whole process instead of
+                // being bound and torn down per renewal. That's what makes an
+                // http→https redirect possible while ACME is in use — previously the
+                // two would have fought over port 80.
+                acme::spawn_front(acme_http, force_https);
                 if acme::needs_renewal(&acme_dir) {
                     acme::obtain_blocking(&acfg)?;
                 } else {
@@ -729,6 +747,19 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 });
+            }
+
+            // Own certificate (or self-signed) plus an explicit plain port: same front,
+            // no challenges to serve. Refused without --force-https, because a listener
+            // that answers every request with a 404 is not what anyone asked for.
+            if let Some(addr) = http_redirect.or(config.http_redirect) {
+                if !force_https {
+                    anyhow::bail!(
+                        "--http-redirect needs --force-https (or [server] force_https), \
+                         otherwise the plain-HTTP listener has nothing to redirect to"
+                    );
+                }
+                acme::spawn_front(addr, true);
             }
 
             let listener = bind_listener(config.listen)?;

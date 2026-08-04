@@ -119,6 +119,8 @@ pub struct Config {
     pub header_read_timeout: u64,
     /// Redirect plain HTTP to HTTPS (308).
     pub force_https: bool,
+    /// Plain-HTTP address to answer and 308 to HTTPS (see `acme::spawn_front`).
+    pub http_redirect: Option<std::net::SocketAddr>,
     /// Declarative host redirects (e.g. `www.x.no` → `https://x.no`).
     pub redirects: Vec<crate::config::RedirectRule>,
     /// Virtual hosts routed by the `Host` header (empty = single-site).

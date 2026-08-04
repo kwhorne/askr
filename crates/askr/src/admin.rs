@@ -107,10 +107,13 @@ async fn handle(
     // When a token is configured, gate the reload trigger and the endpoints that
     // leak operational data. The dashboard shell (`GET /`) stays open — it carries
     // no data itself and its API calls are gated.
-    let protected = matches!(
-        path.as_str(),
-        "/api/status" | "/api/metrics" | "/metrics" | "/api/errors"
-    ) || (method == Method::POST && path == "/api/reload");
+    // Deny by default. The previous list of exact paths had no bypass — anything
+    // unmatched 404s before reaching data — but it meant a new endpoint was
+    // unauthenticated until someone remembered to add it here, and "remember to also
+    // edit this list" is not an access-control policy. Now everything under /api/ and
+    // /metrics is gated, with the dashboard shell explicitly open: it carries no data of
+    // its own and the API calls it makes are gated.
+    let protected = !path_is_open(&path);
     if protected {
         if let Some(tok) = token.as_ref() {
             if !bearer_ok(&req, tok) {
@@ -125,6 +128,7 @@ async fn handle(
 
     let resp = match (&method, path.as_str()) {
         (&Method::GET, "/") => html(DASHBOARD),
+        (&Method::GET, "/healthz") => healthz(),
         (&Method::GET, "/api/status") => json(status_json(&info)),
         (&Method::GET, "/api/metrics") => json(metrics_json()),
         (&Method::GET, "/metrics") => prometheus(),
@@ -248,6 +252,45 @@ fn metrics_json() -> String {
         s4 = st[3],
         s5 = st[4],
     )
+}
+
+/// Paths served without a bearer token when `ASKR_ADMIN_TOKEN` is set.
+///
+/// Deny by default: everything not named here is gated, so an endpoint added later is
+/// protected without anyone having to remember to protect it. The dashboard shell carries
+/// no data of its own (its API calls are gated), and `/healthz` answers liveness only.
+fn path_is_open(path: &str) -> bool {
+    matches!(path, "/" | "/favicon.ico" | "/healthz")
+}
+
+/// Liveness for orchestrators: 200 when at least one worker can serve, else 503.
+///
+/// Deliberately unauthenticated and deliberately empty. The container healthcheck used
+/// to poll `/api/status`, which returns PIDs and memory figures and is therefore gated by
+/// `ASKR_ADMIN_TOKEN` — so switching that token on made Docker, Kubernetes and Swarm
+/// declare a perfectly healthy container unhealthy and restart it. A probe that needs a
+/// credential is a probe that will eventually be wrong.
+///
+/// It answers with liveness only. Two words leak nothing, and anything richer would
+/// recreate the reason `/api/status` needs protecting.
+fn healthz() -> Response<Full<Bytes>> {
+    // `workers_configured` is only set by a supervisor, so zero means single-process
+    // mode: there is no worker table, and this thread answering *is* the liveness
+    // signal. Reading `workers_alive` unconditionally would report 503 on a perfectly
+    // healthy single-process server — which is the same class of false alarm this
+    // endpoint exists to remove.
+    let s = crate::supervisor::status();
+    let ok = s.workers_configured == 0 || s.workers_alive > 0;
+    let (code, body) = if ok {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "no workers")
+    };
+    Response::builder()
+        .status(code)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
 }
 
 fn errors_json(info: &Info) -> String {
@@ -566,3 +609,51 @@ async function reload() {
 refresh(); setInterval(refresh, 2000);
 </script>
 </body></html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These responses are built with `format!`, not a serializer. Nothing interpolated
+    /// into them today is attacker- or app-controlled — record ids are
+    /// `"{secs}-{pid}-{seq}"`, the rest are numbers, a socket address and compile-time
+    /// constants — so there is no injection vector to fix. What there *is* is the risk
+    /// that someone later interpolates a string that isn't machine-generated and quietly
+    /// emits broken JSON to every dashboard and scraper. This test is the guard for that:
+    /// it fails the moment the output stops parsing.
+    #[test]
+    fn admin_json_endpoints_emit_valid_json() {
+        let info = Info {
+            server_listen: "127.0.0.1:8000".parse().unwrap(),
+            mode: "per-request",
+            record_dir: None,
+        };
+        for (name, body) in [
+            ("status", status_json(&info)),
+            ("metrics", metrics_json()),
+            ("errors", errors_json(&info)),
+        ] {
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body);
+            assert!(parsed.is_ok(), "{name} is not valid JSON: {body}");
+            assert!(
+                parsed.unwrap().is_object(),
+                "{name} is not an object: {body}"
+            );
+        }
+    }
+
+    /// The healthcheck must not need a credential, and must not become a data endpoint.
+    #[test]
+    fn healthz_is_terse_and_open() {
+        let r = healthz();
+        assert_eq!(r.status(), StatusCode::OK);
+        // Single-process mode (no supervisor) counts as live; see `healthz`.
+        assert!(path_is_open("/healthz"));
+        assert!(!path_is_open("/api/status"), "status must stay gated");
+        assert!(!path_is_open("/metrics"), "metrics must stay gated");
+        assert!(
+            !path_is_open("/api/anything-added-later"),
+            "deny by default"
+        );
+    }
+}

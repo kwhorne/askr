@@ -104,14 +104,19 @@ from, in order: the connection's own TLS, `[server] https = true`, or an
 `X-Forwarded-Proto: https` header (when Askr sits behind a TLS terminator). A request
 that's already HTTPS is left untouched.
 
-> To redirect port 80 → 443, run a small plain-HTTP Askr on `:80` with
-> `force_https = true` alongside your TLS instance on `:443`, or terminate `:80` at
-> your load balancer. `force_https` alone can't do it: a TLS listener never sees a
-> plain-HTTP request, so there has to be something on `:80` to redirect *from*.
+> `force_https` alone can't redirect port 80: a TLS listener never sees a plain-HTTP
+> request, so something has to be listening on `:80` to redirect *from*. Add:
 >
-> This does **not** combine with [`--acme`](AUTOTLS.md) yet — the HTTP-01 challenge
-> server needs port 80 during issuance and renewal, so the two would fight over the
-> bind.
+> ```toml
+> [server]
+> force_https = true
+> http_redirect = "0.0.0.0:80"
+> ```
+>
+> With [`--acme`](AUTOTLS.md) this is **automatic** on the ACME challenge address —
+> one listener answers HTTP-01 challenges *and* redirects everything else, so there's
+> no second process to fight over the port. A challenge always wins over the redirect,
+> or issuing a first certificate would be impossible.
 
 ---
 

@@ -226,8 +226,8 @@ extern "C" fn c_push(
     plen: usize,
     delay: c_long,
 ) -> c_long {
-    let q = unsafe { std::slice::from_raw_parts(q as *const u8, qlen) };
-    let payload = unsafe { std::slice::from_raw_parts(payload as *const u8, plen) };
+    let q = unsafe { crate::ffi::bytes(q, qlen) };
+    let payload = unsafe { crate::ffi::bytes(payload, plen) };
     push(q, payload, delay.max(0) as u64) as c_long
 }
 
@@ -241,7 +241,7 @@ extern "C" fn c_pop(
     out_payload: *mut *mut c_char,
     out_len: *mut usize,
 ) -> c_int {
-    let q = unsafe { std::slice::from_raw_parts(q as *const u8, qlen) };
+    let q = unsafe { crate::ffi::bytes(q, qlen) };
     match pop(q, visibility.max(0) as u64) {
         Some(r) => {
             let buf = unsafe { libc::malloc(r.payload.len().max(1)) } as *mut u8;
@@ -270,7 +270,7 @@ extern "C" fn c_release(id: c_long, delay: c_long) -> c_int {
 }
 
 extern "C" fn c_size(q: *const c_char, qlen: usize) -> c_long {
-    let q = unsafe { std::slice::from_raw_parts(q as *const u8, qlen) };
+    let q = unsafe { crate::ffi::bytes(q, qlen) };
     size(q) as c_long
 }
 

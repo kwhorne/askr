@@ -388,12 +388,12 @@ extern "C" fn reply_trampoline(
     let body = if body.is_null() || blen == 0 {
         Vec::new()
     } else {
-        unsafe { std::slice::from_raw_parts(body as *const u8, blen) }.to_vec()
+        unsafe { crate::ffi::bytes(body, blen) }.to_vec()
     };
     let headers = if hdrs.is_null() || hlen == 0 {
         Vec::new()
     } else {
-        let raw = unsafe { std::slice::from_raw_parts(hdrs as *const u8, hlen) };
+        let raw = unsafe { crate::ffi::bytes(hdrs, hlen) };
         parse_headers(raw)
     };
     bridge.reply(body, headers, status.max(0) as u16);
@@ -409,7 +409,7 @@ extern "C" fn stream_begin_trampoline(
     let headers = if hdrs.is_null() || hlen == 0 {
         Vec::new()
     } else {
-        parse_headers(unsafe { std::slice::from_raw_parts(hdrs as *const u8, hlen) })
+        parse_headers(unsafe { crate::ffi::bytes(hdrs, hlen) })
     };
     bridge.stream_begin(headers, status.max(0) as u16);
 }
@@ -419,8 +419,7 @@ extern "C" fn stream_chunk_trampoline(ctx: *mut c_void, ptr: *const c_char, len:
         return;
     }
     let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
-    let chunk =
-        bytes::Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) });
+    let chunk = bytes::Bytes::copy_from_slice(unsafe { crate::ffi::bytes(ptr, len) });
     bridge.stream_chunk(chunk);
 }
 

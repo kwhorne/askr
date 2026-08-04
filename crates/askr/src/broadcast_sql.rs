@@ -152,8 +152,8 @@ extern "C" fn c_broadcast(
     payload: *const c_char,
     plen: usize,
 ) -> c_int {
-    let chan = unsafe { std::slice::from_raw_parts(chan as *const u8, clen) };
-    let payload = unsafe { std::slice::from_raw_parts(payload as *const u8, plen) };
+    let chan = unsafe { crate::ffi::bytes(chan, clen) };
+    let payload = unsafe { crate::ffi::bytes(payload, plen) };
     publish(chan, payload) as c_int
 }
 

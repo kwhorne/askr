@@ -865,10 +865,17 @@ extern "C" fn cow_ready_trampoline(ctx: *mut c_void) -> c_int {
                 "askr CoW template supervising"
             );
         }
-        // Reap and (if the slot is still within `desired`) refork warm.
-        let mut status: libc::c_int = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid > 0 {
+        // Reap *everything* that has exited, not one per pass: this loop sleeps
+        // between iterations, so a single waitpid per round left N-1 zombies parked for
+        // N sleeps when a batch of workers died together (a reload, or an OOM sweep) —
+        // and their slots stayed empty that whole time instead of being reforked. The
+        // main supervisor loop already reaps in a loop; this is the same shape.
+        loop {
+            let mut status: libc::c_int = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid <= 0 {
+                break; // 0 = none exited, -1 = no children
+            }
             for (i, c) in CHILDREN.iter().enumerate().take(cc.max) {
                 if c.load(Ordering::SeqCst) == pid {
                     c.store(0, Ordering::SeqCst);

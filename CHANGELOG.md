@@ -3,6 +3,83 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.2 — 2026-08-04
+
+A review pass over the whole codebase, plus the port-80 gap it kept pointing at. Nine
+findings were checked against the source: **six were real and are fixed**, three were
+already handled and are documented rather than "fixed".
+
+### Added
+
+- **Port 80 answers now, and redirects (Askr-45).** `force_https` could never redirect
+  someone who typed `http://` while Askr terminated TLS itself: a TLS listener never sees
+  a plain-HTTP request, and the ACME challenge server was bound only *during* an issuance
+  and torn down afterwards. So the recommended setup — auto-TLS — was the one that
+  couldn't have the redirect every nginx config has.
+
+  The plain-HTTP listener now lives for the whole process and does both jobs: HTTP-01
+  challenges, and a **308** to the same host, path and query for everything else. One
+  listener, so nothing fights over the port, and a challenge always wins over the
+  redirect — otherwise a domain could never get its first certificate. Automatic with
+  `--acme`; `--http-redirect 0.0.0.0:80` (or `[server] http_redirect`) for anyone using
+  their own certificate. A failed bind warns and keeps serving HTTPS.
+
+- **`/healthz` on the admin plane** — unauthenticated, and two words long. 200 while a
+  worker can serve, 503 otherwise.
+
+### Fixed
+
+- **The container healthcheck failed as soon as you set `ASKR_ADMIN_TOKEN`.** It polled
+  `/api/status`, which returns PIDs and memory figures and is therefore gated — so
+  switching the token on made Docker, Kubernetes and Swarm declare a healthy container
+  unhealthy and restart it. The image now polls `/healthz`. A probe that needs a
+  credential is a probe that will eventually be wrong.
+
+- **The admin plane now denies by default.** Protection was a list of exact paths. There
+  was no bypass — anything unmatched 404s before reaching data, which we verified — but it
+  meant a new endpoint was unauthenticated until someone remembered to add it to the list,
+  and "remember to edit this list" is not an access-control policy. Everything except the
+  dashboard shell, its icon and `/healthz` is now gated.
+
+- **ACME private keys were written with the process umask (typically 0644).** The TLS
+  private key and the ACME account credentials were readable by every local user. Created
+  0600 now, and an existing file is tightened on write so upgrading fixes a key that's
+  already on disk.
+
+- **The Docker build verifies the release tarball's SHA-256 before unpacking.** A
+  `.sha256` is published next to every tarball, so this was a supply-chain step left on
+  the table for no reason.
+
+- **The CoW supervisor reaped one exited worker per pass.** That loop sleeps between
+  iterations, so a batch of workers dying together (a reload, an OOM sweep) left the rest
+  as zombies with their slots empty for one sleep each. It now reaps everything per pass,
+  like the main supervisor already did.
+
+- **FFI entry points no longer build slices from possibly-null pointers.**
+  `slice::from_raw_parts` requires a non-null pointer *even for length zero*; a null there
+  is undefined behaviour, not an empty slice. PHP can't produce one today
+  (`Z_PARAM_STRING` never yields null), but these are `extern "C"` and the check costs a
+  branch that is never taken. All 34 sites go through one helper.
+
+### Checked and deliberately not changed
+
+- **`std::thread::sleep` in `shmlock::acquire`** was flagged as blocking a Tokio worker.
+  It's reached only after 40 000 spin iterations and 64 `yield_now()`s, and is capped at
+  200 µs — the code already reasons about exactly this. The suggested fix is also
+  impossible here: the lock lives in shared memory *across processes*, and an async mutex
+  is per-process.
+
+- **`libc::signal` instead of `sigaction`** was flagged for SysV handler-reset semantics.
+  On glibc and macOS — the platforms Askr supports — `signal` is BSD semantics with
+  `SA_RESTART`. Verified empirically: three consecutive `SIGHUP`s, master alive and
+  serving 200 after each.
+
+- **Hand-built JSON in the admin plane** was flagged as an injection risk. Every
+  interpolated value is machine-generated: record ids are `{secs}-{pid}-{seq}`, the rest
+  are numbers, a socket address and compile-time constants. Rather than rewrite working
+  code, a test now asserts each endpoint emits valid JSON, so the day someone interpolates
+  something else, it fails.
+
 ## 1.4.1 — 2026-08-04
 
 A security-relevant patch: **PHP diagnostics went to the visitor instead of the log.**

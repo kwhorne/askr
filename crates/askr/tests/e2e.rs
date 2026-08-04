@@ -144,8 +144,20 @@ impl Server {
     /// take it in between — that's the harness being racy, not Askr, and it must not
     /// look like a product failure.
     fn start_in(dir: PathBuf, files: &[(&str, &str)], config: &str) -> Server {
+        Server::start_in_with_env(dir, files, config, &[])
+    }
+
+    /// Same, with environment for the server process. Passed explicitly rather than set
+    /// on the test process: tests share one process, so a global `set_var` would leak a
+    /// token into whichever other test happened to start at the same moment.
+    fn start_in_with_env(
+        dir: PathBuf,
+        files: &[(&str, &str)],
+        config: &str,
+        env: &[(&str, &str)],
+    ) -> Server {
         for attempt in 1..=4 {
-            match Server::try_start_in(dir.clone(), files, config) {
+            match Server::try_start_in(dir.clone(), files, config, env) {
                 Ok(s) => return s,
                 Err(e) if e.contains("Address already in use") && attempt < 4 => {
                     std::thread::sleep(Duration::from_millis(200 * attempt));
@@ -156,7 +168,12 @@ impl Server {
         unreachable!()
     }
 
-    fn try_start_in(dir: PathBuf, files: &[(&str, &str)], config: &str) -> Result<Server, String> {
+    fn try_start_in(
+        dir: PathBuf,
+        files: &[(&str, &str)],
+        config: &str,
+        env: &[(&str, &str)],
+    ) -> Result<Server, String> {
         let app = dir.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for (rel, contents) in files {
@@ -177,12 +194,14 @@ impl Server {
         let log = dir.join("askr.log");
         let out = std::fs::File::create(&log).unwrap();
         let err = out.try_clone().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_askr"))
-            .args(["serve", "--config", cfg.to_str().unwrap()])
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_askr"));
+        cmd.args(["serve", "--config", cfg.to_str().unwrap()])
             .stdout(out)
-            .stderr(err)
-            .spawn()
-            .expect("spawn askr");
+            .stderr(err);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().expect("spawn askr");
 
         let mut s = Server {
             child: Some(child),
@@ -1025,5 +1044,69 @@ root = "{ROOT}"
         s.log_has("secret.php"),
         "diagnostic reached neither the body nor the log:\n{}",
         s.log_contents()
+    );
+}
+
+/// A container healthcheck must not need a credential.
+///
+/// The image polled `/api/status`, which returns PIDs and memory figures and is therefore
+/// gated by `ASKR_ADMIN_TOKEN` — so switching that token on made Docker report a healthy
+/// container as unhealthy and restart it. `/healthz` is open by design; everything else on
+/// the admin plane is now denied by default, so an endpoint added later is protected
+/// without anyone remembering to protect it.
+#[test]
+fn healthz_needs_no_token_while_the_rest_of_the_admin_plane_does() {
+    let dir = unique_dir("healthz");
+    let config = r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+[admin]
+listen = "127.0.0.1:{ADMIN}"
+"#;
+    let s = Server::start_in_with_env(
+        dir,
+        &[("index.php", "<?php echo 'ok';")],
+        config,
+        &[("ASKR_ADMIN_TOKEN", "s3cret")],
+    );
+
+    let health = get(s.admin, "/healthz");
+    assert_eq!(
+        health.status,
+        200,
+        "healthz must answer without a token; log:\n{}",
+        s.log_contents()
+    );
+    assert_eq!(health.body.trim(), "ok");
+
+    let status = get(s.admin, "/api/status");
+    assert_eq!(
+        status.status, 401,
+        "status must be gated, got {:?}",
+        status.body
+    );
+
+    let metrics = get(s.admin, "/metrics");
+    assert_eq!(metrics.status, 401, "metrics must be gated");
+
+    // Deny by default: a path nobody has whitelisted is refused, not served.
+    let future = get(s.admin, "/api/something-added-later");
+    assert_eq!(
+        future.status, 401,
+        "unknown admin paths must be denied, not 404'd"
+    );
+
+    // With the token, the gated endpoints work — the gate isn't just breaking things.
+    let authed = request(
+        s.admin,
+        "GET",
+        "/api/status",
+        &[("Authorization", "Bearer s3cret")],
+    );
+    assert_eq!(
+        authed.status, 200,
+        "token should open it: {:?}",
+        authed.body
     );
 }

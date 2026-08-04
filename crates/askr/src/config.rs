@@ -203,6 +203,12 @@ pub struct ServerSection {
     /// state, `https`, or an `X-Forwarded-Proto` header to decide.
     #[serde(default)]
     pub force_https: bool,
+    /// Answer plain HTTP here and 308 it to HTTPS (e.g. "0.0.0.0:80"). Needed because
+    /// a TLS listener never sees a plain-HTTP request, so `force_https` has nothing to
+    /// act on when Askr terminates TLS itself. Automatic on the ACME challenge address
+    /// when `--acme` is used.
+    #[serde(default)]
+    pub http_redirect: Option<std::net::SocketAddr>,
     /// One JSONL line per PHP-served request, for `askr cache-report` to analyse.
     /// A diagnostic: turn it on for an hour, then turn it off.
     #[serde(default)]
@@ -413,6 +419,7 @@ pub struct PusherSection {
 impl Default for ServerSection {
     fn default() -> Self {
         ServerSection {
+            http_redirect: None,
             listen: "127.0.0.1:8000".into(),
             root: PathBuf::from("public"),
             front: default_front(),
@@ -723,6 +730,7 @@ impl FileConfig {
                 tls_handshake_timeout: self.server.tls_handshake_timeout,
                 header_read_timeout: self.server.header_read_timeout,
                 force_https: self.server.force_https,
+                http_redirect: self.server.http_redirect,
                 redirects: self.redirect.clone(),
                 sites,
                 cache_strip_query: self.cache.strip_query_params.clone(),

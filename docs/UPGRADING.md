@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.1; ARCH=$(uname -m)
+VER=v1.4.2; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.1     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.2     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.1-full`) are the same server built with the optional features
+The `-full` tags (`1.4.2-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,30 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.2
+
+Two things are worth acting on.
+
+**If you set `ASKR_ADMIN_TOKEN` and run the Docker image**, your containers were reporting
+`unhealthy` — the healthcheck polled the gated `/api/status`. Nothing to configure; the
+image now polls `/healthz`. If you wrote your own probe, point it at `/healthz` too.
+
+**If you want `http://` visitors redirected**, you can now have it:
+
+```toml
+[server]
+force_https = true
+http_redirect = "0.0.0.0:80"      # not needed with --acme; automatic there
+```
+
+Also worth knowing:
+
+- **The admin plane denies by default.** If you drive it with a script that hits some path
+  other than `/`, `/favicon.ico` or `/healthz`, that path now needs the bearer token. The
+  documented endpoints are unchanged.
+- **ACME keys are re-written 0600.** If your tooling read `key.pem` as a non-owner user, it
+  will stop. That it worked before was the bug.
 
 ### To 1.4.1
 

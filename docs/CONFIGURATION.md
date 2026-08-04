@@ -35,6 +35,7 @@ typos fail fast in `config-check`.
 | `header_read_timeout` | int | `15` | Seconds a client may take to send request headers (slowloris guard). |
 | `https` | bool | `false` | Force HTTPS in `$_SERVER` (e.g. behind a TLS terminator). Implied by TLS. |
 | `force_https` | bool | `false` | Redirect plain HTTP to HTTPS (308), using the connection's TLS state / `https` / `X-Forwarded-Proto`. |
+| `http_redirect` | — | Answer plain HTTP here and 308 it to HTTPS, e.g. `"0.0.0.0:80"`. Needs `force_https`. Automatic on the ACME challenge address with `--acme`. |
 | `traffic_log` | path | Record one JSON line per PHP-served request for [`askr cache-report`](CLI.md#askr-cache-report). A diagnostic — turn it on for an hour, then off. |
 | `trusted_proxies` | list | `[]` | Proxies whose `X-Forwarded-For` may be believed, as IPs or CIDRs (`"10.0.0.0/8"`). Required for correct client identity in [`[[ratelimit]]`](#ratelimit) behind a load balancer. |
 | `workers_min` | int | = `workers` | CoW autoscaling floor (with `--cow`). |

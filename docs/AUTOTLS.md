@@ -48,12 +48,30 @@ marker. Keep it on a persistent volume.
 | `--acme-email <e>` | ACME account contact |
 | `--acme-dir <path>` | Account + cert cache (persist this) |
 | `--acme-staging` | Use Let's Encrypt **staging** (high rate limits; untrusted) — use while testing |
-| `--acme-http <addr>` | Where to answer HTTP-01 challenges (default `0.0.0.0:80`) |
+| `--acme-http <addr>` | Where to answer HTTP-01 challenges **and redirect plain HTTP** (default `0.0.0.0:80`) |
 | `--acme-directory-url <url>` | Custom ACME directory (e.g. a private CA / Pebble) |
 | `--acme-ca-root <pem>` | Trust this CA root for the ACME directory (testing) |
 
 > Start with `--acme-staging` to avoid Let's Encrypt's strict production rate
 > limits, confirm it works, then drop the flag for a trusted cert.
+
+## Port 80 does more than challenges
+
+The plain-HTTP listener stays bound for the whole process, not just during an issuance.
+With `--force-https` it answers every non-challenge request with a **308** to the same
+host, path and query — so a visitor typing `http://example.com/pricing?ref=x` lands on
+`https://example.com/pricing?ref=x` instead of getting a connection failure.
+
+A challenge always wins over the redirect. Sending the ACME validator to HTTPS would make
+it impossible to issue a first certificate for a domain that doesn't have one yet.
+
+Without `--force-https` the listener only serves challenges and 404s the rest, so turning
+auto-TLS on never starts redirecting traffic you didn't ask to redirect. Not using ACME at
+all? `--http-redirect 0.0.0.0:80` (or `[server] http_redirect`) runs the same listener
+without the challenge half.
+
+Binding a port under 1024 needs privileges. If the bind fails, Askr logs a warning and
+carries on serving HTTPS — a redirect is a convenience, not a reason to refuse to start.
 
 ## Testing locally with Pebble
 
