@@ -69,6 +69,12 @@ composer require kwhorne/askr-laravel
 That's it — the service provider is auto-discovered. Nothing to add to
 `config/app.php`.
 
+**Versions track the server.** The package is released alongside Askr with the same
+version number, so pair `askr-laravel` `1.4.x` with an Askr `1.4.x` server. They're
+loosely coupled — the drivers talk to whatever regions the running server exposes — but
+a feature added in a given release needs both halves at that version.
+[Automatic page caching](#automatic-page-caching) needs `^1.4`.
+
 ---
 
 ## 2. Configure `.env`

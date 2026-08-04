@@ -64,6 +64,9 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
 
 > Runtime libs (usually already present): `sudo apt-get install -y libssl3 libxml2 libonig5 libsqlite3-0`.
 
+**New here?** [**docs/INSTALL.md**](docs/INSTALL.md) walks through it step by step —
+Docker, tarball or source — and ends with the mistakes that cost us an afternoon.
+
 **Production setup** (systemd, TLS, hardening, recommended settings):
 **[docs/UBUNTU.md](docs/UBUNTU.md)**. Building from source: [docs/BUILDING.md](docs/BUILDING.md).
 

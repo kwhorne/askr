@@ -16,7 +16,9 @@ requests against it, eliminating per-request framework bootstrap.
 | Guide | What it covers |
 | --- | --- |
 | [Architecture](ARCHITECTURE.md) | How Askr works: embedding, non-ZTS process-per-core, the worker loop, request lifecycle, TLS, recycling, reload, the admin plane. |
+| [**Installation**](INSTALL.md) | **Start here** — step by step from nothing to a served Laravel app (Docker, tarball or source) |
 | [Building](BUILDING.md) | Building `libphp` (macOS & Ubuntu) and the `askr` binary; the extension matrix. |
+| [Releasing](RELEASING.md) | Maintainer checklist: version bump, tag, and verifying the release actually reached users |
 | [Configuration](CONFIGURATION.md) | The `askr.toml` reference, CLI flags, and environment variables. |
 | [CLI reference](CLI.md) | Every command and flag (`serve`, `doctor`, `config-check`). |
 | [Hosting multiple domains](HOSTING.md) | Virtual hosts (`[[site]]`), redirects (www→apex, http→https), multi-domain TLS. |

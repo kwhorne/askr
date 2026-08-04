@@ -13,10 +13,23 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:0.8        # latest 0.8.x
-ghcr.io/kwhorne/askr:1.4.0      # exact
+ghcr.io/kwhorne/askr:1.4.0      # exact — use this in production
+ghcr.io/kwhorne/askr:1.4        # latest 1.4.x
 ghcr.io/kwhorne/askr:latest
 ```
+
+Serving an app straight from the host, no Dockerfile needed:
+
+```bash
+docker run --rm -p 8080:8080 -p 9000:9000 \
+  -v /path/to/your/app:/app \
+  ghcr.io/kwhorne/askr:1.4 \
+  serve --listen 0.0.0.0:8080 --root /app/public --admin 0.0.0.0:9000
+```
+
+The entrypoint is the launcher, so the command begins at `serve` — no leading `askr`.
+For a step-by-step walkthrough of this and the other install routes, see
+[INSTALL.md](INSTALL.md).
 
 ### `-full` variant
 
@@ -28,7 +41,7 @@ source:
 
 ```
 ghcr.io/kwhorne/askr:1.4.0-full
-ghcr.io/kwhorne/askr:0.9-full
+ghcr.io/kwhorne/askr:1.4-full
 ghcr.io/kwhorne/askr:full
 ```
 
@@ -38,7 +51,7 @@ non-Docker equivalent. See [Storage backends](STORAGE_BACKEND.md) and
 [Observability](OBSERVABILITY.md).
 
 It's built on **`ubuntu:24.04`** — deliberately, not Debian and not Alpine (see
-[below](#why-ubuntu-2404-and-not-alpine)). It contains only the server; you layer
+[below](#why-ubuntu2404-and-not-alpine)). It contains only the server; you layer
 your app on top.
 
 > **Ready-made scaffold:** [`examples/docker/`](../examples/docker/) has a

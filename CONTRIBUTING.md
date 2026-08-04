@@ -66,6 +66,18 @@ rather than only a unit test.
   (`feat:`, `fix:`, `docs:`, `ci:` …) are appreciated.
 - Update `CHANGELOG.md` for user-facing changes.
 
+### Documentation
+
+`python3 scripts/check-docs.py` checks every Markdown link and `#anchor` in the repo.
+Broken anchors are invisible on GitHub — the link renders normally and silently lands at
+the top of the page — so CI checks them.
+
+## Releasing
+
+Maintainers: [`docs/RELEASING.md`](docs/RELEASING.md) is the checklist. It exists
+because a release touches four pipelines and two package registries, and one of those
+steps has already failed silently once.
+
 ## Scope
 
 Askr is a **production PHP application server**. Local development tooling is the
