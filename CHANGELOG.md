@@ -3,6 +3,51 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.4 — 2026-08-04
+
+Diagnosis and blast radius, from chasing one real bug for a day. **No behaviour change for
+a healthy app** — this release is about what happens when something goes wrong, and about
+Askr telling you the truth about it.
+
+### Fixed
+
+- **A failed `accept()` no longer kills a worker.** One `?` meant a single accept error
+  ended a process that was serving other requests — silently, since nothing logged it, and
+  the PHP side then reported the tear-down as "fatal/OOM?". Accept errors are now logged
+  and the loop continues, with `EMFILE`/`ENFILE` called out by name ("raise the open-file
+  limit") and a short backoff so it can't spin.
+
+- **A worker that dies mid-request answers 502, not an empty 200.** The reply channel was
+  simply dropped, so a request in flight could be answered with whatever was in the output
+  buffer and whatever status was left over — usually **200 with an empty body**. That is
+  the worst possible answer: caches store it, browsers render it, and monitoring calls it
+  healthy.
+
+- **A worker that dies mid-*stream* aborts the response body.** Once the first `flush()`
+  has put status and headers on the wire a 502 is no longer possible, so the body is now
+  failed rather than closed cleanly — the client sees a truncated transfer it can detect
+  instead of a complete-looking empty response.
+
+### Changed
+
+- **The "fatal/OOM?" message is gone.** It was a guess presented as a diagnosis, and it
+  cost a day of looking for a memory problem that did not exist. Askr now distinguishes
+  the cases it can actually tell apart: the request channel closing without draining (the
+  server side went away) versus the worker script leaving its loop (an `exit()`/`die()` in
+  the app does this, and so does a PHP fatal). The interpreter also reports `rc`,
+  `exit_status` and PHP's last error whenever the loop ends — previously only on a
+  non-zero code, which hid the exact case being chased.
+
+### Known issue
+
+[Askr-46](https://github.com/kwhorne/askr/issues) is **not** fixed. In one real
+application the request following a `BinaryFileResponse` ends the worker's loop, costing
+roughly one request in three with a single worker. What this release adds is the ability to
+see it: Askr is exonerated for the transport (619 KB through `echo`, `readfile` and static
+serving is clean, and a from-source Linux build reproduces only with the app in the
+picture), and the remaining contradiction — PHP reporting a normal completion while the
+Rust side says it never stopped handing over work — is recorded in the issue.
+
 ## 1.4.3 — 2026-08-04
 
 Everything here was found by putting a real application on Askr — Laravel 13 with Flux

@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.3; ARCH=$(uname -m)
+VER=v1.4.4; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.3     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.4     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.3-full`) are the same server built with the optional features
+The `-full` tags (`1.4.4-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,19 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.4
+
+Nothing to do. No behaviour changes for a healthy app — this release is about what happens
+when one isn't:
+
+- a failed `accept()` no longer takes down a worker that is serving other requests;
+- a worker that dies mid-request answers **502** instead of a complete-looking **200 with
+  an empty body** (if you have monitoring that only checks status codes, it will start
+  seeing these — they were always failures, just invisible ones);
+- the log says what actually ended a worker instead of guessing "fatal/OOM?". If you have
+  alerts matching that string, they won't fire any more. The replacements name the case:
+  the request channel closing, or the worker script leaving its loop.
 
 ### To 1.4.3
 

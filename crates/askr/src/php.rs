@@ -31,7 +31,7 @@ pub enum Reply {
     Stream {
         status: u16,
         headers: Vec<(String, String)>,
-        body: mpsc::Receiver<bytes::Bytes>,
+        body: mpsc::Receiver<Result<bytes::Bytes, ()>>,
     },
 }
 
@@ -138,7 +138,35 @@ impl Php {
                         ctx,
                     )
                 };
-                tracing::debug!(rc, "worker loop ended");
+                let end = LOOP_END.swap(END_UNKNOWN, Ordering::SeqCst);
+                tracing::debug!(rc, end, "worker loop ended");
+
+                // A request may still be in flight: the interpreter can leave the loop
+                // *during* one (a PHP fatal, or an exit()/die() unwinding via
+                // zend_bailout). Its reply channel is still held here, and the shim's
+                // teardown answers with whatever happens to be in the output buffer and
+                // whatever status is left over — which for a request that died before
+                // producing anything is a **200 with an empty body**. A blank 200 is the
+                // worst possible answer: caches store it, browsers render it, and
+                // monitoring calls it healthy. Fail it explicitly instead.
+                if let Some(tx) = bridge.pending.take() {
+                    tracing::error!(
+                        "php worker died with a request in flight — answering 502 rather \
+                         than the empty 200 the half-finished response would produce"
+                    );
+                    let _ = tx.send(Err("php worker died mid-request".to_string()));
+                }
+                // Already streaming: the status and headers are on the wire, so a 502 is
+                // no longer possible. Abort the body instead of closing it cleanly, or the
+                // client is handed a complete-looking 200 with nothing in it — which is
+                // exactly what a dying worker used to produce for a 619 KB file response.
+                if let Some(tx) = bridge.stream.take() {
+                    tracing::error!(
+                        "php worker died mid-stream — aborting the response body so the \
+                         client sees a failed transfer, not an empty 200"
+                    );
+                    let _ = tx.blocking_send(Err(()));
+                }
                 // Resilience: the worker loop only ends when the interpreter is
                 // finished — either we're draining (graceful shutdown / recycle),
                 // or the app fatal'd inside the loop (classically: hit PHP's
@@ -147,11 +175,30 @@ impl Php {
                 // keep answering `502 php worker unavailable` forever, so exit and
                 // let the supervisor respawn a fresh worker instead of flooding.
                 if !draining.load(Ordering::SeqCst) {
-                    tracing::error!(
-                        rc,
-                        "php worker interpreter exited unexpectedly (fatal/OOM?) — \
-                         exiting for supervisor respawn"
-                    );
+                    if end == END_CHANNEL_CLOSED {
+                        // The request channel closed while we weren't draining: the
+                        // server side tore down without setting the flag. Not the app's
+                        // fault, and not a fatal.
+                        tracing::error!(
+                            rc,
+                            "php worker: request channel closed without draining — \
+                             the server side went away (accept error? runtime shutdown?) \
+                             — exiting for supervisor respawn"
+                        );
+                    } else {
+                        // The script left its `while (askr_handle_request(...))` loop
+                        // while we still had work to hand it. In practice that means the
+                        // app called exit()/die() (a dd(), a vendor package, an error
+                        // handler), or PHP fatal'd — classically memory_limit after a
+                        // leak in a long-lived worker.
+                        tracing::error!(
+                            rc,
+                            "php worker script returned or exited — an exit()/die() in \
+                             the app ends the request loop; a PHP fatal (memory_limit?) \
+                             does the same. Check the app's error log. Exiting for \
+                             supervisor respawn"
+                        );
+                    }
                     // Give the Tokio runtime (still live on other threads) a brief
                     // window to flush in-flight responses before we tear the process
                     // down. A request that was mid-execution sees its reply channel
@@ -228,8 +275,17 @@ struct WorkerBridge {
     rx: mpsc::Receiver<Job>,
     pending: Option<oneshot::Sender<Result<Reply, String>>>,
     // Active streaming body sender (set on the first flush of a streaming request).
-    stream: Option<mpsc::Sender<bytes::Bytes>>,
+    stream: Option<mpsc::Sender<Result<bytes::Bytes, ()>>>,
 }
+
+/// Why the worker's request loop ended. Set by the bridge, read after the loop.
+///
+/// The old code guessed "fatal/OOM?" for every ending, which sent us hunting a memory
+/// problem that didn't exist while the real cause — the script leaving its loop — went
+/// unnamed. A wrong diagnosis costs more than no diagnosis.
+static LOOP_END: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const END_UNKNOWN: u8 = 0;
+const END_CHANNEL_CLOSED: u8 = 1;
 
 impl WorkerBridge {
     fn wait(&mut self) -> i32 {
@@ -240,7 +296,13 @@ impl WorkerBridge {
                 self.stream = None;
                 1
             }
-            None => 0,
+            None => {
+                // Every sender is gone, so the server side is going away and the worker
+                // is meant to stop. Distinguishable from the script exiting on its own,
+                // which is the case that used to be misreported as a fatal.
+                LOOP_END.store(END_CHANNEL_CLOSED, Ordering::SeqCst);
+                0
+            }
         }
     }
 
@@ -262,7 +324,7 @@ impl WorkerBridge {
             // Bounded: if the client can't keep up, `blocking_send` in
             // `stream_chunk` back-pressures the interpreter thread (pauses PHP),
             // exactly like a blocking write in FPM — bounded memory, no runaway.
-            let (body_tx, body) = mpsc::channel::<bytes::Bytes>(16);
+            let (body_tx, body) = mpsc::channel::<Result<bytes::Bytes, ()>>(16);
             self.stream = Some(body_tx);
             let _ = tx.send(Ok(Reply::Stream {
                 status,
@@ -276,7 +338,7 @@ impl WorkerBridge {
         if let Some(tx) = &self.stream {
             // Block the interpreter thread if the client is slow (back-pressure).
             // A send error means the client hung up — stop streaming.
-            if tx.blocking_send(chunk).is_err() {
+            if tx.blocking_send(Ok(chunk)).is_err() {
                 self.stream = None;
             }
         }

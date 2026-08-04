@@ -1033,8 +1033,18 @@ int askr_php_run_worker(const char *script, askr_wait_fn wait, askr_reply_fn rep
         rc = 2;
     } zend_end_try();
 
-    /* INSTRUMENTATION: why did the worker loop end? Capture PG(last_error_*)
-     * before php_request_shutdown() clears it. */
+    /* Why did the worker loop end? Captured before php_request_shutdown() clears
+     * PG(last_error_*). rc==0 means the script ran to completion — its
+     * `while (askr_handle_request(...))` loop went false — which is worth reporting
+     * too: chasing that case cost a day because only rc!=0 was ever printed. */
+    fprintf(stderr,
+            "askr-worker: loop ended rc=%d exit_status=%d err_type=%d line=%d msg=[%s]\n",
+            rc,
+            (int)EG(exit_status),
+            (int)PG(last_error_type),
+            (int)PG(last_error_lineno),
+            PG(last_error_message) ? ZSTR_VAL(PG(last_error_message)) : "(none)");
+    fflush(stderr);
     if (rc != 0) {
         fprintf(stderr,
                 "askr-worker: EXIT rc=%d err_type=%d line=%d msg=[%s]\n",

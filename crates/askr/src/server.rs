@@ -316,6 +316,38 @@ struct SseBody {
     rx: mpsc::Receiver<Bytes>,
 }
 
+/// Streaming body for a PHP response, which can end in two very different ways.
+///
+/// A closed channel means PHP finished normally. An `Err` item means the interpreter died
+/// with the stream open — and those must not look the same to the client. The headers are
+/// already on the wire by then (status 200, sent on the first flush), so the only honest
+/// signal left is to fail the transfer: the client gets a truncated response it can
+/// detect, instead of a valid, complete-looking **200 with an empty body**. A blank 200 is
+/// the worst possible answer — caches store it, browsers render it, and monitoring calls
+/// it healthy.
+struct PhpStreamBody {
+    rx: mpsc::Receiver<Result<Bytes, ()>>,
+}
+
+impl Body for PhpStreamBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        match self.get_mut().rx.poll_recv(cx) {
+            Poll::Ready(Some(Ok(b))) => Poll::Ready(Some(Ok(Frame::data(b)))),
+            Poll::Ready(Some(Err(()))) => Poll::Ready(Some(Err(std::io::Error::other(
+                "php worker died mid-stream",
+            )))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 impl Body for SseBody {
     type Data = Bytes;
     type Error = std::io::Error;
@@ -422,7 +454,30 @@ pub async fn run(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, peer) = accepted?;
+                // A failed accept() used to end the whole worker via `?` — silently,
+                // since nothing logged it and the PHP side then reported the tear-down
+                // as "fatal/OOM?". Most accept errors are transient and per-connection
+                // (the peer vanished mid-handshake, or we're briefly out of file
+                // descriptors); killing a worker that is serving other requests is a
+                // wildly disproportionate response to one of those.
+                let (stream, peer) = match accepted {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        let kind = e.kind();
+                        // Out of descriptors: don't spin at full speed retrying, and
+                        // don't die — the pressure usually clears as requests finish.
+                        let out_of_fds = matches!(kind, std::io::ErrorKind::OutOfMemory)
+                            || e.raw_os_error() == Some(libc::EMFILE)
+                            || e.raw_os_error() == Some(libc::ENFILE);
+                        if out_of_fds {
+                            tracing::error!(error = %e, "accept failed: out of file descriptors — raise the open-file limit (LimitNOFILE / ulimit -n)");
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        } else {
+                            tracing::warn!(error = %e, ?kind, "accept failed; continuing");
+                        }
+                        continue;
+                    }
+                };
                 // Shed load past the connection cap (dropping closes the socket).
                 if rt.active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
                     tracing::warn!(%peer, "connection cap reached; dropping");
@@ -1979,7 +2034,7 @@ async fn refresh_entry(
 fn stream_response(
     status: u16,
     headers: Vec<(String, String)>,
-    body: mpsc::Receiver<Bytes>,
+    body: mpsc::Receiver<Result<Bytes, ()>>,
 ) -> Response<ResBody> {
     let mut builder =
         Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
@@ -1994,7 +2049,7 @@ fn stream_response(
         builder = builder.header(name, value);
     }
     builder
-        .body(SseBody { rx: body }.boxed())
+        .body(PhpStreamBody { rx: body }.boxed())
         .unwrap_or_else(|_| {
             text(
                 StatusCode::INTERNAL_SERVER_ERROR,
