@@ -7,6 +7,10 @@ requests against it, eliminating per-request framework bootstrap.
 
 > Version **1.2.0**. Production target is Linux; development also works on macOS.
 
+> 📘 These pages are also published, with navigation and search, at
+> **[elyracode.com/docs/askr](https://elyracode.com/docs/askr)** — product information is
+> at **[elyracode.com/askr](https://elyracode.com/askr)**.
+
 ## Start here
 
 | Guide | What it covers |

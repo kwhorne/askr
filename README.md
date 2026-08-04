@@ -10,6 +10,16 @@
   &nbsp;·&nbsp; <strong>v1.2.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
+<p align="center">
+  <a href="https://elyracode.com/askr"><strong>Product</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://elyracode.com/docs/askr"><strong>Documentation</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/kwhorne/askr/releases">Releases</a>
+  &nbsp;·&nbsp;
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
 **A standalone, memory-safe PHP application server, in Rust.**
 
 Askr embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
@@ -59,7 +69,10 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
 
 ## Documentation
 
-Everything lives in [`docs/`](docs/README.md):
+- 📘 **Full documentation — [elyracode.com/docs/askr](https://elyracode.com/docs/askr)**
+- 🔎 **Product information — [elyracode.com/askr](https://elyracode.com/askr)**
+
+The same pages are also in [`docs/`](docs/README.md) in this repository:
 
 - [**Laravel setup**](docs/LARAVEL.md) — **recommended Laravel guide**: `composer require kwhorne/askr-laravel`, `.env`, queue/scheduler/broadcasting, durable L2
 - [Ubuntu setup](docs/UBUNTU.md) — **recommended production install** (systemd, TLS, tuning)
@@ -209,6 +222,14 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to
 build (you need an embed `libphp` first) and the checks CI runs. Please follow
 the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues privately
 per the [Security Policy](SECURITY.md) — not in public issues.
+
+## Links
+
+- **Product:** [elyracode.com/askr](https://elyracode.com/askr)
+- **Documentation:** [elyracode.com/docs/askr](https://elyracode.com/docs/askr)
+- **Source & issues:** [github.com/kwhorne/askr](https://github.com/kwhorne/askr)
+- **Container images:** [ghcr.io/kwhorne/askr](https://github.com/kwhorne/askr/pkgs/container/askr)
+- **Laravel package:** [`kwhorne/askr-laravel`](https://packagist.org/packages/kwhorne/askr-laravel)
 
 ## License
 
