@@ -1,0 +1,42 @@
+name: Audit
+
+# Advisories appear over time, not when you commit — so this runs on a schedule as
+# well as when dependencies change. It's a separate workflow from CI on purpose: a
+# new advisory in a transitive dependency shouldn't turn the build-and-test signal
+# red for a commit that had nothing to do with it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+  schedule:
+    # Mondays, 06:00 UTC — before the Dependabot PRs land the same morning.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The action opens/updates an issue when a scheduled run finds something.
+  issues: write
+
+jobs:
+  audit:
+    name: cargo audit (RUSTSEC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Scans Cargo.lock against the RustSec advisory database. Note this covers the
+      # Rust dependency tree only — the embedded PHP (libphp) is C, pinned by
+      # scripts/build-libphp.sh, and tracked through PHP's own release notes.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

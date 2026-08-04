@@ -30,6 +30,19 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   compressing) and `tune.rs` (its two recommendation rules, extracted so they're
   testable).
 
+- **Dependency advisories are now scanned, and updates proposed.** Nothing warned about
+  new RUSTSEC advisories — the unmaintained `rustls-pemfile` dependency dropped in
+  0.9.11 was found by a manual review, which is not a process. A separate `Audit`
+  workflow scans `Cargo.lock` when dependencies change **and weekly on a schedule**,
+  since advisories appear over time rather than when someone commits. It's deliberately
+  not part of CI: an advisory in a transitive dependency shouldn't turn the
+  build-and-test signal red for a commit that had nothing to do with it.
+- Added `.github/dependabot.yml` for the workspace (patch/minor grouped into one PR,
+  majors separate), the `scripts/h3bench` tool, and the workflow actions themselves.
+- Normalised `actions/checkout` across workflows — it had drifted to three different
+  versions (v4, v5 and v7), which is exactly the rot Dependabot now prevents.
+  `fetch-depth: 0` is preserved where the Laravel subtree split needs full history.
+
 - **CI now checks the optional features.** `sql-backend`, `observ`, `otel`, `http3` and
   all of them together are part of the published `-full` build, but CI only ever
   compiled the default build — a feature-gated regression could have shipped.

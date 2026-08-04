@@ -27,6 +27,24 @@ Please include:
 You can expect an initial response within a few days. Once a fix is ready we'll
 coordinate disclosure and credit you in the release notes if you wish.
 
+## Dependency advisories
+
+The Rust dependency tree is scanned against the
+[RustSec advisory database](https://rustsec.org) by the `Audit` workflow — when
+dependencies change, and weekly on a schedule, because advisories appear over time
+rather than when someone commits. Dependabot proposes updates for the workspace, the
+benchmark tool and the workflow actions themselves.
+
+Two honest limits:
+
+- The scan covers **Rust** dependencies. The embedded PHP (`libphp`) is C, pinned by
+  [`scripts/build-libphp.sh`](scripts/build-libphp.sh), and tracked through PHP's own
+  release announcements — a PHP security release means rebuilding `libphp` and cutting
+  a new Askr release.
+- Advisories in a transitive dependency with no fix available are handled by judgement,
+  not automatically: the audit runs in its own workflow so such a case doesn't turn the
+  build-and-test signal red for unrelated commits.
+
 ## Security-sensitive areas
 
 Askr's whole hot path is memory-safe Rust; a few areas warrant extra scrutiny:

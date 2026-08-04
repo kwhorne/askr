@@ -38,7 +38,7 @@ jobs:
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "minor=${VER%.*}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
