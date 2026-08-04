@@ -3,6 +3,46 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.5 — 2026-08-05
+
+**Askr-46 is fixed at the root**, and two whole failure classes went with it. In a real
+Laravel + Flux app, every file response after a worker's first killed that worker —
+`flux.js` failed two requests in three, which also broke dark mode and all Flux
+interactivity. Now 12 of 12, zero respawns, with the standard Flux/Livewire setup.
+
+### Fixed
+
+- **The output layer is reset between worker requests.** PHP's output layer keeps a
+  per-request "sent" flag that, in a worker's one eternal PHP request, never cleared. When
+  `header('Content-Length: …')` later tried to disable zlib output compression, ext-zlib
+  checked that flag and warned "headers already sent" — under Laravel, the global error
+  handler turns that warning into an `ErrorException` outside the kernel's try, and the
+  worker died. Only file responses set Content-Length, which is why only they triggered
+  it; builds without ext-zlib never saw it at all, which is why it passed on the
+  development machine and failed in the container. Each iteration now gets the fresh
+  output state a real request gets from `php_request_startup()`.
+
+- **`exit()`/`die()` ends the request, not the worker.** Since PHP 8.0, exit is an
+  internal "unwind exit", not a bailout: it unwinds *cleanly*, so the worker script
+  "completed normally" — rc=0, no error anywhere — and every hypothesis that assumed a
+  crash or a closed channel was wrong. The unwind is now cleared at the loop boundary,
+  FPM-style: the request gets whatever output it produced before exiting, the worker
+  keeps serving, and the log says so.
+
+- **An uncaught exception escaping the handler fails the request (500), not the worker.**
+  Thrown outside `$kernel->handle()`'s try — during request reconstruction, or by a
+  global error handler converting a warning — it used to unwind the whole worker loop
+  silently. Now it is named in the log, class and message, which is exactly how the zlib
+  culprit above was finally identified.
+
+### Tests
+
+- e2e: `exit()` mid-request answers with its partial output and the worker survives five
+  subsequent requests (fails against the previous binary).
+- Hardened the no-traffic canary test: under machine load the admin plane binds late, an
+  empty status matched "neither rolling nor idle", and the poll asserted against a
+  rollout that had barely begun.
+
 ## 1.4.4 — 2026-08-04
 
 Diagnosis and blast radius, from chasing one real bug for a day. **No behaviour change for

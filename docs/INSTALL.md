@@ -98,7 +98,7 @@ docker compose logs -f                               # PHP diagnostics land here
 into an image so a deploy is a new image rather than a mutated directory — that's
 [`examples/docker/docker-compose.yml`](../examples/docker/docker-compose.yml) with its
 `Dockerfile`, read-only root filesystem and a volume for `storage/`. Pin an exact version
-(`askr:1.4.4`), not `:1.4` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
+(`askr:1.4.5`), not `:1.4` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
 
 Then skip to [step 4: the Laravel side](#4-the-laravel-side).
 
@@ -112,7 +112,7 @@ Nothing is installed system-wide and no system PHP is touched.
 ### B1. Download and unpack
 
 ```bash
-VER=v1.4.4; ARCH=$(uname -m)
+VER=v1.4.5; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz
 cd askr-${VER#v}-linux-$ARCH

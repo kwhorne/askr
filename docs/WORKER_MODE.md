@@ -247,9 +247,16 @@ Recycle them periodically with `--max-requests N` (or `[server] max_requests`):
 each worker gracefully drains and exits after N requests and the master respawns
 a fresh one. See [Deployment](DEPLOYMENT.md).
 
-## Known issue: file responses can end a worker's loop
+## Fixed in 1.4.5: file responses could end a worker's loop
 
-**[Askr-46](https://github.com/kwhorne/askr/issues) is open.** In one real Laravel
+**Askr-46 is fixed** — the section below is kept for anyone on 1.4.4 or earlier.
+The cause was PHP's output layer keeping a "sent" flag across worker requests, which
+turned a zlib INI check into an `ErrorException` on every file response after the first.
+1.4.5 resets the output layer per request, treats `exit()` as end-of-request rather than
+end-of-worker, and fails a request (500) whose exception escapes the handler instead of
+letting it kill the worker.
+
+**On 1.4.4 or earlier:** In one real Laravel
 application, the request *following* a `BinaryFileResponse` ends the worker's loop —
 costing roughly **one request in three with a single worker**, since a worker that leaves
 its loop is replaced and the next request lands on a fresh one.

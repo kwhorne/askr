@@ -907,11 +907,18 @@ canary_min_requests = 25
     );
 
     // Reload, then send far less traffic than the gate needs to judge.
+    // Wait for the admin plane first: under load it binds late, and an empty response
+    // matches neither "rolling" nor "idle" — so the poll below broke out instantly and
+    // asserted against a rollout that had barely started. (Seen exactly once, with four
+    // Docker builds running on the same machine.)
+    s.wait_admin();
     s.signal(libc::SIGHUP);
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        if !s.admin_status().contains("\"rollout\":\"rolling\"")
-            && !s.admin_status().contains("\"rollout\":\"idle\"")
+        let st = s.admin_status();
+        if !st.is_empty()
+            && !st.contains("\"rollout\":\"rolling\"")
+            && !st.contains("\"rollout\":\"idle\"")
         {
             break;
         }
@@ -1200,5 +1207,71 @@ root = "{ROOT}"
         r.body.contains("token=abc123"),
         "the body must be parseable into fields: {:?}",
         r.body
+    );
+}
+
+/// `exit()` anywhere in the app must end the request, not the worker.
+///
+/// Since PHP 8.0, exit() is an internal "unwind exit", not a bailout: it unwinds
+/// cleanly, so the worker script "completes normally" — rc=0, no error — and the
+/// worker was replaced for every request that followed one. In a real Laravel + Flux
+/// app that made roughly one request in three fail, because something in the asset
+/// path calls exit() (perfectly legal under FPM, where a request *is* a process).
+/// The shim now clears the unwind at the loop boundary, FPM-style: the request gets
+/// whatever it produced before exiting, and the worker keeps serving.
+#[test]
+fn an_exit_in_the_app_ends_the_request_not_the_worker() {
+    let dir = unique_dir("exitworker");
+    let worker = r#"<?php
+while (askr_handle_request(function ($r) {
+    if (str_contains($r['uri'], 'bye')) { echo 'partial'; exit; }
+    echo 'ok';
+    return 200;
+})) {}
+"#;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+
+[worker]
+script = "{}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let s = Server::start_in(
+        dir.clone(),
+        &[("index.php", "<?php echo 'front';")],
+        &config,
+    );
+
+    // The exiting request still answers with what it produced before exit().
+    let bye = get(s.port, "/bye");
+    assert_eq!(bye.status, 200, "log:\n{}", s.log_contents());
+    assert_eq!(bye.body.trim(), "partial");
+
+    // The worker survives it — repeatedly, so a single lucky respawn can't pass.
+    for i in 0..5 {
+        let r = get(s.port, "/normal");
+        assert_eq!(
+            r.status,
+            200,
+            "request {i} after exit(); log:\n{}",
+            s.log_contents()
+        );
+        assert_eq!(r.body.trim(), "ok", "request {i} after exit()");
+    }
+    assert!(
+        s.log_has("request ended via exit()"),
+        "the exit should be visible to the operator:\n{}",
+        s.log_contents()
+    );
+    assert!(
+        !s.log_has("exiting for supervisor respawn"),
+        "the worker must not be respawned by an exit():\n{}",
+        s.log_contents()
     );
 }

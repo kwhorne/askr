@@ -534,6 +534,25 @@ void askr_req_set_body(const char *ptr, size_t len) {
 
 /* Reset SAPI response state between iterations (no RSHUTDOWN). */
 static void worker_reset_response(void) {
+    /* Output layer FIRST: deactivating flushes anything still buffered through the
+     * SAPI, which both writes into g_req.out and marks headers as sent — so it has to
+     * happen before the buffers are reclaimed and the SAPI flags are cleared below.
+     * (Learned by doing it in the other order: every request then began with
+     * "http_response_code(): Cannot set response code - headers already sent".)
+     *
+     * The output layer keeps its own per-request state, including a "sent" flag that
+     * sets on the first body byte and — in this one eternal PHP request — never clears.
+     * ext/zlib's ini handler checks exactly that flag when header('Content-Length: …')
+     * tries to disable output compression, and warns "headers already sent" (about
+     * headers it isn't checking). Under Laravel that warning becomes an ErrorException
+     * from the global error handler, thrown outside the kernel's try — so every file
+     * response after the first killed the worker on builds with ext-zlib, while builds
+     * without it never saw any of this. Re-activating the layer gives each iteration
+     * the fresh output state a real request gets from php_request_startup(). */
+    php_output_end_all();
+    php_output_deactivate();
+    php_output_activate();
+
     buf_reclaim(&g_req.out);
     buf_reclaim(&g_req.hdr);
     g_streaming = 0;
@@ -646,6 +665,57 @@ static PHP_FUNCTION(askr_handle_request) {
         zval_ptr_dtor(&retval);
     }
     zval_ptr_dtor(&request);
+
+    /* exit()/die() must end the REQUEST, not the worker.
+     *
+     * Since PHP 8.0, exit() is not a bailout: it throws an internal "unwind exit"
+     * that propagates like an uncatchable exception. It unwinds cleanly through
+     * call_user_function, so the C code here keeps running (which is how a dying
+     * request could still emit an empty 200) — and the moment we RETURN_TRUE into
+     * the VM, the pending unwind rolls the worker script's `while` loop off the
+     * stack and the script "completes normally": rc=0, exit_status=0, no error.
+     * That signature cost two days, because every hypothesis assumed either a
+     * bailout or a closed channel, and it was neither.
+     *
+     * One exit() anywhere in an app or its vendors — Livewire and friends use it
+     * legitimately, since under FPM it just ends the request — must not tear down
+     * a worker and take the next requests with it. Clear the unwind and keep
+     * serving; whatever output the request produced before exiting is its
+     * response, exactly as under FPM. A real fatal still bails out (rc=2) and
+     * still respawns the worker, as it must. */
+    if (EG(exception)) {
+        if (zend_is_unwind_exit(EG(exception)) || zend_is_graceful_exit(EG(exception))) {
+            /* exit()/die(): ends the request, exactly as under FPM. */
+            zend_clear_exception();
+            EG(exit_status) = 0;
+            fprintf(stderr,
+                    "askr-worker: request ended via exit()/die() — finishing this "
+                    "response and keeping the worker\n");
+            fflush(stderr);
+        } else {
+            /* A real exception escaped the handler. In a Laravel worker script that
+             * means it was thrown OUTSIDE $kernel->handle()'s try (during request
+             * reconstruction, or by the framework's global error handler converting a
+             * PHP warning into an ErrorException before the kernel could catch it).
+             * Left pending, it unwinds the worker script's while-loop the moment we
+             * return into the VM — the script "completes normally" (rc=0, no error
+             * recorded) and the worker dies, taking a third of the traffic with it
+             * while the supervisor respawns. One request must never cost a worker.
+             *
+             * Name it loudly (class + message), fail THIS request, keep serving. */
+            zval rv, *msg = zend_read_property(
+                EG(exception)->ce, EG(exception), "message", sizeof("message") - 1, 1, &rv);
+            fprintf(stderr,
+                    "askr-worker: uncaught %s escaped the request handler: %s — "
+                    "failing this request (500), keeping the worker\n",
+                    ZSTR_VAL(EG(exception)->ce->name),
+                    (msg && Z_TYPE_P(msg) == IS_STRING) ? Z_STRVAL_P(msg) : "(no message)");
+            fflush(stderr);
+            zend_clear_exception();
+            SG(sapi_headers).http_response_code = 500;
+            buf_reset(&g_req.out);
+        }
+    }
 
     /* Flush headers into our capture even if the body was empty. */
     sapi_send_headers();
