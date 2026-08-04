@@ -33,7 +33,7 @@ libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }
 fastwebsockets = { version = "0.10", features = ["upgrade"] }
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 multer = "3"
 futures-core = "0.3"
 flate2 = "1"
