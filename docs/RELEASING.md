@@ -127,20 +127,23 @@ curl -s "https://repo.packagist.org/p2/kwhorne/askr-laravel.json" \
 
 ### Publishing by hand
 
-If the token is missing or the workflow failed, anyone with push rights to
-`kwhorne/askr-laravel` can do it from a clone — no secret needed:
+This is a supported route, not a workaround — if the `ASKR_LARAVEL_SPLIT_TOKEN` secret
+isn't set, this is the process. Anyone with push rights to `kwhorne/askr-laravel` can run
+it; no secret needed, since your own credentials are already good enough:
 
 ```bash
-git clone --no-hardlinks . /tmp/splitwork && cd /tmp/splitwork
-git subtree split --prefix=packages/laravel -b split
-git push --force https://github.com/kwhorne/askr-laravel.git split:main
-gh release create "v$V" --repo kwhorne/askr-laravel \
-  --target "$(git rev-parse split)" --title "askr-laravel ${V}" \
-  --notes "Laravel drivers for Askr $V. See https://github.com/kwhorne/askr/blob/main/CHANGELOG.md"
-cd - && rm -rf /tmp/splitwork
+./scripts/publish-laravel-package.sh "v$V"     # or no argument to use the tag at HEAD
+./scripts/publish-laravel-package.sh --check   # verify only
 ```
 
-The Packagist webhook on that repo picks the tag up within seconds.
+It splits **from the tag** rather than from whatever is checked out, refuses to publish a
+tree with no `composer.json`, is safe to re-run, and ends by asserting that both the tag
+and Packagist have it.
+
+The `Split askr-laravel` workflow's final step checks the same thing without needing any
+credentials, so it doesn't care whether the push was automatic or manual — **red means
+the release genuinely isn't installable.** Publish, then re-run the job and it goes
+green.
 
 ## 10. Verify like a user, not like an author
 

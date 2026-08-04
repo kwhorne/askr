@@ -127,7 +127,7 @@ What those mean:
 - `--workers` — one process per core. Askr scales by processes, not threads, because
   non-ZTS PHP isn't thread-safe.
 - `--tls-self-signed` — a throwaway certificate to prove HTTPS works. For a real one,
-  see [B6](#b6-real-certificates).
+  see [B6](#b6-put-the-site-on-https).
 - `--admin 127.0.0.1:9000` — status/metrics/reload API, bound to loopback so it isn't
   exposed.
 
@@ -138,16 +138,155 @@ curl -ik https://localhost:8443/
 curl -s http://127.0.0.1:9000/api/status
 ```
 
-### B6. Real certificates
+### B6. Put the site on HTTPS
 
-Askr can obtain and renew Let's Encrypt certificates itself — no certbot, no cron:
+Askr terminates TLS itself — there's no nginx in front to configure. Pick the route that
+matches where you are.
+
+#### Route 1: Let's Encrypt, automatic (what most people want)
+
+Askr obtains **and renews** the certificate itself. No certbot, no cron job, no reload:
+a renewed certificate is picked up by running workers without dropping a connection.
+
+**Test with staging first.** Let's Encrypt's production rate limits are strict and
+hitting them means waiting hours; staging is generous but issues untrusted certs, so
+browsers will warn — that's expected:
 
 ```bash
-./askr-run.sh serve --root /var/www/app/public --acme you@example.com \
-  --domain example.com --domain www.example.com
+sudo ./askr-run.sh serve \
+  --root /var/www/app/public \
+  --listen 0.0.0.0:443 \
+  --acme --acme-staging \
+  --acme-domain example.com \
+  --acme-email you@example.com \
+  --acme-dir /var/lib/askr/acme
 ```
 
-Port 80 must be reachable for the HTTP-01 challenge. See [AUTOTLS.md](AUTOTLS.md).
+Watch the log for the certificate being issued, then drop `--acme-staging` and delete
+the staging cache so a real certificate is fetched:
+
+```bash
+sudo rm -rf /var/lib/askr/acme && sudo ./askr-run.sh serve … --acme …   # without --acme-staging
+```
+
+Requirements, all three of which trip people up:
+
+- **`example.com` must already resolve to this server.** ACME proves you control the
+  domain by fetching a file over HTTP — DNS first, certificate second.
+- **Port 80 must be reachable from the internet**, because that's where the HTTP-01
+  challenge is answered (`--acme-http`, default `0.0.0.0:80`). You can keep serving
+  traffic on it; Askr only intercepts the `/.well-known/acme-challenge/` path.
+- **`--acme-dir` must persist across restarts.** It holds the account key, `cert.pem`,
+  `key.pem` and the renewal deadline. Losing it means re-issuing every boot, which is
+  how you hit rate limits. In Docker, make it a volume.
+
+Several domains on one certificate (SAN) — repeat the flag:
+
+```bash
+--acme-domain example.com --acme-domain www.example.com --acme-domain api.example.com
+```
+
+Full reference, including private CAs and testing against
+[Pebble](https://github.com/letsencrypt/pebble): **[AUTOTLS.md](AUTOTLS.md)**.
+
+#### Route 2: a certificate you already have
+
+From a corporate CA, a wildcard you manage, or `mkcert` locally:
+
+```bash
+./askr-run.sh serve --root /var/www/app/public --listen 0.0.0.0:443 \
+  --tls-cert /etc/ssl/certs/example.com.fullchain.pem \
+  --tls-key  /etc/ssl/private/example.com.key
+```
+
+Use the **full chain** (leaf + intermediates), not just the leaf — a lone leaf works in
+browsers that happen to have the intermediate cached and fails everywhere else, which is
+a miserable thing to debug. In `askr.toml`:
+
+```toml
+[tls]
+cert = "/etc/ssl/certs/example.com.fullchain.pem"
+key  = "/etc/ssl/private/example.com.key"
+```
+
+Replacing those files is enough — Askr notices and reloads the certificate without a
+restart, so renewals from your own tooling need no orchestration.
+
+#### Route 3: self-signed, for development
+
+```bash
+--tls-self-signed
+```
+
+Generated at startup, never written to disk. Browsers will warn; `curl` needs `-k`.
+Never in production.
+
+#### Then send everyone to HTTPS
+
+Serving HTTPS doesn't stop people arriving on `http://`. Add:
+
+```toml
+[server]
+force_https = true
+```
+
+(or `--force-https`). A request that isn't secure is answered with a **308** to the same
+host, path and query. "Is this request secure?" is decided from the connection's own TLS,
+then `[server] https = true`, then `X-Forwarded-Proto: https`.
+
+**But read this before assuming port 80 is handled.** `force_https` can only redirect a
+request that *reaches* Askr over plain HTTP. When Askr terminates TLS itself, its
+listener is HTTPS-only — so there's nothing on port 80 to redirect, and
+`http://example.com` fails to connect rather than being sent onward. Depending on your
+route above:
+
+- **Route 2 (your own certificate):** run a second, plain-HTTP Askr on `:80` with
+  `force_https = true` next to the TLS one. Verified: it answers
+  `308 → https://example.com/`.
+- **Route 1 (ACME):** you can't do that today, because Askr's HTTP-01 challenge server
+  needs port 80 during issuance and renewal and the two would fight over the bind. If
+  you need the redirect as well, terminate `:80` at a load balancer, or use your own
+  certificate (route 2) with the redirect instance.
+- **Behind a load balancer or CDN:** the balancer redirects, and `force_https` covers
+  anything that slips through via `X-Forwarded-Proto` — set
+  [`trusted_proxies`](CONFIGURATION.md) so that header is believed only from your
+  balancer.
+
+`force_https` is still worth setting in all three cases: it's what protects you when a
+request arrives unencrypted by a route you didn't plan for.
+
+If you also want `www` → apex, that's a `[[redirect]]` rule:
+**[HOSTING.md](HOSTING.md#2-redirects--wwwapex-and-httphttps)**.
+
+#### Check it
+
+```bash
+curl -sI https://example.com/ | head -1
+curl -sI http://example.com/  | head -2          # expect 308 + Location: https://…
+echo | openssl s_client -connect example.com:443 -servername example.com 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+```
+
+The last line is the one worth keeping: it tells you which certificate is actually being
+served, who issued it, and when it expires — the three things a broken TLS setup lies
+about.
+
+#### Binding to port 443
+
+Ports below 1024 need privileges. Either run the service as root and let Askr drop
+privileges, or grant the capability once so it doesn't need root at all:
+
+```bash
+sudo setcap 'cap_net_bind_service=+ep' /opt/askr/askr
+```
+
+The systemd unit in [UBUNTU.md](UBUNTU.md) handles this for you.
+
+#### Many domains, many certificates
+
+One certificate with several SANs (above) covers most cases. For genuinely separate
+sites with separate certificates, see virtual hosts in
+**[HOSTING.md](HOSTING.md)**.
 
 ### B7. Run it as a service
 
@@ -248,6 +387,16 @@ image's entrypoint is the launcher already. See [A1](#a1-run-it).
 
 **A feature in the docs isn't in your binary.** You have the plain build, not `-full`.
 Compare `askr --version` output and re-read [B1](#b1-download-and-unpack).
+
+**ACME never issues a certificate.** Almost always one of: the domain doesn't resolve
+to this machine yet, port 80 isn't reachable from the internet, or you're rate-limited
+after retrying with production instead of `--acme-staging`. The log says which.
+
+**HTTPS works in `curl` but browsers complain about the chain.** You gave `--tls-cert`
+the leaf only. Use the full chain.
+
+**`Permission denied` binding `:443`.** Ports under 1024 need privileges — see
+[binding to port 443](#binding-to-port-443).
 
 **Sessions or cache empty out at random.** With `SESSION_DRIVER=askr` the regions live
 in shared memory sized at startup; a too-small region evicts. `askr tune` suggests

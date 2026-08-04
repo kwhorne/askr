@@ -25,22 +25,21 @@ jobs:
           fetch-depth: 0
 
       # A missing token used to `exit 0`, so this job reported success while
-      # publishing nothing — and the package sat months behind on Packagist while
-      # every release showed a green check. A signal that can mean "did nothing" is
-      # worse than no signal. Now: fail on a version tag (a release that doesn't
-      # publish is a broken release), warn loudly on an ordinary push.
+      # publishing nothing — the package sat weeks behind on Packagist while every
+      # release showed a green check.
+      #
+      # The fix is not "always fail without the token": publishing by hand with
+      # scripts/publish-laravel-package.sh is a supported route, and a job that goes
+      # red on a correct release teaches you to ignore red just as effectively.
+      # So this step is best-effort, and the *verification* below is what decides the
+      # outcome — it asks whether the package is published, not how it got there.
       - name: Subtree split + push to standalone main
         env:
           TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "$TOKEN" ]; then
-            MSG="ASKR_LARAVEL_SPLIT_TOKEN is not set, so kwhorne/askr-laravel was not updated. Add a fine-grained PAT with Contents: read/write on that repo."
-            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-              echo "::error::$MSG This tag has NOT been published to Packagist."
-              exit 1
-            fi
-            echo "::warning::$MSG"
+            echo "::warning::ASKR_LARAVEL_SPLIT_TOKEN is not set — not pushing automatically. Publish with scripts/publish-laravel-package.sh."
             exit 0
           fi
           git subtree split --prefix=packages/laravel -b split
@@ -55,8 +54,8 @@ jobs:
           GH_TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
         run: |
           set -euo pipefail
-          [ -n "$GH_TOKEN" ] || { echo "::error::no ASKR_LARAVEL_SPLIT_TOKEN secret"; exit 1; }
-          [ -n "${SPLIT_SHA:-}" ] || { echo "::error::split produced nothing to release"; exit 1; }
+          [ -n "$GH_TOKEN" ] || { echo "no token — skipping, publish by hand"; exit 0; }
+          [ -n "${SPLIT_SHA:-}" ] || { echo "nothing split — skipping"; exit 0; }
           TAG="${GITHUB_REF_NAME}"
           gh release create "$TAG" \
             --repo kwhorne/askr-laravel \
@@ -65,23 +64,24 @@ jobs:
             --notes "Laravel drivers for Askr ${TAG#v}. See the main CHANGELOG: https://github.com/kwhorne/askr/blob/main/CHANGELOG.md" \
             || echo "release $TAG already exists — skipping"
 
-      # "Success" has to mean "published". Confirm the tag really exists in the split
-      # repo rather than trusting that the steps above did what they printed.
-      - name: Verify the tag landed in the split repo
+      # The verdict. Needs no credentials (the split repo and Packagist are public),
+      # so it's equally valid whether the push above happened or someone ran
+      # scripts/publish-laravel-package.sh by hand. Red means the release genuinely
+      # isn't installable; re-run the job after publishing and it goes green.
+      - name: Verify the release is installable
         if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          for i in 1 2 3 4 5; do
-            if gh api "repos/kwhorne/askr-laravel/git/ref/tags/$TAG" >/dev/null 2>&1; then
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "https://api.github.com/repos/kwhorne/askr-laravel/git/ref/tags/$TAG" >/dev/null 2>&1; then
               echo "$TAG is present in kwhorne/askr-laravel"
               exit 0
             fi
-            sleep 5
+            echo "waiting for $TAG to appear in kwhorne/askr-laravel ($i/6)"
+            sleep 10
           done
-          echo "::error::$TAG is missing from kwhorne/askr-laravel — Packagist will not see this release."
+          echo "::error::$TAG is not in kwhorne/askr-laravel, so Packagist cannot serve it. Run scripts/publish-laravel-package.sh, then re-run this job."
           exit 1
 
       # Belt-and-braces auto-update: ping Packagist after the split push, so the

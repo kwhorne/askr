@@ -186,7 +186,13 @@ async fn obtain(cfg: &AcmeConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Serve HTTP-01 challenge responses (and a redirect/OK for everything else).
+/// Serve HTTP-01 challenge responses; 404 for everything else.
+///
+/// This listener is temporary — bound for an issuance/renewal and aborted afterwards
+/// (see `obtain`). So port 80 is unoccupied the rest of the time, and `force_https`
+/// can't redirect real visitors when Askr terminates TLS itself: there's no plain-HTTP
+/// listener for them to arrive on. Documented in HOSTING.md; a persistent :80 responder
+/// that both answers challenges and redirects is the fix.
 async fn challenge_loop(listener: TcpListener, challenges: Challenges) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {

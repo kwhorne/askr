@@ -106,7 +106,12 @@ that's already HTTPS is left untouched.
 
 > To redirect port 80 → 443, run a small plain-HTTP Askr on `:80` with
 > `force_https = true` alongside your TLS instance on `:443`, or terminate `:80` at
-> your load balancer.
+> your load balancer. `force_https` alone can't do it: a TLS listener never sees a
+> plain-HTTP request, so there has to be something on `:80` to redirect *from*.
+>
+> This does **not** combine with [`--acme`](AUTOTLS.md) yet — the HTTP-01 challenge
+> server needs port 80 during issuance and renewal, so the two would fight over the
+> bind.
 
 ---
 
