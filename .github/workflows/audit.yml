@@ -22,10 +22,9 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+# Read-only: the job reports through the workflow result, it doesn't file issues.
 permissions:
   contents: read
-  # The action opens/updates an issue when a scheduled run finds something.
-  issues: write
 
 jobs:
   audit:
@@ -34,9 +33,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Scans Cargo.lock against the RustSec advisory database. Note this covers the
-      # Rust dependency tree only — the embedded PHP (libphp) is C, pinned by
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # Installed with --locked and run directly rather than through
+      # rustsec/audit-check: that action installs cargo-audit *unlocked*, so it
+      # resolves the newest transitive dependencies and fails against our pinned
+      # toolchain the moment one of them raises its MSRV (kstring 2.0.4 wanting
+      # rustc 1.96 while we pin 1.95 — which is the whole point of pinning). The
+      # audit tool's MSRV has nothing to do with ours, so don't couple them.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Scans Cargo.lock against the RustSec advisory database. This covers the Rust
+      # dependency tree only — the embedded PHP (libphp) is C, pinned by
       # scripts/build-libphp.sh, and tracked through PHP's own release notes.
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: cargo audit
+        run: cargo audit
