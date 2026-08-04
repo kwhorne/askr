@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.3.0; ARCH=$(uname -m)
+VER=v1.4.0; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.3.0     # or :1.3 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.0     # or :1.4 to follow patches
 ```
 
-Pin the **exact** version in production and bump it deliberately. `:1.3` follows
+Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.3.0-full`) are the same server built with the optional features
+The `-full` tags (`1.4.0-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,38 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.0
+
+Worth doing, in this order:
+
+```bash
+# 1. Find out what's actually worth caching — and what only looks cacheable
+askr serve --traffic-log /tmp/traffic.jsonl    # leave it for an hour of normal traffic
+askr cache-report /tmp/traffic.jsonl
+```
+
+```php
+// 2. Cache the routes it called safe. No tag list to maintain: the page is tagged
+//    with the models it read, so a save() clears exactly the pages that showed them.
+Route::get('/products/{product}', ProductController::class)
+    ->middleware('askr.cache:300');
+```
+
+Requires `composer update kwhorne/askr-laravel` for the middleware.
+
+**One behaviour change to know about.** A response carrying more cache tags than an
+entry can hold (8) is now **refused** rather than cached. Before, the surplus tags were
+silently dropped — which meant `askr_cache_forget_tag()` could never reach them, and
+the page stayed stale until its TTL expired.
+
+If you hand-write long tag lists you may therefore see a page stop being cached, and
+`askr_cache_tag_overflow_total` count up on `/metrics`. That page was already broken;
+it just failed quietly. Tag by class (`posts`) instead of per instance (`posts:3`), or
+cache a smaller fragment with [ESI](FEATURES.md#esi--one-page-many-ttls).
+
+`--traffic-log` is a diagnostic: it writes a line per PHP-served request, so turn it
+off again when you have your answer.
 
 ### To 1.3.0
 

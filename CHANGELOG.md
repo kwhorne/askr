@@ -3,7 +3,16 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
-## Unreleased
+## 1.4.0 — 2026-08-04
+
+Two halves of one idea: **find out what's safe to cache, then cache it correctly
+without maintaining anything.**
+
+`askr cache-report` watches real traffic and tells you which routes would win from
+caching — and, more importantly, which are genuinely byte-identical for every visitor.
+The `askr.cache` middleware then caches them with tags derived from the models the page
+read, so invalidation needs no bookkeeping. Neither exists elsewhere, because both need
+the server and the interpreter to be the same process.
 
 - **Automatic cache tagging for Laravel (`askr.cache` middleware).** Page caching is
   rare in Laravel not because it's hard to switch on, but because keeping the tags

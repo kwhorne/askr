@@ -99,6 +99,13 @@ MIT © Knut W. Horne
 
 ## Automatic page caching (`askr.cache`)
 
+> **The server needs a response cache for this to do anything.** Start Askr with
+> `--response-cache 512` (or `[cache] response_slots = 512`). Without it the middleware
+> still sets its header, the server has nowhere to put the page, and nothing is cached —
+> which looks like the middleware not working. `X-Askr-Cache` on the response tells you
+> which it is: `MISS`/`HIT` means the cache is on, no header at all means it isn't.
+
+
 Page caching is rare in Laravel not because it's slow to set up, but because keeping
 the tags right is a job nobody wants: one forgotten dependency serves stale content,
 so teams switch it off. Askr can watch instead.
