@@ -42,6 +42,18 @@ impl Resp {
 /// One request/response over a fresh connection. `Connection: close` keeps the
 /// reply trivially parseable: everything after the blank line is the body.
 fn request(port: u16, method: &str, path: &str, extra: &[(&str, &str)]) -> Resp {
+    request_with_body(port, method, path, extra, "")
+}
+
+/// Same, with a request body. Sets Content-Length, since a PHP request that reads
+/// `php://input` gets nothing without it.
+fn request_with_body(
+    port: u16,
+    method: &str,
+    path: &str,
+    extra: &[(&str, &str)],
+    body: &str,
+) -> Resp {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut sock = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .unwrap_or_else(|e| panic!("connect to {addr}: {e}"));
@@ -59,7 +71,11 @@ fn request(port: u16, method: &str, path: &str, extra: &[(&str, &str)]) -> Resp 
             req.push_str(&format!("{k}: {v}\r\n"));
         }
     }
+    if !body.is_empty() {
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
     req.push_str("\r\n");
+    req.push_str(body);
     sock.write_all(req.as_bytes()).unwrap();
 
     let mut reader = BufReader::new(sock);
@@ -297,6 +313,27 @@ impl Server {
 
     fn admin_status(&self) -> String {
         request(self.admin, "GET", "/api/status", &[]).body
+    }
+
+    /// Block until the admin plane accepts connections.
+    ///
+    /// `wait_ready` waits for the *request* listener; the admin server binds on its own
+    /// thread a moment later, so a test that goes straight at it races startup and fails
+    /// with "Connection refused" perhaps one run in ten. A flaky test is worse than no
+    /// test — it teaches you to re-run instead of read.
+    fn wait_admin(&self) {
+        let addr: SocketAddr = format!("127.0.0.1:{}", self.admin).parse().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "admin plane never came up on {addr}; log:\n{}",
+            self.log_contents()
+        );
     }
 
     fn log_has(&self, needle: &str) -> bool {
@@ -1071,6 +1108,8 @@ listen = "127.0.0.1:{ADMIN}"
         &[("ASKR_ADMIN_TOKEN", "s3cret")],
     );
 
+    s.wait_admin();
+
     let health = get(s.admin, "/healthz");
     assert_eq!(
         health.status,
@@ -1108,5 +1147,58 @@ listen = "127.0.0.1:{ADMIN}"
         authed.status, 200,
         "token should open it: {:?}",
         authed.body
+    );
+}
+
+/// Worker mode must hand the raw request body *and* its content type to the worker
+/// script, because that's the only way a urlencoded form post can be reconstructed.
+///
+/// Askr parses multipart bodies itself (it has to, to stream files to disk) but passes
+/// `application/x-www-form-urlencoded` through untouched — and Symfony's
+/// `Request::create()` fills the POST bag from its `$parameters` argument only, never
+/// from the body. `examples/laravel-worker.php` therefore has to parse it, and it didn't:
+/// every classic HTML form post in a Laravel app lost its fields, which surfaced as a 419
+/// on submit because `_token` was missing. Found against a real Laravel 13 app.
+///
+/// This pins the contract the fix depends on. It runs in per-request mode, where the same
+/// data reaches PHP as `$_SERVER` + `php://input`, so it needs no Laravel.
+#[test]
+fn a_urlencoded_post_body_reaches_php_intact_with_its_content_type() {
+    let dir = unique_dir("urlencoded");
+    let app = r#"<?php
+$raw = file_get_contents('php://input');
+$type = $_SERVER['CONTENT_TYPE'] ?? '(none)';
+parse_str($raw, $parsed);
+echo "type=$type|raw=$raw|token=" . ($parsed['_token'] ?? '(missing)');
+"#;
+    let config = r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+"#;
+    let s = Server::start_in(dir, &[("index.php", app)], config);
+
+    let r = request_with_body(
+        s.port,
+        "POST",
+        "/",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        "_token=abc123&email=a%40b.c",
+    );
+    assert_eq!(r.status, 200, "log:\n{}", s.log_contents());
+    assert!(
+        r.body.contains("type=application/x-www-form-urlencoded"),
+        "content type must survive: {:?}",
+        r.body
+    );
+    assert!(
+        r.body.contains("raw=_token=abc123&email=a%40b.c"),
+        "body must arrive byte-for-byte (a webhook signature depends on it): {:?}",
+        r.body
+    );
+    assert!(
+        r.body.contains("token=abc123"),
+        "the body must be parseable into fields: {:?}",
+        r.body
     );
 }

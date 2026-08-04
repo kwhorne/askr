@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.2; ARCH=$(uname -m)
+VER=v1.4.3; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.2     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.3     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.2-full`) are the same server built with the optional features
+The `-full` tags (`1.4.3-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,32 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.3
+
+**Upgrade if you run Laravel in worker mode**, and take the new worker script with it —
+the fixes are in `examples/laravel-worker.php`, so a new binary alone changes nothing if
+you copied the old script into your project:
+
+```bash
+docker pull ghcr.io/kwhorne/askr:1.4.3
+composer update kwhorne/askr-laravel        # for the cache/queue config fix
+# using your own copy of the worker script? re-copy it:
+docker run --rm ghcr.io/kwhorne/askr:1.4.3 \
+  sh -lc 'cat /opt/askr/examples/laravel-worker.php' > storage/askr-worker.php
+```
+
+What changes for you:
+
+- **Authenticated requests no longer leak between visitors.** If you ran worker mode with
+  sessions before 1.4.3, this was happening — quietly, and only on workers that had
+  served a login.
+- **HTML form posts work.** If you saw unexplained 419s on submit and worked around them
+  with a header or by disabling CSRF for a route, undo that.
+- **File downloads and streamed responses have bodies.** Anything you thought was a Flux,
+  Livewire or download bug is worth re-testing.
+- **`CACHE_STORE=askr` works without editing `config/cache.php`.** The manual entry the
+  package README documented is now optional; keeping it changes nothing.
 
 ### To 1.4.2
 

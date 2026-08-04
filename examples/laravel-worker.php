@@ -68,6 +68,23 @@ $handler = function (array $r) use ($app, $kernel): int {
     // so ->store()/->move() use rename() instead of move_uploaded_file() (the
     // request didn't go through PHP's rfc1867 handler). This is the Octane model.
     $post = $r['post'] ?? [];
+
+    // Askr parses multipart bodies (it has to, to stream the files to disk), but a
+    // plain `application/x-www-form-urlencoded` body arrives as raw bytes — and
+    // Request::create() fills the POST bag from its $parameters argument only, never
+    // from $content. Without this, every classic HTML form post loses its fields: the
+    // visible symptom is a 419 on submit, because _token isn't there to compare, and
+    // the invisible one is $request->input('email') being empty.
+    //
+    // Only urlencoded bodies are parsed. Multipart is already done, JSON is decoded by
+    // Laravel itself on demand, and anything else must stay untouched — a webhook that
+    // verifies a signature over the raw body would break if we reinterpreted it.
+    if ($post === [] && $r['body'] !== '' && $r['body'] !== null) {
+        $type = strtolower($server['CONTENT_TYPE'] ?? '');
+        if (str_starts_with($type, 'application/x-www-form-urlencoded')) {
+            parse_str($r['body'], $post);
+        }
+    }
     $files = [];
     foreach ($r['files'] ?? [] as $f) {
         $uploaded = new Illuminate\Http\UploadedFile(
@@ -107,7 +124,19 @@ $handler = function (array $r) use ($app, $kernel): int {
     foreach ($response->headers->getCookies() as $cookie) {
         header('Set-Cookie: ' . $cookie->__toString(), false);
     }
-    echo $response->getContent();
+    // A plain Response hands us a string. A BinaryFileResponse or StreamedResponse —
+    // `response()->file()`, `->stream()`, `->streamDownload()`, `Storage::download()` —
+    // returns *false* from getContent() and produces its body in sendContent() instead.
+    // Echoing false printed nothing, so those routes answered 200 with an empty body.
+    // That's how Flux UI's /flux/flux.js arrived as 0 bytes, which silently killed dark
+    // mode and every other piece of Flux interactivity in a real app; file downloads and
+    // streamed exports were empty the same way.
+    $content = $response->getContent();
+    if ($content === false) {
+        $response->sendContent();
+    } else {
+        echo $content;
+    }
 
     $kernel->terminate($request, $response);
 
@@ -134,6 +163,60 @@ function askr_reset_state($app): void
     // Auth: forget resolved guards so a user from a prior request can't leak.
     if ($app->resolved('auth')) {
         $app->make('auth')->forgetGuards();
+    }
+
+    // Session: forgetting the guards is not enough on its own. SessionManager caches
+    // the *driver*, and the driver holds the loaded session id and payload — so the
+    // next request reused the previous visitor's session and resolved their user, even
+    // with no cookie sent at all. Observed in a real app: after one login, anonymous
+    // requests landing on that worker were redirected to the dashboard as that user.
+    if ($app->resolved('session')) {
+        $app->make('session')->forgetDrivers();
+    }
+
+    // …and `session.store` with it. This is the one that actually bit: it's a *separate*
+    // singleton binding holding the Store instance, so forgetDrivers() alone left the
+    // previous visitor's loaded session in the container. SessionGuard is constructed
+    // with session.store, so a brand-new guard built from a brand-new driver still
+    // resolved the old user. Measured in a real app: after one login, 6 of 6 anonymous
+    // requests with no cookie were served as that user.
+    $app->forgetInstance('session.store');
+
+    // Cookies queued for the response we just sent. Left in place they are attached to
+    // the *next* response — which for a session cookie means handing one visitor's
+    // session to another.
+    if ($app->resolved('cookie')) {
+        $cookies = $app->make('cookie');
+        if (method_exists($cookies, 'flushQueuedCookies')) {
+            $cookies->flushQueuedCookies();
+        }
+    }
+
+    // View state: shared data and, importantly, the shared $errors bag — otherwise one
+    // visitor's validation errors show up on another's page.
+    if ($app->resolved('view')) {
+        $view = $app->make('view');
+        if (method_exists($view, 'flushState')) {
+            $view->flushState();
+        }
+    }
+
+    // Locale, if a request switched it.
+    if ($app->resolved('translator')) {
+        $translator = $app->make('translator');
+        $locale = $app->make('config')->get('app.locale');
+        if ($locale !== null && method_exists($translator, 'setLocale')) {
+            $translator->setLocale($locale);
+        }
+    }
+
+    // Per-request log context (Laravel 10+), so one request's context doesn't annotate
+    // the next one's lines.
+    if ($app->resolved('log')) {
+        $log = $app->make('log');
+        if (method_exists($log, 'withoutContext')) {
+            $log->withoutContext();
+        }
     }
 
     // Database: roll back any transaction a request left open.

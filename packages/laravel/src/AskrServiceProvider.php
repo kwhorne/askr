@@ -41,6 +41,42 @@ final class AskrServiceProvider extends ServiceProvider
     {
         // One collector per request; the middleware turns it on and off.
         $this->app->singleton(ModelDependencies::class);
+
+        $this->registerDefaultConnections();
+    }
+
+    /**
+     * Give the cache store and queue connection a definition so the drivers are usable.
+     *
+     * Registering a driver with `extend()` is not enough: Laravel's CacheManager and
+     * QueueManager look the *name* up in config first, so `CACHE_STORE=askr` used to fail
+     * with "Cache store [askr] is not defined" — a message that says nothing about this
+     * package or what to add, and which only appears on the first request that touches
+     * the cache, so the app looks fine until it suddenly isn't.
+     *
+     * Only fills in what the application hasn't defined, so an app that sets its own
+     * `cache.stores.askr` (a different prefix, say) keeps it.
+     */
+    private function registerDefaultConnections(): void
+    {
+        $config = $this->app['config'];
+
+        if (! $config->get('cache.stores.askr')) {
+            $config->set('cache.stores.askr', ['driver' => 'askr']);
+        }
+
+        if (! $config->get('queue.connections.askr')) {
+            $config->set('queue.connections.askr', [
+                'driver' => 'askr',
+                'queue' => 'default',
+                'retry_after' => 90,
+                'after_commit' => false,
+            ]);
+        }
+
+        // Sessions need no store definition — SESSION_DRIVER=askr works off the custom
+        // creator alone — and broadcasting resolves through the factory, so neither is
+        // listed here.
     }
 
     public function boot(): void
@@ -53,8 +89,8 @@ final class AskrServiceProvider extends ServiceProvider
             return new AskrSessionHandler((int) $app['config']->get('session.lifetime', 120) * 60);
         });
 
-        // Cache: CACHE_STORE=askr (add 'askr' => ['driver' => 'askr'] to config/cache.php,
-        // or set CACHE_STORE=askr with the default store definition).
+        // Cache: CACHE_STORE=askr. The store definition is supplied by
+        // registerDefaultConnections() unless the app defines its own.
         $this->app->make('cache')->extend('askr', function ($app) {
             return $app->make('cache')->repository(
                 new AskrStore((string) $app['config']->get('cache.prefix', ''))

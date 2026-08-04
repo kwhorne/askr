@@ -3,6 +3,61 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.3 — 2026-08-04
+
+Everything here was found by putting a real application on Askr — Laravel 13 with Flux
+Pro, ElyraSQL as the database, in Docker — rather than by reading the code. **If you run
+Laravel in worker mode, upgrade: two of these are correctness bugs that affect every
+app.**
+
+### Fixed — `examples/laravel-worker.php`
+
+- **Authenticated state leaked between visitors.** After one login, anonymous requests
+  with no cookie at all were served as that user — measured at 6 of 6 on the worker that
+  handled the login. `forgetGuards()` and `forgetDrivers()` were already there and were
+  not enough: **`session.store` is a separate singleton binding** holding the loaded
+  Store, and `SessionGuard` is constructed from it, so a brand-new guard built from a
+  brand-new driver still resolved the previous visitor's session. Now forgotten with the
+  rest, along with queued cookies (which would otherwise attach one visitor's
+  `Set-Cookie` to another's response), shared view state including the `$errors` bag,
+  the locale and per-request log context. Verified after the fix: 12 of 12 requests with
+  the cookie stay logged in, 12 of 12 without it are strangers.
+
+- **Every classic HTML form post lost its fields.** Askr parses multipart bodies itself
+  but passes `application/x-www-form-urlencoded` through untouched, and Symfony's
+  `Request::create()` fills the POST bag from its `$parameters` argument only — never
+  from the body. So `_token` was missing and every submit answered **419**, which looks
+  like a CSRF bug and is really an empty request. Isolated with one decisive experiment:
+  the token in the body failed, the same token in the `X-CSRF-TOKEN` header succeeded.
+  Only urlencoded bodies are parsed; multipart is already done, JSON is decoded by
+  Laravel on demand, and anything else stays byte-for-byte so a webhook signature still
+  verifies.
+
+- **File and streamed responses were empty.** `getContent()` returns `false` for
+  `BinaryFileResponse` and `StreamedResponse`, and `echo false` prints nothing, so
+  `response()->file()`, `->stream()`, `->streamDownload()` and `Storage::download()`
+  answered 200 with no body. In the test app that meant **Flux UI's `/flux/flux.js`
+  arrived as 0 bytes, which silently killed dark mode** and every other piece of Flux
+  interactivity. The body is now produced with `sendContent()` when there is no string
+  to echo. 0 → 619 302 bytes.
+
+### Fixed — `kwhorne/askr-laravel`
+
+- **`CACHE_STORE=askr` failed with "Cache store [askr] is not defined".** Registering a
+  driver with `extend()` isn't enough; the managers look the *name* up in config first.
+  The provider now supplies `cache.stores.askr` and `queue.connections.askr` unless the
+  application defines its own, so the environment variable is all you need. The old
+  failure only appeared on the first request that touched the cache, so the app looked
+  fine until it suddenly wasn't — in the test app, `/login` was a 500 while `/` was fine.
+
+### Tests
+
+- An e2e test pins the contract the form-post fix depends on: a urlencoded body reaches
+  PHP byte-for-byte with its `CONTENT_TYPE`.
+- Fixed a flaky test of our own: the `/healthz` test went straight at the admin plane,
+  which binds on its own thread slightly after the request listener, so it failed on
+  roughly one run in ten with "Connection refused". The harness now waits for it.
+
 ## 1.4.2 — 2026-08-04
 
 A review pass over the whole codebase, plus the port-80 gap it kept pointing at. Nine

@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v1.4.2</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v1.4.3</strong> &nbsp;·&nbsp; MIT
 </p>
 
 <p align="center">
@@ -51,7 +51,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v1.4.2; ARCH=$(uname -m)
+VER=v1.4.3; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -100,7 +100,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 - [Upgrading](docs/UPGRADING.md) — how to upgrade and roll back, what to adopt per version, and what can bite you
 
-## What works today (1.4.2)
+## What works today (1.4.3)
 
 - Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
 - **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -207,6 +207,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 | **1.4.0** — caching you can trust: **`askr cache-report`** measures what caching would buy *and whether it's safe*, and the **`askr.cache`** middleware tags pages with the models they read | ✅ |
 | **1.4.1** — security patch: PHP diagnostics go to the log, not into the response body ([UPGRADING](docs/UPGRADING.md#to-141)) | ✅ |
 | **1.4.2** — review pass: port 80 redirects while ACME runs, `/healthz`, admin denies by default, 0600 keys, verified tarball checksum | ✅ |
+| **1.4.3** — worker-mode correctness, found by putting a real Laravel + Flux app on Askr: auth no longer leaks between visitors, form posts work, file responses have bodies | ✅ |
 | **Post-1.0** — durable-tier polish, per-site worker pools, and the experiments tracked in the issue tracker (AI/LLM cache, Varnish-grade edge cache, P2P cluster). | 🔭 |
 
 1.0 is a frozen, stress-validated base. The benchmark against FrankenPHP/FPM/RoadRunner

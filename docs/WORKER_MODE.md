@@ -9,6 +9,27 @@ in-process (no IPC).
 On a real Laravel + Livewire app this drops per-request latency from ~110 ms to
 ~9 ms and roughly **9×**'s throughput.
 
+
+## What has to be reset between requests
+
+A booted app that serves many requests must forget the previous one, and the list is
+longer than it looks. `examples/laravel-worker.php` clears:
+
+| State | Why it matters |
+|---|---|
+| `session.store` **and** the session manager's drivers | A separate singleton holds the loaded Store. Forgetting only the drivers left the previous visitor's session in the container, and a fresh guard built from a fresh driver still resolved **their user** — anonymous requests were served as someone who had logged in. |
+| Auth guards | The resolved user. |
+| Queued cookies | Otherwise one visitor's `Set-Cookie` is attached to the next response. |
+| Shared view state (incl. `$errors`) | One visitor's validation errors appearing on another's page. |
+| Scoped instances + the `request` | Anything bound per request. |
+| Open DB transactions | A request that died mid-transaction would poison the next one. |
+| Locale, log context, `Str` caches | Smaller drift, same class of bug. |
+
+If you maintain your own worker script, copy that function rather than writing your own
+list — the session one in particular is not obvious, and its failure mode is silent.
+`askr serve --paranoid` snapshots mutable state after each reset and reports anything that
+keeps growing.
+
 ## How it works
 
 The embed shim registers one PHP function:

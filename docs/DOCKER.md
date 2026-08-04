@@ -13,7 +13,7 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:1.4.2      # exact — use this in production
+ghcr.io/kwhorne/askr:1.4.3      # exact — use this in production
 ghcr.io/kwhorne/askr:1.4        # latest 1.4.x
 ghcr.io/kwhorne/askr:latest
 ```
@@ -43,7 +43,7 @@ the optional tiers compiled in — the **durable L2 SQL Anywhere backends**
 source:
 
 ```
-ghcr.io/kwhorne/askr:1.4.2-full
+ghcr.io/kwhorne/askr:1.4.3-full
 ghcr.io/kwhorne/askr:1.4-full
 ghcr.io/kwhorne/askr:full
 ```
