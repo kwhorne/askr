@@ -204,9 +204,19 @@ fn verify_sha256(file: &Path, sumfile: &Path) -> Result<()> {
     if want.len() != 64 {
         bail!("malformed checksum file");
     }
+    // Hashed in chunks rather than via `io::copy`: from digest 0.11 a hasher is no
+    // longer an `io::Write`, and a release tarball shouldn't be read into memory
+    // whole just to checksum it.
     let mut f = std::fs::File::open(file)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut f, &mut hasher)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     let mut got = String::with_capacity(64);
     for b in hasher.finalize() {
         let _ = write!(got, "{b:02x}");
@@ -272,5 +282,79 @@ struct Cleanup(PathBuf);
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("askr-up-{name}-{n}"));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// This check decides whether we replace the running binary, so it gets a known
+    /// vector rather than a round trip.
+    #[test]
+    fn a_correct_checksum_verifies() {
+        let d = tmp("ok");
+        let file = d.join("payload");
+        std::fs::write(&file, b"hello").unwrap();
+        let sum = d.join("payload.sha256");
+        std::fs::write(
+            &sum,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  payload\n",
+        )
+        .unwrap();
+        verify_sha256(&file, &sum).expect("the published hash of \"hello\" must verify");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A body larger than the read buffer, to prove the chunked hashing loop (digest
+    /// 0.11 dropped `io::Write` on hashers) consumes every chunk. A loop that stopped
+    /// after the first read would happily accept a truncated download.
+    #[test]
+    fn hashing_spans_more_than_one_buffer() {
+        let d = tmp("big");
+        let file = d.join("payload");
+        let body: Vec<u8> = (0..200 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &body).unwrap();
+
+        let mut h = Sha256::new();
+        h.update(&body);
+        let want: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let sum = d.join("payload.sha256");
+        std::fs::write(&sum, format!("{want}  payload\n")).unwrap();
+        verify_sha256(&file, &sum).expect("a multi-chunk file must verify");
+
+        // Truncating the file must now fail against the same checksum.
+        std::fs::write(&file, &body[..1024]).unwrap();
+        assert!(
+            verify_sha256(&file, &sum).is_err(),
+            "a truncated download must not pass"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_wrong_or_malformed_checksum_is_refused() {
+        let d = tmp("bad");
+        let file = d.join("payload");
+        std::fs::write(&file, b"x").unwrap();
+
+        let wrong = d.join("wrong.sha256");
+        std::fs::write(&wrong, format!("{}  payload\n", "0".repeat(64))).unwrap();
+        assert!(verify_sha256(&file, &wrong).is_err());
+
+        let malformed = d.join("malformed.sha256");
+        std::fs::write(&malformed, "not-a-hash\n").unwrap();
+        assert!(verify_sha256(&file, &malformed).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

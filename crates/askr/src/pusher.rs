@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use fastwebsockets::upgrade::UpgradeFut;
 use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use tokio::sync::mpsc;
 
@@ -277,6 +277,18 @@ pub fn is_ws_path(path: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// A published HMAC-SHA256 vector. The round-trip test below signs and verifies
+    /// with the same code, so it would still pass if a dependency bump changed what
+    /// we compute — this one wouldn't. Pusher clients reject a wrong signature, and a
+    /// silently different one looks like an auth bug in the app.
+    #[test]
+    fn hmac_sha256_matches_the_known_vector() {
+        assert_eq!(
+            sign("key", "The quick brown fox jumps over the lazy dog"),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+    }
 
     #[test]
     fn subscription_signature_roundtrip() {

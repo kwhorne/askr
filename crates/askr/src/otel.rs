@@ -18,7 +18,7 @@ use opentelemetry::global;
 use opentelemetry::trace::{Span, SpanKind, TraceContextExt, Tracer, TracerProvider as _};
 use opentelemetry::{Context, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 
 /// A child span within a request: a named phase with a start offset (from request
@@ -71,9 +71,13 @@ impl Otel {
             .map_err(|e| tracing::warn!(error = %e, "otel: exporter build failed"))
             .ok()?;
 
-        let resource = Resource::new([KeyValue::new("service.name", service)]);
+        // From opentelemetry_sdk 0.32 the resource is built rather than constructed,
+        // and the batch exporter picks its own runtime instead of being handed one.
+        let resource = Resource::builder()
+            .with_attribute(KeyValue::new("service.name", service))
+            .build();
         let provider = SdkTracerProvider::builder()
-            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+            .with_batch_exporter(exporter)
             .with_resource(resource)
             .build();
         let tracer = provider.tracer("askr");
