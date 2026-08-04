@@ -120,10 +120,14 @@ done
 tag if the secret is missing, and asserts the tag landed — but verify anyway:
 
 ```bash
-gh api "repos/kwhorne/askr-laravel/git/ref/tags/v$V" --jq .ref
-curl -s "https://repo.packagist.org/p2/kwhorne/askr-laravel.json" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['packages']['kwhorne/askr-laravel'][0]['version'])"
+./scripts/publish-laravel-package.sh --check
 ```
+
+It exits `0` published, `1` genuinely not published, `2` couldn't tell (usually an
+api.github.com rate limit — 60 requests an hour unauthenticated). The three are
+deliberately distinct: an early version of this script reported a freshly published tag
+as **MISSING** when it had merely been rate-limited, which is a false alarm in the one
+tool whose job is telling you the truth about a release.
 
 ### Publishing by hand
 

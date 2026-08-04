@@ -21,17 +21,50 @@ trap cleanup EXIT
 
 cd "$(dirname "$0")/.."
 
-published() {
-  local tag=$1 ok=0
-  if curl -fsS "https://api.github.com/repos/$REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
-    echo "  tag $tag        present in $REPO"
-  else
-    echo "  tag $tag        MISSING from $REPO"; ok=1
+# "I could not ask" is not the same answer as "it is not there". Unauthenticated
+# api.github.com allows 60 requests an hour, and this script's first version reported a
+# freshly published tag as MISSING when it had merely been rate-limited — a false alarm
+# in the one tool whose job is to tell you the truth about a release. So: 200 means
+# present, 404 means absent, anything else means unknown and says so.
+#
+# Prefers `gh api` when it's available, since that's authenticated and effectively
+# unlimited.
+tag_state() {
+  local tag=$1 code out
+  if command -v gh >/dev/null 2>&1; then
+    if out=$(gh api "repos/$REPO/git/ref/tags/$tag" 2>&1); then
+      echo present; return
+    fi
+    # gh exits non-zero for "not there" and for "something went wrong" alike, so read
+    # the message: a definite 404 must not be downgraded to "unknown".
+    case "$out" in
+      *"Not Found"* | *404*) echo absent; return ;;
+    esac
   fi
-  local vs
-  vs=$(curl -fsS "https://repo.packagist.org/p2/$REPO.json" 2>/dev/null \
-       | python3 -c 'import json,sys; print(" ".join(p["version"] for p in json.load(sys.stdin)["packages"]["'"$REPO"'"][:5]))' \
-       2>/dev/null || echo "")
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+         "https://api.github.com/repos/$REPO/git/ref/tags/$tag" 2>/dev/null || echo 000)
+  case "$code" in
+    200) echo present ;;
+    404) echo absent ;;
+    *) echo "unknown:$code" ;;
+  esac
+}
+
+published() {
+  local tag=$1 ok=0 state vs
+  state=$(tag_state "$tag")
+  case "$state" in
+    present) echo "  tag $tag        present in $REPO" ;;
+    absent) echo "  tag $tag        MISSING from $REPO"; ok=1 ;;
+    *) echo "  tag $tag        could not verify (HTTP ${state#unknown:} from api.github.com — rate limit?)"; ok=2 ;;
+  esac
+
+  if ! vs=$(curl -fsS "https://repo.packagist.org/p2/$REPO.json" 2>/dev/null); then
+    echo "  packagist       could not reach repo.packagist.org"
+    [ "$ok" = 0 ] && ok=2
+    return $ok
+  fi
+  vs=$(printf '%s' "$vs" | python3 -c 'import json,sys; print(" ".join(p["version"] for p in json.load(sys.stdin)["packages"]["'"$REPO"'"][:5]))' 2>/dev/null || echo "")
   if [[ " $vs " == *" $tag "* ]]; then
     echo "  packagist       serves $tag"
   else
@@ -43,8 +76,14 @@ published() {
 if [ "${1:-}" = "--check" ]; then
   TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || git tag --sort=-v:refname | head -1)
   echo "checking $TAG"
-  published "$TAG" && echo "published." || { echo "NOT fully published."; exit 1; }
-  exit 0
+  published "$TAG" && { echo "published."; exit 0; }
+  rc=$?
+  if [ "$rc" = 2 ]; then
+    echo "INCONCLUSIVE — could not determine. Not the same as broken; try again." >&2
+    exit 2
+  fi
+  echo "NOT fully published." >&2
+  exit 1
 fi
 
 TAG="${1:-$(git describe --tags --exact-match HEAD 2>/dev/null || true)}"

@@ -70,15 +70,28 @@ jobs:
       # isn't installable; re-run the job after publishing and it goes green.
       - name: Verify the release is installable
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          # Authenticated: unauthenticated api.github.com allows 60 requests an hour per
+          # IP, and reporting "not published" because we were rate-limited would be a
+          # false alarm on a perfectly good release. GITHUB_TOKEN can read a public repo.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
+          API="repos/kwhorne/askr-laravel/git/ref/tags/$TAG"
           for i in 1 2 3 4 5 6; do
-            if curl -fsS "https://api.github.com/repos/kwhorne/askr-laravel/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            if out=$(gh api "$API" 2>&1); then
               echo "$TAG is present in kwhorne/askr-laravel"
               exit 0
             fi
-            echo "waiting for $TAG to appear in kwhorne/askr-laravel ($i/6)"
+            case "$out" in
+              *"Not Found"* | *404*)
+                echo "not there yet ($i/6)" ;;
+              *)
+                # Couldn't ask, which is not the same answer as "it isn't there".
+                echo "::warning::could not query kwhorne/askr-laravel: $out"
+                echo "$out" ;;
+            esac
             sleep 10
           done
           echo "::error::$TAG is not in kwhorne/askr-laravel, so Packagist cannot serve it. Run scripts/publish-laravel-package.sh, then re-run this job."
