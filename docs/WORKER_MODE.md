@@ -267,9 +267,9 @@ What is ruled out, and what is not:
 |---|---|
 | The transport | **Clean.** 619 KB through `echo`, through `readfile`, and through static serving all complete |
 | A from-source Linux build | Reproduces **only** with the application in the picture |
-| The remaining contradiction | PHP reports a normal completion while the Rust side says it never stopped handing over work |
+| The contradiction that gave it away | PHP reported a normal completion while the Rust side said it never stopped handing over work. That was the clue: since PHP 8.0 `exit` is an *unwind* exit, so the script really had completed normally |
 
-Until it is understood, two things reduce the exposure rather than fix it:
+Until you can upgrade, two things reduce the exposure rather than fix it:
 
 - **Run more than one worker** (the default is one per core), so a replaced worker is not
   the only one serving.
