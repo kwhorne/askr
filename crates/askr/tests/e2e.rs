@@ -138,7 +138,25 @@ impl Server {
     /// Pass an empty `files` slice to restart without touching the app: rewriting
     /// the front controller changes its mtime, which Askr correctly reads as a
     /// deploy and refuses to restore a saved cache across.
+    ///
+    /// Retries on a lost port race. `free_port` has to release the port before the
+    /// server can bind it, so with a dozen tests starting at once another one can
+    /// take it in between — that's the harness being racy, not Askr, and it must not
+    /// look like a product failure.
     fn start_in(dir: PathBuf, files: &[(&str, &str)], config: &str) -> Server {
+        for attempt in 1..=4 {
+            match Server::try_start_in(dir.clone(), files, config) {
+                Ok(s) => return s,
+                Err(e) if e.contains("Address already in use") && attempt < 4 => {
+                    std::thread::sleep(Duration::from_millis(200 * attempt));
+                }
+                Err(e) => panic!("could not start askr: {e}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn try_start_in(dir: PathBuf, files: &[(&str, &str)], config: &str) -> Result<Server, String> {
         let app = dir.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for (rel, contents) in files {
@@ -173,20 +191,20 @@ impl Server {
             admin,
             log,
         };
-        s.wait_ready();
-        s
+        s.wait_ready()?;
+        Ok(s)
     }
 
     /// Poll until the server answers, so tests never race the PHP boot.
-    fn wait_ready(&mut self) {
+    fn wait_ready(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             if let Some(c) = self.child.as_mut() {
                 if let Ok(Some(status)) = c.try_wait() {
-                    panic!(
+                    return Err(format!(
                         "askr exited early ({status}); log:\n{}",
                         self.log_contents()
-                    );
+                    ));
                 }
             }
             let addr: SocketAddr = format!("127.0.0.1:{}", self.port).parse().unwrap();
@@ -203,13 +221,16 @@ impl Server {
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(5)));
                 if let Ok(n) = sock.read(&mut buf) {
                     if n > 0 {
-                        return;
+                        return Ok(());
                     }
                 }
             }
             std::thread::sleep(Duration::from_millis(150));
         }
-        panic!("askr did not become ready; log:\n{}", self.log_contents());
+        Err(format!(
+            "askr did not become ready; log:\n{}",
+            self.log_contents()
+        ))
     }
 
     fn log_contents(&self) -> String {
