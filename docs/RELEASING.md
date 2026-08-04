@@ -106,7 +106,7 @@ Green is a claim; these are facts.
 gh release view "v$V" --json assets --jq '.assets | length'      # expect 8
 
 MIN=${V%.*}
-for t in "$V" "$MIN" latest "$V-full" "$MIN-full" latest-full; do
+for t in "$V" "$MIN" latest "$V-full" "$MIN-full" full; do
   docker manifest inspect "ghcr.io/kwhorne/askr:$t" >/dev/null 2>&1 \
     && echo "askr:$t ok" || echo "askr:$t MISSING"
 done
