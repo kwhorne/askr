@@ -59,12 +59,46 @@ You should get your app's homepage, and a JSON blob with worker counts.
 > report itself `unhealthy` forever. That has confused us, in our own project. See
 > [DOCKER.md](DOCKER.md).
 
-### A3. Make it permanent
+### A3. Use compose instead of a long command
 
-Use the ready-made compose file in
-[`examples/docker/docker-compose.yml`](../examples/docker/docker-compose.yml), and pin an
-exact version (`askr:1.4.0`) rather than `:1.4` or `:latest` in production. Full details:
-**[DOCKER.md](DOCKER.md)**.
+For anything you'll start more than once, use
+[`examples/docker/quickstart.yml`](../examples/docker/quickstart.yml). Copy it into your
+project as `docker-compose.yml`:
+
+```bash
+curl -O https://raw.githubusercontent.com/kwhorne/askr/main/examples/docker/quickstart.yml
+mv quickstart.yml docker-compose.yml
+docker compose up          # -d to detach
+docker compose down
+```
+
+It bind-mounts the directory you run it from, so editing code needs no rebuild, and it
+adds the three things the bare `docker run` above leaves out: **worker mode** (boot
+Laravel once — this is where the speed is), a **response cache** so page caching has
+somewhere to go, and a 30-second `stop_grace_period` so `down` drains in-flight requests
+instead of cutting them off.
+
+Pointing it at a project elsewhere:
+
+```bash
+ASKR_APP_PATH=~/code/my-app docker compose -f quickstart.yml up
+```
+
+Handy once it's running:
+
+```bash
+curl localhost:9000/api/status                       # workers, mode, memory
+docker compose exec askr /opt/askr/askr tune         # what config this app wants
+docker compose logs -f                               # PHP diagnostics land here
+```
+
+### A4. For production
+
+`quickstart.yml` is for development: it mounts your code. In production, bake the code
+into an image so a deploy is a new image rather than a mutated directory — that's
+[`examples/docker/docker-compose.yml`](../examples/docker/docker-compose.yml) with its
+`Dockerfile`, read-only root filesystem and a volume for `storage/`. Pin an exact version
+(`askr:1.4.0`), not `:1.4` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
 
 Then skip to [step 4: the Laravel side](#4-the-laravel-side).
 

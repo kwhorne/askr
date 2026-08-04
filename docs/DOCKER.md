@@ -28,8 +28,11 @@ docker run --rm -p 8080:8080 -p 9000:9000 \
 ```
 
 The entrypoint is the launcher, so the command begins at `serve` — no leading `askr`.
-For a step-by-step walkthrough of this and the other install routes, see
-[INSTALL.md](INSTALL.md).
+
+For anything you start more than once, [`quickstart.yml`](../examples/docker/quickstart.yml)
+is the same thing as a compose file (`docker compose up` / `down`), with worker mode, a
+response cache and a graceful `stop_grace_period` already set. Step-by-step walkthrough
+of all the install routes: [INSTALL.md](INSTALL.md).
 
 ### `-full` variant
 

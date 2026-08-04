@@ -181,14 +181,30 @@ static void askr_register_variables(zval *track_vars_array) {
 /* lifecycle                                                         */
 /* ------------------------------------------------------------------ */
 
-/* Lowest-precedence INI defaults; an app .ini/.user.ini can still override. */
+/* Lowest-precedence INI defaults; an app .ini/.user.ini can still override.
+ *
+ * display_errors=0 + log_errors=1 is deliberate, and was once the other way round.
+ * With display_errors=1 a PHP diagnostic is written into the HTTP response body —
+ * absolute filesystem paths, and for warnings sometimes argument values — while
+ * log_errors=0 meant the operator got no record of it at all. Exactly backwards: the
+ * visitor saw what they shouldn't and the log missed what it should have caught. A
+ * framework only masks this once its own error handler is installed, so anything that
+ * trips during boot (a config file hitting a deprecation on a new PHP release) goes
+ * straight to the client. In worker mode that output also precedes the headers and
+ * corrupts the response.
+ *
+ * error_reporting stays E_ALL so nothing is hidden — it's now logged instead of served.
+ * With no error_log set, PHP writes to stderr, which is where Askr's own log goes.
+ * Developers who want diagnostics in the browser can opt back in:
+ *   ASKR_PHP_INI="display_errors=1"
+ */
 static char askr_ini[] =
     "html_errors=0\n"
     "implicit_flush=0\n"
     "output_buffering=0\n"
     "max_execution_time=0\n"
-    "display_errors=1\n"
-    "log_errors=0\n"
+    "display_errors=0\n"
+    "log_errors=1\n"
     "error_reporting=E_ALL\n"
     "register_argc_argv=0\n";
 

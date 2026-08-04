@@ -3,6 +3,48 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+- **Fixed: PHP diagnostics were written into HTTP responses instead of the log.** Askr's
+  built-in defaults were `display_errors=1` and `log_errors=0`, which is backwards for a
+  server: the visitor saw absolute filesystem paths, and the operator got no record at
+  all. Verified against the published 1.4.0 image, which served
+  `Deprecated: … in /app/vendor/laravel/framework/config/database.php` to anyone
+  requesting the homepage of a stock Laravel 12 app.
+
+  A framework masks this only once its own error handler is installed, and config files
+  are parsed before that — so anything tripping a deprecation during boot goes straight
+  to the client. In worker mode it's worse than cosmetic: the output precedes the headers
+  and truncates the page (626 bytes instead of 81 675 in testing).
+
+  Defaults are now `display_errors=0` + `log_errors=1`, with `error_reporting=E_ALL`
+  unchanged, so nothing is hidden — it's logged rather than served. With no `error_log`
+  set PHP writes to stderr, which is where Askr's log already goes. Developers who want
+  diagnostics in the browser can opt back in with `ASKR_PHP_INI="display_errors=1"`.
+
+  Covered by an e2e test that was checked against the old behaviour: it fails without the
+  fix.
+
+- **`examples/docker/quickstart.yml` — `docker compose up` for an app you already have.**
+  The existing compose file builds an image from a `Dockerfile`, which is right for
+  production and heavy for trying something. This one bind-mounts your project and runs
+  the published image, with worker mode, a response cache and a 30-second
+  `stop_grace_period` so `down` drains instead of cutting requests off. Documented in
+  [INSTALL.md](docs/INSTALL.md).
+
+- **A step-by-step install guide** ([`docs/INSTALL.md`](docs/INSTALL.md)), including how
+  to put a site on HTTPS three different ways — and the honest limitation that
+  `force_https` cannot redirect port 80 while Askr terminates TLS itself, because nothing
+  listens there ([Askr-45](https://github.com/kwhorne/askr/issues)).
+
+- **A release checklist** ([`docs/RELEASING.md`](docs/RELEASING.md)) and
+  `scripts/publish-laravel-package.sh`, after the Laravel package silently stopped
+  reaching Packagist for three weeks while every workflow reported success.
+
+- **`scripts/check-docs.py`** validates every Markdown link *and* `#anchor`; CI runs it.
+  Broken anchors are invisible on GitHub — the link renders fine and lands at the top of
+  the page.
+
 ## 1.4.0 — 2026-08-04
 
 Two halves of one idea: **find out what's safe to cache, then cache it correctly

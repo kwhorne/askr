@@ -986,3 +986,44 @@ root = "{}"
     assert!(a.body.contains("site-a"), "got {:?}", a.body);
     assert!(b.body.contains("site-b"), "got {:?}", b.body);
 }
+
+/// PHP diagnostics must reach the operator's log, never the visitor's browser.
+///
+/// Askr's built-in defaults were `display_errors=1` + `log_errors=0`, so a notice was
+/// written into the response body — absolute filesystem paths and all — and nowhere
+/// else. The published 1.4.0 image demonstrably served
+/// `Deprecated: … in /app/vendor/laravel/framework/config/database.php` to anyone who
+/// asked for the homepage, in both worker and per-request mode, because a framework
+/// masks this only once its own error handler is installed and config files are parsed
+/// before that. In worker mode the output also preceded the headers and corrupted the
+/// response entirely.
+#[test]
+fn php_diagnostics_are_logged_not_served() {
+    let dir = unique_dir("diagnostics");
+    let app = "<?php trigger_error('path /etc/askr/secret.php', E_USER_DEPRECATED); echo 'OK';";
+    let config = r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+"#;
+    let s = Server::start_in(dir, &[("index.php", app)], config);
+
+    let r = get(s.port, "/");
+    assert_eq!(r.status, 200, "log:\n{}", s.log_contents());
+
+    // The visitor sees the page and nothing about our filesystem.
+    assert_eq!(r.body.trim(), "OK", "diagnostics leaked into the response");
+    assert!(
+        !r.body.contains("Deprecated") && !r.body.contains("secret.php"),
+        "diagnostics leaked into the response: {:?}",
+        r.body
+    );
+
+    // The operator sees the diagnostic. Suppressing it in the body is only correct if
+    // it lands somewhere — silently dropping it would trade one failure for another.
+    assert!(
+        s.log_has("secret.php"),
+        "diagnostic reached neither the body nor the log:\n{}",
+        s.log_contents()
+    );
+}

@@ -1,0 +1,70 @@
+# Askr quick start — serve an existing app, no image build.
+#
+# Copy this into your Laravel project as `docker-compose.yml` and run:
+#
+#     docker compose up          # start (Ctrl-C or `docker compose down` to stop)
+#     docker compose down
+#
+# Or keep it where it is and point it at a project:
+#
+#     ASKR_APP_PATH=~/code/my-app docker compose -f quickstart.yml up
+#
+# Your app is bind-mounted, so editing code needs no rebuild. `vendor/` must
+# already be installed — Askr serves your project, it doesn't build it.
+#
+# This is for development and for trying Askr. For production, bake your code into
+# an image instead: see docker-compose.yml and Dockerfile next to this file, and
+# ../../docs/DOCKER.md.
+#
+# Useful once it's up:
+#
+#     curl localhost:8080/                      your app
+#     curl localhost:9000/api/status            workers, mode, memory
+#     curl localhost:9000/metrics               Prometheus
+#     docker compose logs -f                    PHP diagnostics land here, not in
+#                                               the response body
+#     docker compose exec askr /opt/askr/askr tune       what config this app wants
+#     docker compose restart                    reload after changing this file
+
+services:
+  askr:
+    # Pin an exact version in anything that matters. `:1.4` follows patches.
+    image: ghcr.io/kwhorne/askr:1.4
+
+    # The entrypoint is Askr's launcher, so the command starts at `serve` —
+    # no leading `askr`.
+    command:
+      - serve
+      - --listen=0.0.0.0:8080
+      - --root=/app/public
+      # Boot Laravel once and serve many requests from it (the Octane model).
+      # This is where the speed comes from. Serving a non-Laravel app? Delete
+      # this line and it falls back to a fresh interpreter per request.
+      - --worker-script=/opt/askr/examples/laravel-worker.php
+      # One worker per core. Askr scales by processes, not threads.
+      - --workers=4
+      # Somewhere to keep cached pages. Without it the `askr.cache` middleware
+      # sets its header, Askr has nowhere to put the page, and nothing caches.
+      - --response-cache=512
+      # Status, metrics and reload API. The image's healthcheck polls this, so a
+      # container started without it works but reports itself unhealthy forever.
+      - --admin=0.0.0.0:9000
+
+    environment:
+      # Where the worker script boots the app from.
+      ASKR_APP_BASE: /app
+
+    ports:
+      - "8080:8080"
+      # Admin plane on localhost only — it can reload workers and read metrics.
+      # It logs a warning about binding a non-loopback address: that's about the
+      # address *inside* the container. Docker only exposes it to 127.0.0.1 here.
+      # Set ASKR_ADMIN_TOKEN if you publish it more widely.
+      - "127.0.0.1:9000:9000"
+
+    volumes:
+      - ${ASKR_APP_PATH:-.}:/app
+
+    # Let the graceful drain finish on `docker compose down` (SIGTERM), so
+    # in-flight requests complete instead of being cut off.
+    stop_grace_period: 30s
