@@ -24,12 +24,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A missing token used to `exit 0`, so this job reported success while
+      # publishing nothing — and the package sat months behind on Packagist while
+      # every release showed a green check. A signal that can mean "did nothing" is
+      # worse than no signal. Now: fail on a version tag (a release that doesn't
+      # publish is a broken release), warn loudly on an ordinary push.
       - name: Subtree split + push to standalone main
         env:
           TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
         run: |
           set -euo pipefail
-          [ -n "$TOKEN" ] || { echo "no ASKR_LARAVEL_SPLIT_TOKEN secret set — skipping split"; exit 0; }
+          if [ -z "$TOKEN" ]; then
+            MSG="ASKR_LARAVEL_SPLIT_TOKEN is not set, so kwhorne/askr-laravel was not updated. Add a fine-grained PAT with Contents: read/write on that repo."
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              echo "::error::$MSG This tag has NOT been published to Packagist."
+              exit 1
+            fi
+            echo "::warning::$MSG"
+            exit 0
+          fi
           git subtree split --prefix=packages/laravel -b split
           git push --force \
             "https://x-access-token:${TOKEN}@github.com/kwhorne/askr-laravel.git" \
@@ -42,8 +55,8 @@ jobs:
           GH_TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
         run: |
           set -euo pipefail
-          [ -n "$GH_TOKEN" ] || { echo "no ASKR_LARAVEL_SPLIT_TOKEN secret set — skipping release"; exit 0; }
-          [ -n "${SPLIT_SHA:-}" ] || { echo "split was skipped — nothing to release"; exit 0; }
+          [ -n "$GH_TOKEN" ] || { echo "::error::no ASKR_LARAVEL_SPLIT_TOKEN secret"; exit 1; }
+          [ -n "${SPLIT_SHA:-}" ] || { echo "::error::split produced nothing to release"; exit 1; }
           TAG="${GITHUB_REF_NAME}"
           gh release create "$TAG" \
             --repo kwhorne/askr-laravel \
@@ -51,6 +64,25 @@ jobs:
             --title "askr-laravel ${TAG#v}" \
             --notes "Laravel drivers for Askr ${TAG#v}. See the main CHANGELOG: https://github.com/kwhorne/askr/blob/main/CHANGELOG.md" \
             || echo "release $TAG already exists — skipping"
+
+      # "Success" has to mean "published". Confirm the tag really exists in the split
+      # repo rather than trusting that the steps above did what they printed.
+      - name: Verify the tag landed in the split repo
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.ASKR_LARAVEL_SPLIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          for i in 1 2 3 4 5; do
+            if gh api "repos/kwhorne/askr-laravel/git/ref/tags/$TAG" >/dev/null 2>&1; then
+              echo "$TAG is present in kwhorne/askr-laravel"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$TAG is missing from kwhorne/askr-laravel — Packagist will not see this release."
+          exit 1
 
       # Belt-and-braces auto-update: ping Packagist after the split push, so the
       # package refreshes even without a GitHub webhook / the Packagist app.
