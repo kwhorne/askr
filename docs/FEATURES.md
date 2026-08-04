@@ -102,6 +102,14 @@ Things worth knowing:
 - A request that can't produce the configured identity (no such header or cookie)
   isn't limited: the rule simply doesn't apply to it.
 
+### Which rules should you actually add?
+
+Don't guess — measure. [`askr cache-report`](CLI.md#askr-cache-report) watches real
+traffic without caching anything, then tells you the hit rate each rule would have
+reached, the PHP time it would have saved, and whether the page was **byte-identical
+for every visitor** during the sample. Pages that only look cacheable are flagged and
+kept out of the suggested config.
+
 ### Cache rules — policy without touching the app
 
 Everything above assumes you can edit the application. Sometimes you can't: a legacy

@@ -5,7 +5,7 @@ askr <command> [options]
 ```
 
 Commands: [`serve`](#askr-serve), [`test`](#askr-test), [`replay`](#askr-replay),
-[`doctor`](#askr-doctor), [`tune`](#askr-tune), [`config-check`](#askr-config-check),
+[`doctor`](#askr-doctor), [`tune`](#askr-tune), [`cache-report`](#askr-cache-report), [`config-check`](#askr-config-check),
 [`upgrade`](#askr-upgrade). Run `askr <command> --help` for the built-in help.
 
 Global: `-V`/`--version`, `-h`/`--help`. Logging verbosity is `RUST_LOG` (e.g.
@@ -136,6 +136,57 @@ askr replay /var/lib/askr/errors/<id>.json
 Pre-flight checks: PHP build, extensions (required + recommended), platform
 (io_uring probe on Linux). `--ini <LINES>` to load opcache. Exit non-zero on
 critical failure.
+
+## `askr cache-report`
+
+Measure what caching would buy **before** caching anything — and whether it would be
+safe:
+
+```bash
+askr serve --config askr.toml --traffic-log /tmp/traffic.jsonl   # run for an hour
+askr cache-report /tmp/traffic.jsonl
+```
+
+```
+  pattern                        ttl    hit PHP saved  safety
+  ----------------------------------------------------------------------------------
+  /products/*                    60s    94%    1.48 s/m  ✓ identical for every visitor
+  /dashboard                     94%   ...    0.11 s/m  ✗ unsafe: 15 responses differed
+  /login                         88%   ...    0.06 s/m  ✗ unsafe: 8 responses set a cookie
+  /                              88%   ...    0.05 s/m  ✓ identical for every visitor
+
+  Safe rules alone would have removed 73% of the PHP time above.
+
+  Suggested askr.toml:
+    [[cache.rule]]
+    path = "/products/*"
+    ttl = 60
+```
+
+The reason full-page caching is rare isn't performance, it's uncertainty: nobody knows
+how much a rule would win, or whether it would serve one visitor's page to everyone.
+
+`--traffic-log` writes one JSON line per request **that ran PHP** — so it describes the
+work still being done, not what the cache already absorbed — including a hash of the
+response body. `cache-report` then groups URLs into patterns (`/products/1421` →
+`/products/*`), simulates each TTL, and for every candidate checks the question a
+hit-rate estimate can't answer:
+
+> did the same URL ever return **different bytes** inside the TTL window?
+
+If it did, the page is personalised and caching it would be a bug — so it's marked
+unsafe and left out of the suggested config. `Set-Cookie` in the response is likewise
+disqualifying. Pages whose *requests* carried cookies get a warning rather than a
+refusal, because those cookies may be analytics only (see
+[`ignore_cookies`](CONFIGURATION.md#cache)).
+
+The report states what it doesn't know: a sample shorter than a minute is flagged as
+too short to extrapolate, and "identical for every visitor" means during the sample —
+not forever.
+
+`--traffic-log` is a diagnostic, not a permanent setting. It costs one `write` per
+PHP-served request and the file grows with traffic; turn it on, learn something, turn
+it off.
 
 ## `askr tune`
 

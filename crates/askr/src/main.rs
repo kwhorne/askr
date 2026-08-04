@@ -22,6 +22,7 @@ mod http3;
 mod metrics;
 #[cfg(feature = "observ")]
 mod observ_sql;
+mod oracle;
 #[cfg(feature = "otel")]
 mod otel;
 mod php;
@@ -326,6 +327,11 @@ enum Command {
         /// or `-` for stdout. Off if unset.
         #[arg(long)]
         access_log: Option<PathBuf>,
+
+        /// Record one line per PHP-served request here, for `askr cache-report` to
+        /// analyse. A diagnostic: run it for an hour, then turn it off.
+        #[arg(long)]
+        traffic_log: Option<PathBuf>,
     },
 
     /// Run tests by forking a fresh, warm process per test file (#5-style CoW).
@@ -365,6 +371,19 @@ enum Command {
         /// Extra php.ini lines (e.g. to load opcache).
         #[arg(long)]
         ini: Option<String>,
+    },
+
+    /// Analyse a traffic log and report what caching would buy — and whether it
+    /// would be safe.
+    CacheReport {
+        /// Traffic log written by `serve --traffic-log`.
+        file: PathBuf,
+        /// TTLs to try, in seconds.
+        #[arg(long, value_delimiter = ',', default_value = "60,300,3600")]
+        ttl: Vec<u64>,
+        /// How many URL patterns to list.
+        #[arg(long, default_value_t = 15)]
+        top: usize,
     },
 
     /// Measure the app and suggest workers, memory caps and cache sizes.
@@ -468,6 +487,7 @@ fn main() -> anyhow::Result<()> {
             pusher,
             pusher_secret,
             access_log,
+            traffic_log,
         } => {
             // The config file, when given, is the single source of truth.
             #[allow(clippy::type_complexity)]
@@ -563,6 +583,7 @@ fn main() -> anyhow::Result<()> {
                     pusher_secret: pusher_secret
                         .or_else(|| std::env::var("ASKR_PUSHER_SECRET").ok()),
                     access_log,
+                    traffic_log,
                     sandbox: sandbox || !sandbox_write.is_empty(),
                     sandbox_write,
                     shadow_to,
@@ -757,6 +778,11 @@ fn main() -> anyhow::Result<()> {
             } else {
                 supervise(listener, config, ini, workers, admin_listen, sidecars)
             }
+        }
+        Command::CacheReport { file, ttl, top } => {
+            let ttls: Vec<u64> = ttl.into_iter().filter(|t| *t > 0).collect();
+            anyhow::ensure!(!ttls.is_empty(), "--ttl needs at least one positive value");
+            oracle::report(&file, &ttls, top.clamp(1, 200))
         }
         Command::Tune {
             root,

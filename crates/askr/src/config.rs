@@ -203,6 +203,10 @@ pub struct ServerSection {
     /// state, `https`, or an `X-Forwarded-Proto` header to decide.
     #[serde(default)]
     pub force_https: bool,
+    /// One JSONL line per PHP-served request, for `askr cache-report` to analyse.
+    /// A diagnostic: turn it on for an hour, then turn it off.
+    #[serde(default)]
+    pub traffic_log: Option<PathBuf>,
     /// Proxies whose `X-Forwarded-For` may be believed, as IPs or CIDRs
     /// (`10.0.0.0/8`). Without this, a forwarded header is ignored — otherwise
     /// anyone could rotate a fake client IP and walk straight past a rate limit.
@@ -412,6 +416,7 @@ impl Default for ServerSection {
             listen: "127.0.0.1:8000".into(),
             root: PathBuf::from("public"),
             front: default_front(),
+            traffic_log: None,
             trusted_proxies: Vec::new(),
             workers: default_workers(),
             workers_min: None,
@@ -709,6 +714,7 @@ impl FileConfig {
                 pusher: self.pusher.enabled,
                 pusher_secret: self.pusher.secret,
                 access_log: self.server.access_log,
+                traffic_log: self.server.traffic_log,
                 sandbox: self.server.sandbox || !self.server.sandbox_write.is_empty(),
                 sandbox_write: self.server.sandbox_write,
                 shadow_to: self.server.shadow_to,

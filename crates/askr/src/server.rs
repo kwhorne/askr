@@ -97,6 +97,9 @@ pub struct Config {
     pub pusher_secret: Option<String>,
     /// Access-log destination: a file path, or `-` for stdout. Off if None.
     pub access_log: Option<PathBuf>,
+    /// Traffic-log destination for `askr cache-report`: one JSONL line per request
+    /// that ran PHP, including a hash of the response body. Off if None.
+    pub traffic_log: Option<PathBuf>,
     /// Harden workers (Linux): seccomp no-exec + (with write paths) Landlock.
     pub sandbox: bool,
     /// Directories the sandbox may write to (enables the Landlock filesystem
@@ -171,6 +174,7 @@ pub(crate) struct Runtime {
     pusher: Arc<PusherHub>,
     pusher_enabled: bool,
     access: Option<Mutex<Box<dyn std::io::Write + Send>>>,
+    traffic: Option<Mutex<Box<dyn std::io::Write + Send>>>,
     shadow: Option<crate::shadow::Shadow>,
     #[cfg(feature = "observ")]
     observ: Option<crate::observ_sql::TelemetrySink>,
@@ -179,6 +183,23 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    /// Record one request for the cache oracle (`askr cache-report`).
+    ///
+    /// Called only for responses that actually ran PHP, which is the point: the log
+    /// describes the work still being done, not what the cache already absorbed. The
+    /// body hash is what lets the report prove whether a URL is identical for every
+    /// visitor \u{2014} the one question a hit-rate estimate can't answer.
+    fn record_traffic(&self, sample: crate::oracle::Sample) {
+        let Some(w) = &self.traffic else {
+            return;
+        };
+        // One `write` per request, like the access log: `File` is unbuffered, so this
+        // is a single syscall and nothing is held across an await.
+        if let Ok(mut w) = w.lock() {
+            let _ = writeln!(w, "{}", sample.to_line());
+        }
+    }
+
     /// Write one structured (JSON) access-log line, if access logging is on.
     fn log_access(
         &self,
@@ -322,6 +343,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let pusher_enabled = config.pusher;
     let access = open_access_log(config.access_log.as_deref());
+    let traffic = open_access_log(config.traffic_log.as_deref());
     let shadow = config
         .shadow_to
         .as_ref()
@@ -338,6 +360,7 @@ pub async fn run(
         pusher: Arc::new(PusherHub::default()),
         pusher_enabled,
         access,
+        traffic,
         shadow,
         #[cfg(feature = "observ")]
         observ: crate::observ_sql::TelemetrySink::from_env(),
@@ -908,6 +931,41 @@ where
             }
             // `PASS` makes a rule-bypassed path visible in the response, so you can
             // tell "not cacheable" from "a rule said no" with curl.
+            // Cache oracle: record what this request cost and what it returned, so
+            // `askr cache-report` can tell the operator whether caching it would be
+            // both worthwhile and safe. Off unless --traffic-log is set.
+            if rt.traffic.is_some() {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                resp.body.hash(&mut h);
+                let set_cookie = resp
+                    .headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("set-cookie"));
+                let opted_in = resp
+                    .headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("askr-cache"));
+                rt.record_traffic(crate::oracle::Sample {
+                    ts_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    method: parts.method.as_str().to_string(),
+                    host: host.clone(),
+                    path: parts.uri.path().to_string(),
+                    query: parts.uri.query().unwrap_or("").to_string(),
+                    // "Carried cookies" means cookies that count as identity — the
+                    // ones already excused by `ignore_cookies` shouldn't scare anyone.
+                    cookie: !anonymous,
+                    set_cookie,
+                    status: resp.status,
+                    bytes: resp.body.len() as u64,
+                    php_us,
+                    body_hash: h.finish(),
+                    opted_in,
+                });
+            }
             let state = if passed {
                 Some("PASS")
             } else {

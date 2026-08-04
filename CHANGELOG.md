@@ -3,6 +3,43 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+- **`askr cache-report` — the cache oracle.** Measure what caching would buy before
+  caching anything:
+
+  ```bash
+  askr serve --traffic-log /tmp/traffic.jsonl    # run for an hour
+  askr cache-report /tmp/traffic.jsonl
+  ```
+
+  ```
+  pattern            ttl    hit PHP saved  safety
+  /products/*        60s    94%    1.48 s/m  ✓ identical for every visitor
+  /dashboard         60s    94%    0.11 s/m  ✗ unsafe: 15 responses differed for the same URL
+  /login             60s    88%    0.06 s/m  ✗ unsafe: 8 responses set a cookie
+  ```
+
+  The reason full-page caching is rare in PHP isn't performance, it's uncertainty —
+  nobody knows how much a rule would win, or whether it would serve one visitor's page
+  to everyone. Askr sees every request *and* every response body, so it can answer both
+  from real traffic without changing a byte of what it serves.
+
+  The decisive check isn't the hit rate, it's this: **did the same URL ever return
+  different bytes inside the TTL window?** If so the page is personalised, caching it
+  would be a bug, and it's excluded from the config the report offers you to paste.
+  `Set-Cookie` disqualifies too; cookies on the *request* are a warning rather than a
+  refusal, since they may be analytics only.
+
+  `--traffic-log` records one line per request that ran PHP — so it describes the work
+  still being done, not what the cache already absorbed — at the cost of one `write`
+  per request. URLs are grouped into patterns (`/products/1421` → `/products/*`) so the
+  output is the handful of rules an operator would actually write.
+
+  The report is explicit about its own limits: a sample shorter than a minute is flagged
+  as too short to extrapolate, and "identical for every visitor" means during the
+  sample, not forever.
+
 ## 1.3.0 — 2026-08-04
 
 The foundation release. No new features — instead, the thing that was missing under

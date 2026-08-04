@@ -871,6 +871,82 @@ canary_min_requests = 25
     assert_eq!(get(s.port, "/").status, 200);
 }
 
+/// The cache oracle records real traffic and tells you what caching would buy — and,
+/// crucially, refuses to recommend a page that isn't identical for every visitor.
+#[test]
+fn the_cache_oracle_separates_safe_pages_from_personalised_ones() {
+    let app = r#"<?php
+$uri = strtok($_SERVER['REQUEST_URI'] ?? '/', '?');
+// Identical for everyone.
+if ($uri === '/about') { echo "<h1>About us</h1>"; exit; }
+// Looks cacheable, renders per visitor — the trap.
+if ($uri === '/dashboard') { echo "user " . bin2hex(random_bytes(4)); exit; }
+echo "home";
+"#;
+    let dir = unique_dir("oracle");
+    let log = dir.join("traffic.jsonl");
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+workers = "1"
+traffic_log = "{}"
+"#,
+        log.to_str().unwrap()
+    );
+    let mut s = Server::start_in(dir, &[("index.php", app)], &config);
+
+    for _ in 0..6 {
+        assert_eq!(get(s.port, "/about").status, 200);
+        assert_eq!(get(s.port, "/dashboard").status, 200);
+    }
+    s.stop_gracefully();
+
+    let recorded = std::fs::read_to_string(&log).expect("traffic log should exist");
+    assert!(
+        recorded.lines().count() >= 12,
+        "expected a line per PHP-served request, got {}",
+        recorded.lines().count()
+    );
+
+    // Now the analysis, through the real subcommand.
+    let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args(["cache-report", log.to_str().unwrap()])
+        .output()
+        .expect("run cache-report");
+    assert!(out.status.success(), "cache-report failed");
+    let report = String::from_utf8_lossy(&out.stdout);
+
+    let line = |needle: &str| {
+        report
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line for {needle} in:\n{report}"))
+            .to_string()
+    };
+    assert!(
+        line("/about").contains("identical for every visitor"),
+        "a shared page should be recommended: {}",
+        line("/about")
+    );
+    assert!(
+        line("/dashboard").contains("unsafe"),
+        "a per-visitor page must be flagged, not recommended: {}",
+        line("/dashboard")
+    );
+    // And it must not appear in the config the operator is invited to paste.
+    let paste = report
+        .split("Suggested askr.toml")
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !paste.contains("/dashboard"),
+        "an unsafe page leaked into the suggested config:\n{paste}"
+    );
+}
+
 /// Virtual hosts route by `Host`, and one host's cache can't be served to another.
 #[test]
 fn virtual_hosts_are_isolated() {
