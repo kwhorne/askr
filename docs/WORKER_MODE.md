@@ -247,6 +247,32 @@ Recycle them periodically with `--max-requests N` (or `[server] max_requests`):
 each worker gracefully drains and exits after N requests and the master respawns
 a fresh one. See [Deployment](DEPLOYMENT.md).
 
+## Known issue: file responses can end a worker's loop
+
+**[Askr-46](https://github.com/kwhorne/askr/issues) is open.** In one real Laravel
+application, the request *following* a `BinaryFileResponse` ends the worker's loop —
+costing roughly **one request in three with a single worker**, since a worker that leaves
+its loop is replaced and the next request lands on a fresh one.
+
+What is ruled out, and what is not:
+
+| | |
+|---|---|
+| The transport | **Clean.** 619 KB through `echo`, through `readfile`, and through static serving all complete |
+| A from-source Linux build | Reproduces **only** with the application in the picture |
+| The remaining contradiction | PHP reports a normal completion while the Rust side says it never stopped handing over work |
+
+Until it is understood, two things reduce the exposure rather than fix it:
+
+- **Run more than one worker** (the default is one per core), so a replaced worker is not
+  the only one serving.
+- **Serve downloads outside the app** where you can — a static path, or object storage —
+  which avoids `BinaryFileResponse` entirely for the large files most likely to hit it.
+
+As of 1.4.4 you can at least see it happening: a worker that dies mid-request answers
+**502** rather than an empty 200, and the interpreter reports `rc`, `exit_status` and
+PHP's last error whenever the loop ends.
+
 ## Writing your own worker
 
 Any framework works — implement the same loop:
