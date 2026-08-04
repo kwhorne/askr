@@ -24,6 +24,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const HDR_MAX: usize = 8 * 1024;
 const BODY_MAX: usize = 128 * 1024;
+/// Tags one cached response may carry. A response with more is **not cached** (see
+/// `store`), because dropping the surplus would leave an entry that `forget_tag` can
+/// never reach. Mirrored as `ModelDependencies::MAX_TAGS` in the Laravel package,
+/// which degrades from per-instance to per-class tags to stay under it — keep the two
+/// in step.
 const MAX_TAGS: usize = 8;
 /// Linear-probe window (see the note in `cache.rs`). Widened so a response cache at
 /// high fill evicts less eagerly; the cost is scanning more slots on a collision.
@@ -31,6 +36,11 @@ const PROBE: usize = 16;
 const TAG_SLOTS: usize = 4096;
 /// Bytes of cache key retained per entry, for URL-targeted invalidation.
 const KEY_MAX: usize = 512;
+
+/// One warning per process for tag overflow: it's a property of the app's tagging,
+/// so repeating it per request would only bury the message.
+static TAG_OVERFLOW_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[repr(C)]
 struct Entry {
@@ -607,6 +617,24 @@ pub fn store(
     // `stale-if-error` is independent of (and usually far longer than) `swr`.
     let error_until = if ttl > 0 && sie > 0 { expires + sie } else { 0 };
 
+    // More tags than an entry can hold: refuse to cache rather than cache with
+    // invalidation that silently doesn't work. Dropping the surplus would leave an
+    // entry that `forget_tag` can never reach — stale content served until the TTL
+    // expires, which is the worst failure a cache has.
+    if tags.len() > MAX_TAGS {
+        if let Some(m) = crate::metrics::Metrics::get() {
+            m.cache_tag_overflow.fetch_add(1, Ordering::Relaxed);
+        }
+        if !TAG_OVERFLOW_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                tags = tags.len(),
+                max = MAX_TAGS,
+                "response has more cache tags than an entry can hold; not caching it.                  Tag by class (`post`) instead of per instance (`post:3`), or cache                  a smaller fragment with ESI."
+            );
+        }
+        return false;
+    }
+
     // Snapshot each tag's current generation, so a forget_tag that raced ahead
     // of this store still invalidates us.
     let ntags = tags.len().min(MAX_TAGS);
@@ -994,6 +1022,39 @@ mod tests {
         let s = get(b"GET|/swr").expect("served stale");
         assert!(s.stale);
         assert_eq!(s.body, b"swrbody");
+    }
+
+    /// Silently dropping surplus tags would leave an entry that `forget_tag` can
+    /// never reach: stale content served until the TTL runs out. Refusing to cache
+    /// is the safe failure, and it's what the Laravel package's per-class fallback
+    /// exists to avoid hitting.
+    #[test]
+    fn a_response_with_too_many_tags_is_not_cached() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        init(64);
+        flush();
+        let h = vec![("Content-Type".to_string(), "text/html".to_string())];
+
+        let many: Vec<Vec<u8>> = (0..MAX_TAGS + 1)
+            .map(|i| format!("post:{i}").into_bytes())
+            .collect();
+        assert!(
+            !store(b"GET|/many", 200, &h, b"body", 60, 0, 0, &many),
+            "more tags than an entry holds must be refused"
+        );
+        assert!(get(b"GET|/many").is_none(), "and nothing may be stored");
+
+        // Exactly at the limit is fine, and every tag still invalidates.
+        let exact: Vec<Vec<u8>> = (0..MAX_TAGS)
+            .map(|i| format!("post:{i}").into_bytes())
+            .collect();
+        assert!(store(b"GET|/exact", 200, &h, b"body", 60, 0, 0, &exact));
+        assert!(get(b"GET|/exact").is_some());
+        forget_tag(format!("post:{}", MAX_TAGS - 1).as_bytes());
+        assert!(
+            get(b"GET|/exact").is_none(),
+            "the last tag must invalidate too, not just the first few"
+        );
     }
 
     #[test]

@@ -12,6 +12,20 @@ cache, locks, queue *and* broadcasting all served from the Askr binary.
 
 ---
 
+
+## Automatic page caching
+
+```php
+Route::get('/products/{product}', ProductController::class)
+    ->middleware('askr.cache:300');
+```
+
+No tag list: the response is tagged with the models it read, so a `save()` clears
+exactly the pages that showed them. Details in the
+[package README](../packages/laravel/README.md#automatic-page-caching-askrcache);
+use [`askr cache-report`](CLI.md#askr-cache-report) to see which routes are safe to
+cache before you add it.
+
 ## What the package gives you
 
 | `.env` | Replaces | Backed by |

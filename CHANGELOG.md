@@ -5,6 +5,42 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **Automatic cache tagging for Laravel (`askr.cache` middleware).** Page caching is
+  rare in Laravel not because it's hard to switch on, but because keeping the tags
+  right is a job nobody wants — one forgotten dependency serves stale content, so
+  teams turn it off. Now there's no tag list:
+
+  ```php
+  Route::get('/products/{product}', ProductController::class)
+      ->middleware('askr.cache:300');
+  ```
+
+  The middleware records every Eloquent model the response read (the `retrieved` event)
+  and tags the cached page with them, so `$product->save()` clears exactly the pages
+  that showed that product, across every worker, immediately.
+
+  Precision while it's cheap, safety when it isn't: a response that read a few models
+  is tagged per instance (`products:42`); one that read many degrades to class tags
+  (`products`); one that touched more classes than an entry can hold isn't cached at
+  all. `create()` clears the class tag too, since a new row has no page of its own to
+  invalidate but the listing that should now include it does.
+
+  The middleware declines to cache anything it can tell isn't shared: authenticated
+  requests, responses that set a cookie, and sessions holding more than their own
+  bookkeeping.
+
+  Verified against a real Laravel 12 app, not just compiled: precise invalidation
+  (renaming one model cleared its page and left its neighbour's alone), class-level
+  degradation with 13 models, a `create()` clearing the listing while leaving the
+  per-instance page cached, and the session/cookie guards refusing to cache.
+
+- **Fixed: a response with more tags than an entry can hold is now refused, not
+  truncated.** `store()` silently kept the first 8 and dropped the rest, so
+  `forget_tag` could never reach the dropped ones — stale content served until the TTL
+  expired, which is the worst failure a cache has. It now declines to cache, warns
+  once, and counts `askr_cache_tag_overflow_total`. This is the hazard the automatic
+  tagging above deliberately degrades to avoid.
+
 - **`askr cache-report` — the cache oracle.** Measure what caching would buy before
   caching anything:
 

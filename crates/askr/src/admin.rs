@@ -324,6 +324,12 @@ fn prometheus() -> Response<Full<Bytes>> {
     );
     push_counter(
         &mut s,
+        "askr_cache_tag_overflow_total",
+        "Responses not cached because they carried more tags than an entry holds.",
+        &m.cache_tag_overflow.load(Relaxed).to_string(),
+    );
+    push_counter(
+        &mut s,
         "askr_ratelimit_blocked_total",
         "Requests refused by a [[ratelimit]] rule before reaching PHP.",
         &m.ratelimit_blocked.load(Relaxed).to_string(),

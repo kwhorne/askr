@@ -70,6 +70,8 @@ pub struct Metrics {
     pub cache_evictions: AtomicU64,
     /// KV cache writes rejected because the value exceeds the largest slot (64 KB).
     pub cache_oversize: AtomicU64,
+    /// Responses not cached because they carried more tags than an entry can hold.
+    pub cache_tag_overflow: AtomicU64,
     /// Requests refused by a `[[ratelimit]]` rule. In shared memory so the
     /// master's admin thread sees the total across all worker processes.
     pub ratelimit_blocked: AtomicU64,

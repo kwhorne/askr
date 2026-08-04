@@ -96,3 +96,60 @@ askr serve … --queue 4 --queue-script vendor/laravel/framework/… # or artisa
   full — size `--cache-large-slots` for your peak concurrent session count.
 
 MIT © Knut W. Horne
+
+## Automatic page caching (`askr.cache`)
+
+Page caching is rare in Laravel not because it's slow to set up, but because keeping
+the tags right is a job nobody wants: one forgotten dependency serves stale content,
+so teams switch it off. Askr can watch instead.
+
+```php
+Route::get('/products/{product}', ProductController::class)
+    ->middleware('askr.cache:300');              // fresh 300s
+
+Route::get('/', HomeController::class)
+    ->middleware('askr.cache:300,60,86400');     // ttl, swr, stale-if-error
+```
+
+There is no tag list. The middleware records every Eloquent model the response read
+(via the `retrieved` event) and tags the cached page with them, so `$product->save()`
+clears exactly the pages that showed that product — across every worker, immediately.
+
+**Precision while it's cheap, safety when it isn't.** A cached entry holds up to 8
+tags, so:
+
+| The response read | It's tagged | A change clears |
+| --- | --- | --- |
+| a few models | per instance (`products:42`) | only the pages showing that product |
+| many models | per class (`products`) | every page that listed products |
+| more classes than fit | nothing — and it isn't cached | — |
+
+The last row matters: Askr **refuses** to cache a response carrying more tags than an
+entry holds, rather than storing one whose invalidation silently doesn't work. A page
+you can't invalidate is worse than a page you didn't cache.
+
+Creating a model clears the class tag too — a brand-new product has no page of its own
+to invalidate, but the listing that should now include it does.
+
+### When it declines to cache
+
+The middleware only marks a response cacheable when it can tell the page is shared:
+
+- the request is a `GET`/`HEAD` returning 200;
+- nobody is authenticated (`$request->user() === null`);
+- the response sets no cookie, and the session holds nothing beyond its own
+  bookkeeping (a flash message, a cart, a session-bound form all count as "personal").
+
+The server adds its own guards underneath: only anonymous requests are cacheable at
+all, and `Set-Cookie` is stripped on store.
+
+### Find out what's worth caching first
+
+```bash
+askr serve --traffic-log /tmp/traffic.jsonl   # run for an hour
+askr cache-report /tmp/traffic.jsonl
+```
+
+That reports the hit rate each route would reach, the PHP time it would save, and —
+the part that matters — whether the page was **byte-identical for every visitor**
+during the sample. Add `askr.cache` to the routes it calls safe.

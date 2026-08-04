@@ -115,6 +115,26 @@ behind `Cache::add()` and `Cache::lock()`. The store implements Laravel's
 | pub/sub | broadcast ring + Pusher WS (see [BROADCAST](BROADCAST.md)) |
 | queues | `askr_queue_*` + `AskrQueue` driver (shared-memory, delayed + retries) |
 
+## Automatic page caching (Laravel)
+
+The `kwhorne/askr-laravel` package can derive the tags for you, so there's no list to
+keep correct:
+
+```php
+Route::get('/products/{product}', ProductController::class)
+    ->middleware('askr.cache:300');
+```
+
+Every Eloquent model the response read becomes a tag, so `$product->save()` clears
+exactly the pages that showed it. Responses that read many models degrade to
+class-level tags (`products` instead of `products:42`), and a response with more
+dependencies than an entry can hold is **not cached at all** — an entry that can't be
+invalidated is worse than a cache miss.
+
+See the [package README](../packages/laravel/README.md#automatic-page-caching-askrcache)
+for the full behaviour, and [`askr cache-report`](CLI.md#askr-cache-report) for deciding
+which routes deserve it.
+
 ## Semantics & limits
 
 - **Eviction:** the probe window (16 slots) evicts an expired entry, else the

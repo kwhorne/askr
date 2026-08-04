@@ -6,9 +6,12 @@ namespace Askr\Laravel;
 
 use Askr\Laravel\Broadcasting\AskrBroadcaster;
 use Askr\Laravel\Cache\AskrStore;
+use Askr\Laravel\Cache\ModelDependencies;
+use Askr\Laravel\Http\Middleware\CacheResponse;
 use Askr\Laravel\Queue\AskrConnector;
 use Askr\Laravel\Session\AskrSessionHandler;
 use Illuminate\Contracts\Broadcasting\Factory as BroadcastingFactory;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\ServiceProvider;
 
 /**
@@ -18,6 +21,9 @@ use Illuminate\Support\ServiceProvider;
  *   CACHE_STORE=askr           — cache, counters, rate limiting, Cache::lock()
  *   QUEUE_CONNECTION=askr      — a job queue with reserve/visibility/retry/delay
  *   BROADCAST_CONNECTION=askr  — pub/sub for Laravel Echo (SSE / Pusher-compatible)
+ *
+ * It also provides the `askr.cache` middleware: page caching whose tags are derived
+ * from the models a response read, so invalidation needs no bookkeeping.
  *
  * Each backend transparently gains a durable, replicated tier when the server
  * runs with the L2 SQL Anywhere backend (`--features sql-backend` +
@@ -31,8 +37,16 @@ use Illuminate\Support\ServiceProvider;
  */
 final class AskrServiceProvider extends ServiceProvider
 {
+    public function register(): void
+    {
+        // One collector per request; the middleware turns it on and off.
+        $this->app->singleton(ModelDependencies::class);
+    }
+
     public function boot(): void
     {
+        $this->registerAutomaticCacheTagging();
+
         // Session: SESSION_DRIVER=askr. The custom creator returns the handler;
         // Laravel's SessionManager wraps it in a Store for us.
         $this->app->make('session')->extend('askr', function ($app): AskrSessionHandler {
@@ -64,6 +78,52 @@ final class AskrServiceProvider extends ServiceProvider
         $this->app->resolving(BroadcastingFactory::class, $register);
         if ($this->app->resolved(BroadcastingFactory::class)) {
             $register($this->app->make(BroadcastingFactory::class));
+        }
+    }
+
+    /**
+     * Watch Eloquent so cached pages can be tagged with what they read, and cleared
+     * when it changes.
+     *
+     * `retrieved` names every model a request hydrated; the write events name what
+     * just became stale. Both are wildcards, so this works for models the package has
+     * never heard of — including ones in packages you didn't write.
+     */
+    private function registerAutomaticCacheTagging(): void
+    {
+        if (! function_exists('askr_cache_forget_tag')) {
+            return; // not running under Askr; stay completely out of the way
+        }
+
+        $this->app->make('router')->aliasMiddleware('askr.cache', CacheResponse::class);
+
+        $events = $this->app->make('events');
+
+        // The read side is only active while the middleware is collecting, so a
+        // request that isn't being cached pays one boolean check per hydrated model.
+        $events->listen('eloquent.retrieved: *', function (string $event, array $models): void {
+            $deps = $this->app->make(ModelDependencies::class);
+            if (! $deps->collecting()) {
+                return;
+            }
+            foreach ($models as $model) {
+                if ($model instanceof Model) {
+                    $deps->record($model);
+                }
+            }
+        });
+
+        // The write side always listens: a page cached by an earlier request has to
+        // be invalidated even if the request doing the writing isn't cacheable at all
+        // (a POST, a queue job, an artisan command).
+        foreach (['created', 'updated', 'saved', 'deleted', 'restored', 'forceDeleted'] as $verb) {
+            $events->listen("eloquent.{$verb}: *", function (string $event, array $models): void {
+                foreach ($models as $model) {
+                    if ($model instanceof Model) {
+                        ModelDependencies::forget($model);
+                    }
+                }
+            });
         }
     }
 }
