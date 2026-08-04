@@ -235,29 +235,13 @@ fn report(m: &Measurements, docroot: &Path, front: &str) {
     } else {
         1.0
     };
-    let (workers, why_workers) = if cpu_ratio >= 0.8 {
-        (
-            cores,
-            format!("{:.0}% CPU-bound ⇒ one worker per core", cpu_ratio * 100.0),
-        )
-    } else {
-        let w = ((cores as f64 / cpu_ratio.max(0.1)).round() as usize).min(cores * 4);
-        (
-            w,
-            format!(
-                "only {:.0}% CPU-bound (waits on I/O) ⇒ more workers than cores keeps them busy",
-                cpu_ratio * 100.0
-            ),
-        )
-    };
+    let (workers, why_workers) = suggest_workers(cores, cpu_ratio);
 
     // --- memory ---
     let (max_rss, why_rss) = match (m.rss_after_warmup, m.rss_final) {
         (Some(a), Some(b)) => {
             let peak = a.max(b);
-            // 2x observed peak: enough headroom for a heavier route than the one we
-            // measured, while still draining long before PHP's memory_limit.
-            let suggested = (peak * 2).max(128);
+            let suggested = suggest_max_rss(peak);
             let per_req = (b.saturating_sub(a)) as f64 / m.requests as f64;
             let why = if per_req > 0.05 {
                 format!(
@@ -321,4 +305,78 @@ fn report(m: &Measurements, docroot: &Path, front: &str) {
         "    There is no HTTP load generator here on purpose: Askr's benchmarks show PHP\n    is ~99.5% of request time, so the interpreter is the thing worth measuring."
     );
     println!("    Run this against a copy of production data, not an empty database.");
+}
+
+/// How many workers to suggest, from core count and how CPU-bound the app is.
+///
+/// The ratio is the whole point: a request that computes is best served by one
+/// worker per core, while a request that spends its time waiting on a database can
+/// share a core with several others. Capped at 4x cores — past that, memory and
+/// context switching cost more than the extra concurrency wins.
+fn suggest_workers(cores: usize, cpu_ratio: f64) -> (usize, String) {
+    if cpu_ratio >= 0.8 {
+        (
+            cores,
+            format!(
+                "{:.0}% CPU-bound \u{21d2} one worker per core",
+                cpu_ratio * 100.0
+            ),
+        )
+    } else {
+        let w = ((cores as f64 / cpu_ratio.max(0.1)).round() as usize).min(cores * 4);
+        (
+            w,
+            format!(
+                "only {:.0}% CPU-bound (waits on I/O) \u{21d2} more workers than cores keeps them busy",
+                cpu_ratio * 100.0
+            ),
+        )
+    }
+}
+
+/// Twice the observed peak, never below 128 MB: room for a heavier route than the
+/// one measured, while still draining long before PHP's own `memory_limit`. Erring
+/// low here would trade a memory leak for a recycling storm.
+fn suggest_max_rss(peak_mb: u64) -> u64 {
+    (peak_mb * 2).max(128)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_bound_apps_get_one_worker_per_core() {
+        let (w, why) = suggest_workers(8, 1.0);
+        assert_eq!(w, 8);
+        assert!(why.contains("CPU-bound"), "got {why}");
+
+        // Just over the threshold still counts as CPU-bound.
+        assert_eq!(suggest_workers(8, 0.8).0, 8);
+    }
+
+    #[test]
+    fn io_bound_apps_get_more_workers_than_cores() {
+        // Half the time waiting ⇒ roughly twice the cores.
+        assert_eq!(suggest_workers(8, 0.5).0, 16);
+        // Mostly waiting ⇒ capped at 4x cores rather than growing unbounded.
+        assert_eq!(suggest_workers(8, 0.01).0, 32);
+        assert_eq!(suggest_workers(4, 0.0).0, 16);
+        let (_, why) = suggest_workers(8, 0.1);
+        assert!(why.contains("waits on I/O"), "got {why}");
+    }
+
+    #[test]
+    fn a_single_core_machine_still_gets_a_worker() {
+        assert_eq!(suggest_workers(1, 1.0).0, 1);
+        assert!(suggest_workers(1, 0.05).0 >= 1);
+    }
+
+    #[test]
+    fn max_rss_leaves_headroom_and_has_a_floor() {
+        assert_eq!(suggest_max_rss(110), 220, "2x the observed peak");
+        // A tiny app must not be given a cap so low that normal work recycles it.
+        assert_eq!(suggest_max_rss(20), 128);
+        assert_eq!(suggest_max_rss(0), 128);
+    }
 }

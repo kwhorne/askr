@@ -1071,3 +1071,191 @@ pub(crate) fn install_signals() {
         libc::signal(libc::SIGHUP, on_reload as *const () as libc::sighandler_t);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The canary gate reads process-wide statics and the shared metrics region, so
+    /// these run one at a time.
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Reset the counters and thresholds the gate looks at.
+    fn setup(min_requests: u64, max_err_rate_pct: f64) {
+        crate::metrics::Metrics::init();
+        let m = crate::metrics::Metrics::get().expect("metrics region");
+        for st in m.per_worker.iter() {
+            st.reset();
+        }
+        CANARY_MIN_REQUESTS.store(min_requests, Ordering::SeqCst);
+        CANARY_MAX_ERR_RATE.store((max_err_rate_pct * 100.0) as u64, Ordering::SeqCst);
+        CANARY_MAX_LAT_FACTOR.store(300, Ordering::SeqCst);
+        CANARY_FLEET_REQ.store(0, Ordering::SeqCst);
+        CANARY_FLEET_ERR.store(0, Ordering::SeqCst);
+        CANARY_FLEET_US.store(0, Ordering::SeqCst);
+    }
+
+    /// Record `requests` requests on a slot, `errors` of them failing, each taking
+    /// `us` microseconds.
+    fn serve(slot: usize, requests: u64, errors: u64, us: u64) {
+        let m = crate::metrics::Metrics::get().unwrap();
+        let st = &m.per_worker[slot];
+        st.requests.fetch_add(requests, Ordering::Relaxed);
+        st.errors.fetch_add(errors, Ordering::Relaxed);
+        st.us_sum.fetch_add(requests * us, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_dead_canary_is_unhealthy() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(5, 2.0);
+        match canary_verdict(2, false) {
+            Verdict::Unhealthy { reason } => assert!(reason.contains("died"), "got {reason}"),
+            _ => panic!("a canary that isn't running can't be healthy"),
+        }
+    }
+
+    #[test]
+    fn a_quiet_canary_is_inconclusive_not_healthy() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(20, 2.0);
+        serve(0, 3, 0, 1000); // well under the minimum
+        match canary_verdict(2, true) {
+            Verdict::Inconclusive { requests, needed } => {
+                assert_eq!((requests, needed), (3, 20));
+            }
+            _ => panic!("3 requests is not evidence of health"),
+        }
+    }
+
+    #[test]
+    fn a_clean_canary_is_healthy() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(10, 2.0);
+        serve(0, 50, 0, 1000);
+        serve(1, 50, 0, 1000);
+        match canary_verdict(2, true) {
+            Verdict::Healthy { requests, err_pct } => {
+                assert_eq!(requests, 50);
+                assert!(err_pct < 0.01, "got {err_pct}");
+            }
+            Verdict::Unhealthy { reason } => panic!("should be healthy, got: {reason}"),
+            Verdict::Inconclusive { .. } => panic!("50 requests is enough to judge"),
+        }
+    }
+
+    /// The bug this replaced: errors were counted fleet-wide, so the canary was
+    /// charged for the *old* workers' failures. A site with a normal error baseline
+    /// could then never complete a reload.
+    #[test]
+    fn the_canary_is_not_blamed_for_the_fleets_errors() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(10, 2.0);
+        serve(0, 100, 0, 1000); // canary: flawless
+        serve(1, 100, 30, 1000); // fleet: 30% errors, and it's not the canary's fault
+        serve(2, 100, 30, 1000);
+        match canary_verdict(3, true) {
+            Verdict::Healthy { .. } => {}
+            Verdict::Unhealthy { reason } => {
+                panic!("a clean canary must not be aborted by the fleet's errors: {reason}")
+            }
+            Verdict::Inconclusive { .. } => panic!("plenty of traffic here"),
+        }
+    }
+
+    #[test]
+    fn a_failing_canary_is_aborted_even_when_the_fleet_is_fine() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(10, 2.0);
+        serve(0, 100, 60, 1000); // canary: 60% errors
+        serve(1, 100, 0, 1000); // fleet: clean
+        match canary_verdict(2, true) {
+            Verdict::Unhealthy { reason } => {
+                assert!(reason.contains("error rate"), "got {reason}");
+                assert!(
+                    reason.contains("60.00%"),
+                    "the reason should quote the rate: {reason}"
+                );
+            }
+            _ => panic!("60% errors against a clean fleet must abort"),
+        }
+    }
+
+    /// A relative threshold, not an absolute count: a site that always serves some
+    /// 5xx shouldn't abort every deploy.
+    #[test]
+    fn a_matching_error_rate_is_tolerated() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(10, 2.0);
+        serve(0, 100, 5, 1000); // canary 5%
+        serve(1, 100, 5, 1000); // fleet 5% — the app is just like that
+        match canary_verdict(2, true) {
+            Verdict::Healthy { .. } => {}
+            Verdict::Unhealthy { reason } => {
+                panic!("matching the fleet's baseline is not a regression: {reason}")
+            }
+            Verdict::Inconclusive { .. } => panic!("enough traffic"),
+        }
+        // But clearly worse than the fleet is.
+        setup(10, 2.0);
+        serve(0, 100, 20, 1000); // canary 20% vs fleet 5% ⇒ +15 points
+        serve(1, 100, 5, 1000);
+        assert!(matches!(canary_verdict(2, true), Verdict::Unhealthy { .. }));
+    }
+
+    #[test]
+    fn a_much_slower_canary_is_aborted() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(10, 2.0);
+        serve(0, 50, 0, 40_000); // canary: 40ms mean
+        serve(1, 50, 0, 5_000); // fleet: 5ms mean ⇒ 8× slower
+        match canary_verdict(2, true) {
+            Verdict::Unhealthy { reason } => assert!(reason.contains("latency"), "got {reason}"),
+            _ => panic!("8x the fleet's latency is a regression"),
+        }
+    }
+
+    /// Latency is only judged against a fleet that has traffic of its own —
+    /// otherwise a quiet fleet would make every canary look slow.
+    #[test]
+    fn latency_is_not_judged_against_an_idle_fleet() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(10, 2.0);
+        // The canary is slow, but the fleet served nothing — so there's no baseline.
+        serve(0, 50, 0, 40_000);
+        match canary_verdict(2, true) {
+            Verdict::Healthy { .. } => {}
+            Verdict::Unhealthy { reason } => {
+                panic!("an idle fleet is not a latency baseline: {reason}")
+            }
+            Verdict::Inconclusive { .. } => panic!("the canary itself had enough traffic"),
+        }
+    }
+
+    #[test]
+    fn fleet_totals_skip_the_canary_slot() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        setup(10, 2.0);
+        serve(0, 10, 1, 1000);
+        serve(1, 20, 2, 2000);
+        serve(2, 30, 3, 3000);
+        let (req, err, _us) = fleet_totals(0, 3);
+        assert_eq!((req, err), (50, 5), "slot 0 must be excluded");
+    }
+
+    #[test]
+    fn rollout_state_is_reported_as_text() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        for (code, want) in [
+            (0u8, "idle"),
+            (1, "rolling"),
+            (2, "ok"),
+            (3, "aborted"),
+            (4, "inconclusive"),
+        ] {
+            ROLLOUT_STATE.store(code, Ordering::SeqCst);
+            assert_eq!(rollout_state_str(), want);
+        }
+        ROLLOUT_STATE.store(0, Ordering::SeqCst);
+    }
+}

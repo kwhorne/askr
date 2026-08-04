@@ -32,8 +32,31 @@ Run the same checks CI does:
 ```bash
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace          # unit tests + the end-to-end suite
+
+# The optional features ship in the `-full` build, so CI checks them too:
+for f in sql-backend observ otel http3 "sql-backend observ otel http3"; do
+  cargo clippy --workspace --all-targets --features "$f" -- -D warnings
+done
 ```
+
+### The end-to-end suite
+
+`crates/askr/tests/e2e.rs` starts the real binary against a small PHP app and
+drives it over HTTP. It needs the embedded `libphp` from step 1 above, has no
+dependencies of its own (the HTTP client in it is deliberately small and raw), and
+cleans up its processes and temp directories even when a test fails.
+
+It exists because unit tests are the wrong shape for most of what can break here.
+Every one of these was green in `cargo test` while a real bug shipped: a shutdown
+that never completed, a canary that aborted a rollout but kept serving the broken
+build, a rate-limit counter that always read zero from the master process, a `PURGE`
+that could never match a key, and cache persistence that silently did nothing with a
+single worker. Each is now a test in that file.
+
+If you add behaviour that only shows up in a running server — process lifecycle,
+shared memory across workers, anything involving a signal — please add an e2e test
+rather than only a unit test.
 
 - **Format** with `cargo fmt` and keep `clippy` clean (no warnings).
 - **Add tests** for new behaviour where it makes sense (the pure helpers have

@@ -37,8 +37,22 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: test
+      # Unit tests plus the end-to-end suite in crates/askr/tests/, which starts
+      # the real binary and drives it over HTTP. The e2e tests need the libphp
+      # built above, which is why they live in this job.
+      - name: test (unit + end-to-end)
         run: cargo test --workspace
+
+      # The optional features are part of the published surface (they make up the
+      # `-full` build), so they have to compile clean too — a default-only check
+      # lets a feature-gated regression through.
+      - name: clippy (optional features)
+        run: |
+          for f in sql-backend observ otel http3 "sql-backend observ otel http3"; do
+            echo "::group::features: $f"
+            cargo clippy --workspace --all-targets --features "$f" -- -D warnings
+            echo "::endgroup::"
+          done
 
       - name: release build
         run: cargo build --release

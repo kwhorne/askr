@@ -168,3 +168,57 @@ pub fn rss_kb(pid: i32) -> Option<u64> {
         .ok()?;
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_stat_snapshots_and_resets() {
+        let st = WorkerStat::default();
+        assert_eq!(st.snapshot(), (0, 0, 0), "a fresh slot has no history");
+
+        st.requests.store(4, Ordering::Relaxed);
+        st.errors.store(1, Ordering::Relaxed);
+        st.us_sum.store(8_000, Ordering::Relaxed);
+        assert_eq!(st.snapshot(), (4, 1, 2_000), "mean is us_sum / requests");
+
+        // Reset is what makes a canary's counters describe only its own life, not
+        // the worker it replaced in that slot.
+        st.reset();
+        assert_eq!(st.snapshot(), (0, 0, 0));
+    }
+
+    #[test]
+    fn mean_latency_of_zero_requests_does_not_divide_by_zero() {
+        let st = WorkerStat::default();
+        st.us_sum.store(500, Ordering::Relaxed);
+        assert_eq!(st.snapshot(), (0, 0, 0));
+    }
+
+    #[test]
+    fn record_classifies_status_codes() {
+        Metrics::init();
+        let m = Metrics::get().expect("metrics region");
+        let before: Vec<u64> = m.status.iter().map(|s| s.load(Ordering::Relaxed)).collect();
+
+        m.record(200, 10, 1, 2);
+        m.record(301, 10, 1, 2);
+        m.record(404, 10, 1, 2);
+        m.record(500, 10, 1, 2);
+        m.record(503, 10, 1, 2);
+
+        let after: Vec<u64> = m.status.iter().map(|s| s.load(Ordering::Relaxed)).collect();
+        assert_eq!(after[1] - before[1], 1, "2xx");
+        assert_eq!(after[2] - before[2], 1, "3xx");
+        assert_eq!(after[3] - before[3], 1, "4xx");
+        assert_eq!(after[4] - before[4], 2, "5xx");
+    }
+
+    #[test]
+    fn rss_of_this_process_is_readable() {
+        // `tune` and the RSS recycler both depend on this working on the host.
+        let kb = rss_kb(std::process::id() as i32);
+        assert!(kb.unwrap_or(0) > 0, "should be able to read our own RSS");
+    }
+}

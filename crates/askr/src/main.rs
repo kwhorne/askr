@@ -736,7 +736,24 @@ fn main() -> anyhow::Result<()> {
                 run_cow(listener, config, ini, wmin, wmax)
             } else if !need_supervisor {
                 tracing::info!(listen = %config.listen, workers = 1, "askr serving (single process)");
-                run_worker(listener, config, ini)
+                let r = run_worker(listener, config, ini);
+                // Single-process mode has no supervisor, so the cache dump that
+                // normally happens there has to happen here — otherwise `[cache]
+                // persist` would silently do nothing with one worker. This process
+                // is the only user of the region and has stopped serving, so it's
+                // quiescent.
+                if let Some((path, stamp)) = supervisor::CACHE_PERSIST.get() {
+                    match rcache::dump(path, *stamp) {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            tracing::info!(entries = n, path = %path.display(),
+                                "response cache saved")
+                        }
+                        Err(e) => tracing::warn!(error = %e, path = %path.display(),
+                            "could not save the response cache"),
+                    }
+                }
+                r
             } else {
                 supervise(listener, config, ini, workers, admin_listen, sidecars)
             }

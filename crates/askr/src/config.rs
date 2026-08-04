@@ -763,3 +763,299 @@ impl FileConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal document root so `resolve()` can canonicalise and find a front
+    /// controller — validation is what's under test, not the filesystem.
+    fn app_dir(name: &str) -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("askr-cfg-{name}-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.php"), "<?php\n").unwrap();
+        dir
+    }
+
+    /// Resolve a config body with `{ROOT}` pointing at a throwaway app.
+    ///
+    /// `listen` is injected when absent so each test shows only the keys it's
+    /// actually about.
+    fn resolve(name: &str, body: &str) -> Result<Resolved> {
+        let dir = app_dir(name);
+        let mut text = body.replace("{ROOT}", dir.to_str().unwrap());
+        if !text.contains("listen") {
+            text = text.replace("[server]", "[server]\nlisten = \"127.0.0.1:8000\"");
+        }
+        let cfg: FileConfig = toml::from_str(&text)?;
+        let out = cfg.resolve(4);
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    fn err(name: &str, body: &str) -> String {
+        match resolve(name, body) {
+            Ok(_) => panic!("expected {name} to be rejected, but it resolved"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    const MINIMAL: &str = r#"
+[server]
+root = "{ROOT}"
+"#;
+
+    #[test]
+    fn minimal_config_resolves() {
+        let r = resolve("minimal", MINIMAL).expect("minimal config should resolve");
+        assert_eq!(r.workers, 4);
+        assert!(r.cache_persist.is_none());
+    }
+
+    /// An absent `[reload]` section must still get the documented defaults.
+    ///
+    /// This is a regression test for a booby trap: with a derived `Default`, the
+    /// canary thresholds would have been zeroed, which means "abort the rollout on
+    /// any canary error at all" for everyone who never writes a `[reload]` section.
+    #[test]
+    fn absent_reload_section_keeps_documented_defaults() {
+        let r = resolve("reload-default", MINIMAL).unwrap();
+        assert!(!r.canary_reload, "canary is opt-in");
+        assert_eq!(r.canary_window, 5);
+        assert_eq!(r.canary_min_requests, 20);
+        assert_eq!(r.canary_max_error_rate, 2.0, "must not default to zero");
+        assert_eq!(r.canary_max_latency_factor, 3.0);
+    }
+
+    #[test]
+    fn cache_rules_are_validated_at_load() {
+        // Globs, not regexes — and the message should say so.
+        let e = err(
+            "rule-regex",
+            r#"
+[server]
+root = "{ROOT}"
+[[cache.rule]]
+path = "^/admin/.*"
+action = "pass"
+"#,
+        );
+        assert!(e.contains("glob, not a regex"), "got: {e}");
+
+        assert!(err(
+            "rule-action",
+            r#"
+[server]
+root = "{ROOT}"
+[[cache.rule]]
+path = "/admin/*"
+action = "lookup"
+"#,
+        )
+        .contains("unknown action"));
+
+        assert!(err(
+            "rule-empty",
+            r#"
+[server]
+root = "{ROOT}"
+[[cache.rule]]
+path = "/admin/*"
+"#,
+        )
+        .contains("action = \"pass\" or a ttl"));
+
+        assert!(err(
+            "rule-both",
+            r#"
+[server]
+root = "{ROOT}"
+[[cache.rule]]
+path = "/admin/*"
+action = "pass"
+ttl = 60
+"#,
+        )
+        .contains("both"));
+
+        assert!(err(
+            "rule-slash",
+            r#"
+[server]
+root = "{ROOT}"
+[[cache.rule]]
+path = "admin/*"
+ttl = 60
+"#,
+        )
+        .contains("must start with '/'"));
+
+        // A valid set survives, in order.
+        let r = resolve(
+            "rule-ok",
+            r#"
+[server]
+root = "{ROOT}"
+[[cache.rule]]
+path = "/admin/*"
+action = "pass"
+[[cache.rule]]
+path = "/*"
+ttl = 300
+swr = 30
+stale_if_error = 3600
+"#,
+        )
+        .unwrap();
+        assert_eq!(r.config.cache_rules.len(), 2);
+        assert!(r.config.cache_rules[0].is_pass());
+        assert_eq!(r.config.cache_rules[1].ttl, Some(300));
+        assert_eq!(r.config.cache_rules[1].stale_if_error, 3600);
+    }
+
+    #[test]
+    fn ratelimit_rules_are_validated_at_load() {
+        assert!(err(
+            "rl-regex",
+            r#"
+[server]
+root = "{ROOT}"
+[[ratelimit]]
+path = "^/api/.*"
+limit = 5
+"#,
+        )
+        .contains("glob, not a regex"));
+
+        assert!(err(
+            "rl-zero",
+            r#"
+[server]
+root = "{ROOT}"
+[[ratelimit]]
+path = "/api/*"
+limit = 0
+"#,
+        )
+        .contains("limit > 0"));
+
+        assert!(err(
+            "rl-by",
+            r#"
+[server]
+root = "{ROOT}"
+[[ratelimit]]
+path = "/api/*"
+limit = 5
+by = "session"
+"#,
+        )
+        .contains("unknown `by`"));
+
+        // `ip` (the default), header: and cookie: forms are all accepted.
+        let r = resolve(
+            "rl-ok",
+            r#"
+[server]
+root = "{ROOT}"
+[[ratelimit]]
+path = "/login"
+limit = 5
+window = 300
+[[ratelimit]]
+path = "/api/*"
+limit = 60
+by = "header:X-Api-Key"
+burst = 20
+[[ratelimit]]
+path = "/x/*"
+limit = 1
+by = "cookie:sid"
+"#,
+        )
+        .unwrap();
+        assert_eq!(r.config.ratelimits.len(), 3);
+        assert_eq!(r.config.ratelimits[0].by, "ip", "by defaults to ip");
+        assert_eq!(r.config.ratelimits[0].window, 300);
+        assert_eq!(r.config.ratelimits[1].burst, 20);
+    }
+
+    #[test]
+    fn trusted_proxies_must_be_addresses() {
+        assert!(err(
+            "tp-bad",
+            r#"
+[server]
+root = "{ROOT}"
+trusted_proxies = ["not-an-ip"]
+"#,
+        )
+        .contains("not an IP or CIDR"));
+
+        assert!(err(
+            "tp-prefix",
+            r#"
+[server]
+root = "{ROOT}"
+trusted_proxies = ["10.0.0.0/99"]
+"#,
+        )
+        .contains("not an IP or CIDR"));
+
+        let r = resolve(
+            "tp-ok",
+            r#"
+[server]
+root = "{ROOT}"
+trusted_proxies = ["10.0.0.0/8", "::1", "192.168.1.5"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(r.config.trusted_proxies.len(), 3);
+    }
+
+    /// A typo must fail loudly rather than being silently ignored.
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let dir = app_dir("typo");
+        let text = format!(
+            "[server]\nlisten = \"127.0.0.1:8000\"\nroot = \"{}\"\nmax_requsts = 100\n",
+            dir.to_str().unwrap()
+        );
+        let parsed: Result<FileConfig, _> = toml::from_str(&text);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(parsed.is_err(), "deny_unknown_fields should catch typos");
+    }
+
+    #[test]
+    fn cache_persistence_and_keys_round_trip() {
+        let r = resolve(
+            "persist",
+            r#"
+[server]
+root = "{ROOT}"
+[cache]
+response_slots = 64
+persist = "/var/lib/askr/rcache.bin"
+persist_key = "abc123"
+strip_query_params = ["utm_*", "gclid"]
+ignore_cookies = ["_ga"]
+vary_user_agent = true
+saint_seconds = 5
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            r.cache_persist.as_deref(),
+            Some(std::path::Path::new("/var/lib/askr/rcache.bin"))
+        );
+        assert_eq!(r.cache_persist_key.as_deref(), Some("abc123"));
+        assert_eq!(r.config.cache_strip_query, vec!["utm_*", "gclid"]);
+        assert!(r.config.cache_vary_user_agent);
+        assert_eq!(r.config.cache_saint_seconds, 5);
+    }
+}

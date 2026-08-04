@@ -3,6 +3,37 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+- **An end-to-end test suite, and it found a bug immediately.** `cargo test` had 46
+  unit tests and CI never started the server or sent a single request — so every
+  feature in 1.0.1–1.2.0 was verified by hand, and nothing prevented those behaviours
+  from regressing. `crates/askr/tests/e2e.rs` now starts the real binary against a
+  small PHP app and asserts over real HTTP: caching (`HIT`/`MISS`/`PASS`),
+  `PURGE`/`BAN`, ESI assembly, cache rules, fleet-wide rate limiting, the
+  `X-Forwarded-For` bypass, source/dotfile disclosure, cache persistence across a
+  restart, virtual hosts, and all three canary verdicts (`ok`, `aborted`,
+  `inconclusive`). No new dependencies; processes and temp dirs are cleaned up even
+  when a test fails.
+
+  Within minutes of existing it caught a real gap: **`[cache] persist` silently did
+  nothing with a single worker.** With one worker and no sidecars Askr runs without a
+  supervisor, and the cache dump lived only in the supervisor's shutdown path. Fixed.
+
+- **Tests for the modules that most needed them.** 46 → 89 tests. `config.rs` now has
+  validation tests for every rule it rejects — including a regression test for the
+  `[reload]` defaults, where a derived `Default` would have meant "abort the rollout on
+  any canary error at all" for anyone who never writes that section. `supervisor.rs`
+  gained tests for the canary gate, including the specific bug it replaced: a clean
+  canary must not be aborted by the *fleet's* errors. Plus `metrics.rs` (per-worker
+  counters, status classification), `compress.rs` (negotiation, what's worth
+  compressing) and `tune.rs` (its two recommendation rules, extracted so they're
+  testable).
+
+- **CI now checks the optional features.** `sql-backend`, `observ`, `otel`, `http3` and
+  all of them together are part of the published `-full` build, but CI only ever
+  compiled the default build — a feature-gated regression could have shipped.
+
 ## 1.2.0 — 2026-07-26
 
 The operations release. 1.1 made Askr fast to *serve*; this one makes it safer to

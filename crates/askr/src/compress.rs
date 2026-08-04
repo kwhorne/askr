@@ -7,7 +7,7 @@
 //! self-contained build is unaffected.
 
 /// A negotiated content encoding.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Encoding {
     Br,
     Gzip,
@@ -107,5 +107,70 @@ pub fn maybe(
         Some((enc, out))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negotiation_prefers_brotli_then_gzip() {
+        assert_eq!(negotiate("br, gzip"), Some(Encoding::Br));
+        assert_eq!(negotiate("gzip, deflate, br"), Some(Encoding::Br));
+        assert_eq!(negotiate("gzip, deflate"), Some(Encoding::Gzip));
+        assert_eq!(negotiate("GZIP"), Some(Encoding::Gzip), "case-insensitive");
+        assert_eq!(negotiate("gzip;q=1.0"), Some(Encoding::Gzip));
+    }
+
+    #[test]
+    fn no_acceptable_encoding_means_identity() {
+        assert_eq!(negotiate(""), None);
+        assert_eq!(negotiate("identity"), None);
+        assert_eq!(negotiate("deflate"), None, "deflate alone isn't offered");
+        // A client asking for something unknown gets uncompressed bytes, not a guess.
+        assert_eq!(negotiate("zstd"), None);
+    }
+
+    #[test]
+    fn only_text_like_types_are_compressed() {
+        assert!(compressible("text/html; charset=utf-8"));
+        assert!(compressible("application/json"));
+        assert!(compressible("text/css"));
+        assert!(compressible("application/javascript"));
+        // Already-compressed payloads would only get bigger.
+        assert!(!compressible("image/png"));
+        assert!(!compressible("image/jpeg"));
+        assert!(!compressible("video/mp4"));
+        assert!(!compressible("application/zip"));
+        assert!(!compressible(""));
+    }
+
+    #[test]
+    fn compressing_actually_shrinks_repetitive_text() {
+        let body = "hello world ".repeat(500).into_bytes();
+        let out = maybe(&body, "text/html", "gzip");
+        let (enc, bytes) = out.expect("a large text body should be compressed");
+        assert_eq!(enc, Encoding::Gzip);
+        assert!(
+            bytes.len() < body.len() / 4,
+            "expected real compression, got {} from {}",
+            bytes.len(),
+            body.len()
+        );
+    }
+
+    #[test]
+    fn tiny_or_binary_bodies_are_left_alone() {
+        assert!(maybe(b"hi", "text/html", "gzip").is_none(), "not worth it");
+        let big = vec![0u8; 40_000];
+        assert!(
+            maybe(&big, "image/png", "gzip").is_none(),
+            "binary types are skipped"
+        );
+        assert!(
+            maybe(&big, "text/html", "").is_none(),
+            "no encoding negotiated"
+        );
     }
 }
