@@ -3,7 +3,12 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
-## Unreleased
+## 1.4.1 — 2026-08-04
+
+A security-relevant patch: **PHP diagnostics went to the visitor instead of the log.**
+Found while writing a docker-compose example — the published 1.4.0 image served
+filesystem paths to anyone requesting the homepage of a stock Laravel app. If you run the
+Docker image or the tarball, upgrade.
 
 - **Fixed: PHP diagnostics were written into HTTP responses instead of the log.** Askr's
   built-in defaults were `display_errors=1` and `log_errors=0`, which is backwards for a

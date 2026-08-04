@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.0; ARCH=$(uname -m)
+VER=v1.4.1; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.0     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.1     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.0-full`) are the same server built with the optional features
+The `-full` tags (`1.4.1-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,33 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.1
+
+**Upgrade if you serve with the Docker image or the release tarball.** Before 1.4.1, a
+PHP notice, warning or deprecation was written into the HTTP response body — including
+absolute filesystem paths — and *not* logged. The published 1.4.0 image served this to
+anyone requesting the homepage of a stock Laravel 12 app on PHP 8.5:
+
+```
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5 …
+in /app/vendor/laravel/framework/config/database.php on line 62
+```
+
+A framework masks this once its own error handler is installed, but config files are
+parsed before that, so boot-time diagnostics went straight to the client. In worker mode
+it also preceded the headers and truncated the page.
+
+Nothing to configure — diagnostics now go to the log. Two things to know:
+
+- **If you relied on seeing PHP errors in the browser during development**, opt back in:
+  `ASKR_PHP_INI="display_errors=1"`.
+- **Check your log volume after upgrading.** Notices that were previously discarded
+  (`log_errors` was off) are now written. If a busy app emits one per request, that's
+  real output — and a good prompt to fix the notice, since it was always there.
+
+`error_reporting` is unchanged (`E_ALL`), so nothing new is hidden; it changed
+destination, not visibility.
 
 ### To 1.4.0
 
