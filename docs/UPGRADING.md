@@ -1,0 +1,215 @@
+# Upgrading Askr
+
+The short version: **within `1.x`, an upgrade is a drop-in.** Replace the binary (or
+the image tag), reload, done. You don't need to touch `askr.toml`.
+
+That's a promise, not a hope — the surfaces that make it true are listed in
+[STABILITY.md](STABILITY.md), and every release since 1.0 has kept it. New features
+arrive as new config keys that default to off, so a config written for 1.0.0 still
+means exactly the same thing on the newest 1.x.
+
+- [How to upgrade](#how-to-upgrade)
+- [Zero-downtime upgrades](#zero-downtime-upgrades)
+- [Rolling back](#rolling-back)
+- [Version-by-version notes](#version-by-version-notes)
+- [What can actually bite you](#what-can-actually-bite-you)
+
+## How to upgrade
+
+### Release tarball (systemd install)
+
+```bash
+askr upgrade                 # downloads, verifies sha256, swaps the prefix
+sudo systemctl reload askr   # graceful; see below
+```
+
+`askr upgrade` replaces the whole prefix (binary + bundled `libphp`) atomically and
+keeps the previous version at `<prefix>/../askr.old`. It does **not** restart the
+server unless you pass `--restart`.
+
+Verify the checksum yourself if you'd rather not trust the updater:
+
+```bash
+VER=v1.3.0; ARCH=$(uname -m)
+curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
+curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
+sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
+```
+
+### Docker
+
+```bash
+docker pull ghcr.io/kwhorne/askr:1.3.0     # or :1.3 to follow patches
+```
+
+Pin the **exact** version in production and bump it deliberately. `:1.3` follows
+patch releases, `:latest` follows everything — convenient for a laptop, surprising
+on a server at 3am.
+
+The `-full` tags (`1.3.0-full`) are the same server built with the optional features
+compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
+on `-full`.
+
+### The Laravel package
+
+```bash
+composer update kwhorne/askr-laravel
+```
+
+The package and the server are versioned independently; any recent package works with
+any `1.x` server. Upgrade it when you want a new PHP-side helper.
+
+## Zero-downtime upgrades
+
+A reload replaces the workers without dropping a connection:
+
+```bash
+kill -HUP $(pidof askr)      # or: systemctl reload askr, or POST /api/reload
+```
+
+Workers finish their in-flight requests, then are replaced one at a time — there is
+always a live worker accepting. **A reload does not pick up a new Askr binary**: the
+master process is the old one. For a new binary you need a restart, which means a
+brief gap unless something in front of you retries.
+
+If you can afford one more moving part, the sturdiest sequence is:
+
+1. `askr upgrade` (new binary on disk, old one kept)
+2. `askr config-check askr.toml` — catches a config that the new version rejects
+   *before* you stop anything
+3. restart
+
+Turn on the canary so a bad **application** deploy can't take the fleet with it —
+worth having in place before you start upgrading things:
+
+```toml
+[reload]
+canary = true
+canary_window = 5
+canary_min_requests = 20
+```
+
+See [Deployment](DEPLOYMENT.md#canary-reload-zero-bad-deploy).
+
+## Rolling back
+
+- **Tarball:** the previous prefix is at `<prefix>/../askr.old`. Swap it back and
+  restart.
+- **Docker:** run the previous tag. This is why pinning matters.
+- **Config:** a config written for an older 1.x is still valid, so rolling back the
+  binary never requires rolling back `askr.toml`.
+
+Rolling back is a supported operation, not an emergency improvisation. If a downgrade
+ever fails on a config that the newer version accepted, that's a bug worth reporting —
+it means we added something that isn't additive.
+
+## Version-by-version notes
+
+Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.3.0
+
+No action needed. Internally this is a dependency refresh (including four major
+bumps) plus a much larger test suite; no user-visible behaviour changed.
+
+Two things to know:
+
+- **A persisted response cache may be dropped once.** `[cache] persist` files are
+  tied to the entry layout, and a new Askr build can invalidate them. The first boot
+  after an upgrade then starts with a cold cache and logs
+  `response cache dump ignored (different build or cache size)`. That's the guard
+  working — a cache is never reinterpreted across layouts.
+- **`ASKR_*_DB` SQLite files are opened by a newer bundled SQLite** (rusqlite 0.31 →
+  0.40). SQLite is backwards compatible with older files, so nothing to do, but take
+  your usual backup first if those hold queue jobs you can't lose.
+
+### To 1.2.0
+
+Worth adopting:
+
+```toml
+# Refuse abusive traffic before PHP wakes up — enforced across the whole fleet
+[server]
+trusted_proxies = ["10.0.0.0/8"]     # required behind a load balancer
+
+[[ratelimit]]
+path = "/login"
+limit = 5
+window = 300
+
+# Keep the cache across restarts
+[cache]
+persist = "/var/lib/askr/rcache.bin"
+persist_key = "your-release-sha"
+```
+
+- If you configure rate limits **behind a proxy and forget `trusted_proxies`**, every
+  client shares one bucket and you'll rate-limit your whole site. Askr warns at
+  startup; take the warning seriously.
+- Run `askr tune --root public` for measured starting values for `workers` and
+  `max_rss_mb`.
+- The canary gate got much better in this release (it compares the new worker against
+  the rest of the fleet instead of an absolute error count). If you'd tried `canary`
+  before and found it aborted deploys for no reason, try it again.
+
+### To 1.1.0
+
+Worth adopting: [ESI](FEATURES.md#esi--one-page-many-ttls) if a single live widget is
+what keeps a page uncacheable, `PURGE`/`BAN` for URL-targeted invalidation, and
+`[[cache.rule]]` if you need cache policy for an app you can't edit.
+
+`PURGE`/`BAN` are gated on `ASKR_ADMIN_TOKEN`, or restricted to loopback when no token
+is set. Set the token if you want to invalidate from a deploy script on another host.
+
+### To 1.0.1
+
+**Upgrade if you're on 1.0.0.** Static file serving could disclose PHP sources and
+dotfiles: `GET /index.php` returned source, and with a document root pointed at an app
+root, `GET /.env` returned `APP_KEY` and database credentials. Fixed in 1.0.1, with the
+suffixed variants (`index.php.bak`, `config.php~`) fixed in 1.1.0.
+
+While you're there, check that your document root is a dedicated `public/` directory
+and not the application root.
+
+### From 0.9.x to 1.0
+
+1.0 added no features — it froze the surface. If your `0.9.12` setup worked, 1.0 works
+identically.
+
+One deprecation carried over: `--acme-directory` became `--acme-directory-url` in
+0.9.7 (it was too easily confused with `--acme-dir`, the local certificate cache). The
+old spelling still works as a hidden alias.
+
+## What can actually bite you
+
+Honest list, in rough order of how often it happens:
+
+1. **A cold cache after a restart.** The response cache lives in shared memory. Unless
+   `[cache] persist` is set — and the dump is still valid — the first requests after
+   any restart hit PHP. Coalescing stops it becoming a stampede, but a big site
+   restarting at peak will feel it. Reload rather than restart when you can.
+2. **A config the new version rejects.** Validation gets stricter as it gets better
+   (glob patterns that look like regexes, rules with no effect, unknown keys). This is
+   deliberate — a silently ignored rule is worse — but it means
+   `askr config-check askr.toml` belongs in your deploy script, before the restart.
+3. **`libphp` and the binary are a matched pair.** A release tarball contains both.
+   Don't mix a new `askr` with an old bundled `libphp`; `askr upgrade` and the Docker
+   images handle this for you.
+4. **A PHP security release means a new Askr release.** PHP is compiled into the
+   distribution, so you can't patch it independently. Watch
+   [PHP's releases](https://www.php.net/ChangeLog-8.php) as well as ours.
+5. **Optional features live in the `-full` build.** Upgrading from a `-full` tag to a
+   plain one silently drops `sql-backend`, `observ`, `otel` and `http3`. The server
+   will start and your `ASKR_OBSERV_DSN` will simply do nothing.
+
+## After upgrading
+
+```bash
+askr doctor                    # PHP build, extensions, platform probes
+askr config-check askr.toml    # config still valid and resolving as you expect
+curl -s localhost:9000/api/status   # workers alive, version, rollout state
+```
+
+If something looks wrong, the [admin API](ADMIN.md) and the
+[observability guide](OBSERVABILITY.md) are the fastest ways to see what the server
+thinks is happening.

@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v1.2.0</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v1.3.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
 <p align="center">
@@ -51,7 +51,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v1.2.0; ARCH=$(uname -m)
+VER=v1.3.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -93,8 +93,9 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 - [Hardening / sandbox](docs/SANDBOX.md) — seccomp + Landlock (`--sandbox`)
 - [Benchmarks](docs/BENCHMARKS.md) — vs FrankenPHP, FPM+nginx, RoadRunner (reproducible)
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
+- [Upgrading](docs/UPGRADING.md) — how to upgrade and roll back, what to adopt per version, and what can bite you
 
-## What works today (1.2.0)
+## What works today (1.3.0)
 
 - Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
 - **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -193,6 +194,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 | **1.0.1** — security: static serving never discloses PHP sources or dotfiles (`.env`); `stale-if-error` + saint mode; smart cache-key normalisation | ✅ |
 | **1.1.0** — Varnish-grade cache: **ESI** fragment assembly, HTTP **`PURGE`/`BAN`**, declarative per-path **`[[cache.rule]]`** — all in-process | ✅ |
 | **1.2.0** — operations: fleet-wide **rate limiting** before PHP, canary judged against the fleet + failed canary drained, **cache survives restarts**, `askr tune` | ✅ |
+| **1.3.0** — foundation: **end-to-end tests in CI** (the server is started and driven over HTTP), advisory scanning, every dependency current, [upgrade guide](docs/UPGRADING.md) | ✅ |
 | **Post-1.0** — durable-tier polish, per-site worker pools, and the experiments tracked in the issue tracker (AI/LLM cache, Varnish-grade edge cache, P2P cluster). | 🔭 |
 
 1.0 is a frozen, stress-validated base. The benchmark against FrankenPHP/FPM/RoadRunner

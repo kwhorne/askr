@@ -5,7 +5,7 @@ embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
 memory-safe hot path, and — in worker mode — boots your app once and serves many
 requests against it, eliminating per-request framework bootstrap.
 
-> Version **1.2.0**. Production target is Linux; development also works on macOS.
+> Version **1.3.0**. Production target is Linux; development also works on macOS.
 
 > 📘 These pages are also published, with navigation and search, at
 > **[elyracode.com/docs/askr](https://elyracode.com/docs/askr)** — product information is
@@ -36,6 +36,7 @@ requests against it, eliminating per-request framework bootstrap.
 | [Admin dashboard](ADMIN.md) | The built-in status/reload/metrics API and web dashboard. |
 | [Observability](OBSERVABILITY.md) | Ship per-request logs to ElyraSQL / any MySQL-wire database (`--features observ`, `ASKR_OBSERV_DSN`) and query them with SQL. |
 | [Deployment](DEPLOYMENT.md) | Production: systemd, TLS, zero-downtime reload, recycling, scaling, hardening. |
+| [Upgrading](UPGRADING.md) | How to upgrade and roll back, what's worth adopting at each version, and an honest list of what can bite you. |
 | [Ubuntu setup](UBUNTU.md) | **Recommended production install** on Ubuntu (release tarball, systemd, TLS, tuning). |
 
 ## 60-second tour
@@ -43,7 +44,7 @@ requests against it, eliminating per-request framework bootstrap.
 Install a self-contained release (Linux x86_64 / arm64) and serve a Laravel app:
 
 ```bash
-VER=v1.2.0; ARCH=$(uname -m)
+VER=v1.3.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -57,7 +58,7 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
 Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md).
 Building from source: [Building](BUILDING.md).
 
-## What works today (1.2.0)
+## What works today (1.3.0)
 
 - Embedded PHP (non-ZTS) running real Laravel 12, **~9× the per-request/FPM model**
 - Multi-core via one worker **process per core** on a shared listen socket

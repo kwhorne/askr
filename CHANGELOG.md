@@ -3,7 +3,14 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
-## Unreleased
+## 1.3.0 — 2026-08-04
+
+The foundation release. No new features — instead, the thing that was missing under
+all of them: **CI now starts the server and drives it over HTTP**, dependency
+advisories are scanned, and every dependency is current including four major bumps.
+
+New guide: **[UPGRADING.md](docs/UPGRADING.md)** — how to upgrade, roll back, what to
+adopt at each version, and an honest list of what can actually bite you.
 
 - **An end-to-end test suite, and it found a bug immediately.** `cargo test` had 46
   unit tests and CI never started the server or sent a single request — so every
@@ -42,6 +49,20 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 - Normalised `actions/checkout` across workflows — it had drifted to three different
   versions (v4, v5 and v7), which is exactly the rot Dependabot now prevents.
   `fetch-depth: 0` is preserved where the Laravel subtree split needs full history.
+
+- **Every dependency is current, including four majors.** `rusqlite` 0.31 → 0.40,
+  `brotli` 7 → 8, `sha2` 0.10 → 0.11 (with `hmac` 0.13, which has to move in lockstep),
+  `opentelemetry` 0.27 → 0.32 (sdk + otlp together), plus 13 minor/patch updates
+  (tokio 1.53, hyper 1.11, rustls 0.23.43, …) and five workflow actions.
+
+  Crypto and integrity code doesn't get to be assumed equivalent after a bump, so both
+  got **external vectors** rather than round trips: a published HMAC-SHA256 vector for
+  Pusher subscription signing (the existing round-trip test signs and verifies with the
+  same code, so it would still pass if the computation changed), and for the release
+  verifier the published hash of `hello` plus a 200 KB body that spans several read
+  buffers — a hashing loop that stopped after one read would have accepted a truncated
+  download. OTel export was re-verified against a live Jaeger, and the L2 SQLite
+  backend against a real database file, because compiling isn't working.
 
 - **CI now checks the optional features.** `sql-backend`, `observ`, `otel`, `http3` and
   all of them together are part of the published `-full` build, but CI only ever
