@@ -30,10 +30,20 @@ struct Job {
     available_at: u64,   // unix ms — poppable when now >= this
     reserved_until: u64, // unix ms — 0 = not reserved; lapsed if now >= this
     created_at: u64,     // unix ms — when push() accepted the job; never changes
+    // The queue name, truncated, so a stuck backlog can be *named* rather than just
+    // counted. `queue_hash` alone was enough to route jobs and useless to diagnose: an
+    // app sending mail to onQueue('mail') while the worker polled 'default' left jobs
+    // ageing in the ring with nothing able to say which queue they were on.
+    name_len: u32,
+    name: [u8; QUEUE_NAME_MAX],
     attempts: u32,
     payload_len: u32,
     payload: [u8; PAYLOAD_MAX],
 }
+
+/// Longest queue name kept for reporting. Names are hashed for routing, so a longer name
+/// still works — it is only truncated in `askr_queue_stats()` output and warnings.
+const QUEUE_NAME_MAX: usize = 48;
 
 #[repr(C)]
 struct Ring {
@@ -156,6 +166,13 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
                 ptr::write(ptr::addr_of_mut!((*e).queue_hash), qh);
                 ptr::write(ptr::addr_of_mut!((*e).available_at), available_at);
                 ptr::write(ptr::addr_of_mut!((*e).created_at), created_at);
+                let n = queue.len().min(QUEUE_NAME_MAX);
+                ptr::write(ptr::addr_of_mut!((*e).name_len), n as u32);
+                ptr::copy_nonoverlapping(
+                    queue.as_ptr(),
+                    ptr::addr_of_mut!((*e).name) as *mut u8,
+                    n,
+                );
                 ptr::write(ptr::addr_of_mut!((*e).reserved_until), 0);
                 ptr::write(ptr::addr_of_mut!((*e).attempts), 0);
                 ptr::write(ptr::addr_of_mut!((*e).payload_len), payload.len() as u32);
@@ -365,6 +382,54 @@ pub fn counts(queue: &[u8]) -> Counts {
     c
 }
 
+/// Every queue that currently holds a job, with its counts — for the backlog watchdog
+/// and per-queue reporting.
+///
+/// Grouped by the stored name rather than the hash, because the point is to be able to
+/// say *which* queue is stuck. Aggregate numbers were what made today's failure hard to
+/// see: "1 job ready" was true, and told nobody that it was on `mail` while the only
+/// worker polled `default`.
+pub fn by_queue() -> Vec<(String, Counts)> {
+    let Some((p, slots)) = base() else {
+        return Vec::new();
+    };
+    let now = now_ms();
+    let mut out: std::collections::HashMap<String, Counts> = std::collections::HashMap::new();
+    for idx in 0..slots {
+        let e = unsafe { p.add(idx) };
+        let _g = Slot::lock(e);
+        unsafe {
+            if r_u64(ptr::addr_of!((*e).id)) == 0 {
+                continue;
+            }
+            let n = (ptr::read(ptr::addr_of!((*e).name_len)) as usize).min(QUEUE_NAME_MAX);
+            let name = String::from_utf8_lossy(std::slice::from_raw_parts(
+                ptr::addr_of!((*e).name) as *const u8,
+                n,
+            ))
+            .into_owned();
+            let avail = r_u64(ptr::addr_of!((*e).available_at));
+            let reserved = r_u64(ptr::addr_of!((*e).reserved_until));
+            let created = r_u64(ptr::addr_of!((*e).created_at));
+            let c = out.entry(name).or_default();
+            // Same bucket order as `counts()`, so the two can never disagree.
+            if reserved > now {
+                c.reserved += 1;
+            } else if avail > now {
+                c.delayed += 1;
+            } else {
+                c.pending += 1;
+                if c.oldest_pending_created_ms == 0 || created < c.oldest_pending_created_ms {
+                    c.oldest_pending_created_ms = created;
+                }
+            }
+        }
+    }
+    let mut v: Vec<_> = out.into_iter().collect();
+    v.sort_by(|a, b| b.1.pending.cmp(&a.1.pending).then_with(|| a.0.cmp(&b.0)));
+    v
+}
+
 pub fn size(queue: &[u8]) -> u64 {
     let Some((p, slots)) = base() else {
         return 0;
@@ -544,6 +609,61 @@ mod tests {
             counts(q).oldest_pending_created_ms,
             first,
             "a newer job must not move the oldest-pending timestamp forward"
+        );
+    }
+
+    /// The watchdog can only name a stuck queue if the name is in the ring. Before
+    /// 1.4.11 only the hash was, which routed jobs perfectly and diagnosed nothing.
+    #[test]
+    fn by_queue_names_each_backlog_separately() {
+        init(256);
+        // Unique names: the ring is a process-global, so a test that used "default" would
+        // see (and be seen by) every other test in this module. A shared fixture that
+        // passes alone and fails in a suite is worse than no fixture.
+        let (mail, deflt) = (b"bq-mail".as_slice(), b"bq-default".as_slice());
+        push(mail, b"reset link", 0);
+        push(mail, b"invitation", 0);
+        push(deflt, b"something", 0);
+        push(mail, b"later", 3600);
+
+        let by: std::collections::HashMap<String, Counts> = by_queue().into_iter().collect();
+        let m = by
+            .get("bq-mail")
+            .expect("the bq-mail queue is reported by name");
+        assert_eq!(m.pending, 2, "two available on bq-mail");
+        assert_eq!(m.delayed, 1, "one still waiting on bq-mail");
+        assert_eq!(by.get("bq-default").map(|c| c.pending), Some(1));
+        assert!(
+            m.oldest_pending_created_ms > 0,
+            "an age is what turns a count into a warning"
+        );
+
+        // This is the shape of the failure the watchdog exists for: jobs on one queue,
+        // the worker draining another. Draining `default` must leave `mail` untouched.
+        let job = pop(deflt, 90).expect("a default job");
+        assert!(delete(job.id));
+        let by: std::collections::HashMap<String, Counts> = by_queue().into_iter().collect();
+        assert!(!by.contains_key("bq-default"), "bq-default drained");
+        assert_eq!(
+            by.get("bq-mail").map(|c| c.pending),
+            Some(2),
+            "bq-mail is still stuck — exactly the state that used to be invisible"
+        );
+
+        // A name longer than the stored field must not corrupt the neighbouring fields.
+        let long = format!("bq-{}", "q".repeat(QUEUE_NAME_MAX + 20)).into_bytes();
+        push(&long, b"x", 0);
+        let by: std::collections::HashMap<String, Counts> = by_queue().into_iter().collect();
+        let truncated = String::from_utf8_lossy(&long[..QUEUE_NAME_MAX]).into_owned();
+        assert_eq!(
+            by.get(&truncated).map(|c| c.pending),
+            Some(1),
+            "a long name is truncated for reporting, not dropped"
+        );
+        assert_eq!(
+            size(&long),
+            1,
+            "routing still uses the full name, so the job is findable by its real name"
         );
     }
 

@@ -16,6 +16,10 @@ use crate::worker::run_worker;
 pub(crate) const MAX_WORKERS: usize = 512;
 // Queue autoscaling target: ~1 worker per this many ready (waiting) jobs.
 pub(crate) const QUEUE_BACKLOG_PER_WORKER: usize = 10;
+
+/// How long a job may sit available and unclaimed before Askr says so. Ten seconds of
+/// normal queue latency is unremarkable; thirty means nothing is listening.
+const STALE_BACKLOG_SECS: u64 = 30;
 pub(crate) static CHILDREN: [AtomicI32; MAX_WORKERS] = [const { AtomicI32::new(0) }; MAX_WORKERS];
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(crate) static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -533,6 +537,11 @@ pub(crate) fn supervise(
     // canary health check and the leak-aware RSS check on a timer.
     let mut last_mem_check = std::time::Instant::now();
     let mut last_queue_check = std::time::Instant::now();
+    let mut last_stale_check = std::time::Instant::now();
+    // Warned-about queues, so a persistent backlog says its piece once a minute instead of
+    // every pass. Cleared per queue as soon as it drains, so a recurrence is reported again.
+    let mut warned_stale: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
     loop {
         // Reap everything that has exited.
         loop {
@@ -708,6 +717,7 @@ pub(crate) fn supervise(
             && crate::queue::enabled()
             && last_queue_check.elapsed() >= std::time::Duration::from_secs(2)
         {
+            // (backlog watchdog runs below, independent of autoscaling)
             last_queue_check = std::time::Instant::now();
             let (ready, _total, _oldest) = crate::queue::stats();
             let desired = QUEUE_DESIRED.load(Ordering::SeqCst);
@@ -729,6 +739,57 @@ pub(crate) fn supervise(
                 }
                 tracing::info!(ready, from = desired, to = victim, "queue: scaling down");
             }
+        }
+
+        // Backlog watchdog. Jobs that sit available and unclaimed mean nothing is
+        // consuming that queue, and until 1.4.11 Askr held every number needed to say so
+        // and said nothing: a site queued its password-reset and invitation mail to
+        // `onQueue('mail')` while the only worker polled `default`, so the mail simply
+        // never went out. No exception, no log line, and a worker asleep in nanosleep.
+        //
+        // Named per queue, because the aggregate is what made it invisible — "1 job ready"
+        // was true and useless. Runs regardless of autoscaling: a fixed-size pool is
+        // exactly where this goes unnoticed.
+        if !SHUTDOWN.load(Ordering::SeqCst)
+            && last_stale_check.elapsed() >= std::time::Duration::from_secs(10)
+        {
+            last_stale_check = std::time::Instant::now();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let mut seen: Vec<String> = Vec::new();
+            for (name, c) in crate::queue::by_queue() {
+                if c.pending == 0 || c.oldest_pending_created_ms == 0 {
+                    continue;
+                }
+                let age = now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000;
+                if age < STALE_BACKLOG_SECS {
+                    continue;
+                }
+                seen.push(name.clone());
+                let due = warned_stale
+                    .get(&name)
+                    .map(|t| t.elapsed() >= std::time::Duration::from_secs(60))
+                    .unwrap_or(true);
+                if due {
+                    warned_stale.insert(name.clone(), std::time::Instant::now());
+                    let workers = QUEUE_DESIRED.load(Ordering::SeqCst);
+                    tracing::warn!(
+                        queue = %name,
+                        pending = c.pending,
+                        oldest_secs = age,
+                        queue_workers = workers,
+                        "queue backlog is not being consumed — no worker is taking jobs \
+                         from this queue. Check that a queue worker is running (--queue \
+                         with --queue-script) and that it polls this queue name \
+                         (ASKR_QUEUE, comma-separated)."
+                    );
+                }
+            }
+            // Forget queues that drained, so the next occurrence warns immediately rather
+            // than waiting out a stale cooldown.
+            warned_stale.retain(|k, _| seen.iter().any(|s| s == k));
         }
 
         if SHUTDOWN.load(Ordering::SeqCst) && CHILDREN.iter().all(|c| c.load(Ordering::SeqCst) == 0)

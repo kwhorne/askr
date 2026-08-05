@@ -5,6 +5,50 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+Two features against the same thing: **a configuration that cannot work should say so.**
+Every failure worth an afternoon on this project has been silent — a queue with no
+consumer, a worker polling the wrong name, a mailer under the vendor's variable name
+instead of Laravel's, a scheduler shelling out to a binary the image doesn't have. None of
+them produced an error. The server had every number needed to know, and said nothing.
+
+### Added
+
+- **Backlog watchdog.** The master now warns when jobs sit available and unclaimed for more
+  than 30 seconds, **naming the queue**:
+
+  ```
+  WARN queue backlog is not being consumed queue=mail pending=1 oldest_secs=144 queue_workers=2
+       — no worker is taking jobs from this queue. Check that a queue worker is running
+       (--queue with --queue-script) and that it polls this queue name (ASKR_QUEUE).
+  ```
+
+  This is the failure that prompted it: an app queued its password-reset and invitation
+  mail to `onQueue('mail')` while the only worker polled `default`. Mail stopped. No
+  exception, no log line, and a worker asleep in `nanosleep` — the diagnosis came from
+  `/proc/<pid>/wchan`, which is not where anyone should have to look.
+
+  Naming the queue required storing the name in the ring; only the hash was there, which
+  routes jobs perfectly and diagnoses nothing. The aggregate count was actively misleading:
+  "1 job ready" was true and said nothing about *which* queue. Warns once a minute per
+  queue, and forgets a queue as soon as it drains so a recurrence is reported immediately.
+  Runs regardless of autoscaling — a fixed-size pool is exactly where this goes unnoticed.
+
+- **`askr doctor --app <path>`** checks the application against the environment it will run
+  in, and exits non-zero so it can gate a deploy. It greps `app/` for `onQueue()` and
+  `$queue =` and compares them with `ASKR_QUEUE`; flags `SESSION_DRIVER=askr` without slots
+  (which loses sessions quietly and surfaces as 419 on every form); catches
+  `MAIL_MAILER=resend` with neither `RESEND_KEY` nor `RESEND_API_KEY`; and warns that
+  scheduled `->command()` tasks shell out to a `php` binary the image does not have.
+
+  Verified against a real 235-file application: it found `imports, mail, webhooks` and would
+  have failed this morning's deploy with the exact fix in the message.
+
+  Output distinguishes `•` observation from `✓` verified from `✗` failure. A tick on "this
+  needs `--cache-large-slots`" claimed something was confirmed when nothing was — doctor
+  cannot see the flags a later `serve` will get, and a tick that means "noted" teaches you
+  to skim ticks.
+
+
 - **Documented that WebSocket requires HTTP/1.1** ([Askr-49]). HTTP/2 forbids the
   `Connection` and `Upgrade` headers, so the upgrade check never matches, the request falls
   through to the front controller, and Laravel answers a perfectly correct **404** with

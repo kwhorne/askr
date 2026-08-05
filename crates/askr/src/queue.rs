@@ -38,6 +38,18 @@ pub fn stats() -> (usize, usize, u64) {
     crate::squeue::stats()
 }
 
+/// Every queue holding a job, with its counts, from the active backend.
+///
+/// Named rather than aggregated on purpose: the backlog watchdog exists to say *which*
+/// queue is not being drained, and an aggregate count cannot.
+pub fn by_queue() -> Vec<(String, crate::squeue::Counts)> {
+    #[cfg(feature = "sql-backend")]
+    if crate::squeue_sql::enabled() {
+        return crate::squeue_sql::by_queue();
+    }
+    crate::squeue::by_queue()
+}
+
 /// Register the PHP queue bridge with the appropriate backend.
 pub fn register_bridge() {
     #[cfg(feature = "sql-backend")]

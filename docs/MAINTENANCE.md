@@ -10,6 +10,22 @@ the two differ, both commands are given.
 
 ---
 
+## Before you deploy: `doctor --app`
+
+```bash
+docker compose exec askr /opt/askr/askr doctor --app /var/www/example.com
+sudo -u askr /opt/askr/askr doctor --app /var/www/example.com     # tarball install
+```
+
+It checks the *application* against the environment it will run in, and exits non-zero on a
+configuration that cannot work — so it can gate a deploy. Every check in it is a failure
+that has actually happened: a queue name no worker polls, `SESSION_DRIVER=askr` without
+slots, a mailer configured under the wrong variable name, scheduled `->command()` tasks with
+no `php` binary to shell out to. See [CLI.md](CLI.md#--app-path).
+
+Run it after any change to `.env`, and after adding a job or notification — a new
+`onQueue('reports')` is a queue nothing polls until you say so.
+
 ## The 30-second check
 
 ```bash
@@ -293,6 +309,7 @@ instead of guessing:
 | `accept failed` with `EMFILE` | Out of file descriptors. Raise `LimitNOFILE` in the unit. |
 | `canary UNHEALTHY` | The reload aborted and you're still on the old code. Good. |
 | `tag_overflow` | A response had more cache tags than Askr can track, so it wasn't cached. Not an error, but it means that page is uncached. |
+| `queue backlog is not being consumed` | Jobs are available and nothing is taking them. The line names the queue. Either no queue worker is running (`--queue` with `--queue-script`), or it doesn't poll that name (`ASKR_QUEUE`, comma-separated). |
 
 For anything that *looks* fine but behaves wrong — interactivity that dies after the first
 page load, an anonymous visitor served as somebody else, 419 on every form, empty
@@ -352,6 +369,8 @@ Each of these has actually gone wrong.
 | Build the frontend before `.env` is right | `VITE_*` is baked in at build time. |
 | Pipe a `docker compose` command to `/dev/null` | An orphaned container held a port through several "successful" recreates. |
 | Trust a probe on `/api/status` | It's gated. Use `/healthz`. |
+| Set `--queue-slots` without `--queue`/`--queue-script` | The ring accepts jobs nothing consumes. Queued mail then fails with no error, no log line and no mail. |
+| Add `onQueue('new-name')` without adding it to `ASKR_QUEUE` | The worker polls a fixed list. Anything else ages in the ring. |
 | Leave `--traffic-log` on forever | Append-only, no rotation, one line per request, body hashes included. |
 
 ---

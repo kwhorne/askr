@@ -237,6 +237,39 @@ pub fn size(queue: &[u8]) -> u64 {
     with_conn(|c| do_size(c, queue)).unwrap_or(0) as u64
 }
 
+/// Every queue holding a job, with its counts — the L2 twin of
+/// [`crate::squeue::by_queue`]. Names come from the table, so no truncation applies here.
+pub fn by_queue() -> Vec<(String, crate::squeue::Counts)> {
+    with_conn(|c| {
+        let mut st = c.prepare(
+            "SELECT queue,
+               count(*) FILTER (WHERE (reserved_until IS NULL OR reserved_until <= unixepoch())
+                    AND available_at <= unixepoch()),
+               count(*) FILTER (WHERE (reserved_until IS NULL OR reserved_until <= unixepoch())
+                    AND available_at > unixepoch()),
+               count(*) FILTER (WHERE reserved_until IS NOT NULL
+                    AND reserved_until > unixepoch()),
+               coalesce(min(created_at) FILTER (WHERE
+                    (reserved_until IS NULL OR reserved_until <= unixepoch())
+                    AND available_at <= unixepoch()), 0) * 1000
+             FROM askr_jobs GROUP BY queue ORDER BY 2 DESC, 1",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                crate::squeue::Counts {
+                    pending: r.get::<_, i64>(1)?.max(0) as u64,
+                    delayed: r.get::<_, i64>(2)?.max(0) as u64,
+                    reserved: r.get::<_, i64>(3)?.max(0) as u64,
+                    oldest_pending_created_ms: r.get::<_, i64>(4)?.max(0) as u64,
+                },
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+    })
+    .unwrap_or_default()
+}
+
 /// Per-queue counts; zeros when the backend is unreachable, matching `size()`.
 pub fn counts(queue: &[u8]) -> crate::squeue::Counts {
     let (pending, delayed, reserved, oldest) =

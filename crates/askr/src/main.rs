@@ -381,6 +381,14 @@ enum Command {
         /// Extra php.ini lines (e.g. to load opcache).
         #[arg(long)]
         ini: Option<String>,
+
+        /// Also check an application against the environment it will run in: the
+        /// shared-memory drivers it needs slots for, the queue names it dispatches to
+        /// versus the ones this worker would poll, whether its mailer can actually send,
+        /// and whether scheduled `->command()` tasks have a `php` binary. Point it at the
+        /// app root (the directory with composer.json).
+        #[arg(long)]
+        app: Option<PathBuf>,
     },
 
     /// Analyse a traffic log and report what caching would buy — and whether it
@@ -873,9 +881,9 @@ fn main() -> anyhow::Result<()> {
             let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
             tune::run(root, front, requests.clamp(1, 10_000), ini)
         }
-        Command::Doctor { ini } => {
+        Command::Doctor { ini, app } => {
             let ini = ini.or_else(|| std::env::var("ASKR_PHP_INI").ok());
-            if doctor::run(ini) {
+            if doctor::run(ini, app) {
                 Ok(())
             } else {
                 std::process::exit(1);

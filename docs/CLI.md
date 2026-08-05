@@ -137,6 +137,47 @@ Pre-flight checks: PHP build, extensions (required + recommended), platform
 (io_uring probe on Linux). `--ini <LINES>` to load opcache. Exit non-zero on
 critical failure.
 
+### `--app <PATH>`
+
+Also check an application against the environment it is about to run in. Point it at the app
+root (the directory with `composer.json`), ideally from inside the container that will serve
+it, so it sees the same environment:
+
+```bash
+docker compose exec askr /opt/askr/askr doctor --app /var/www/example.com
+```
+
+```
+• SESSION_DRIVER=askr — needs --cache-large-slots (sessions exceed 4 KB)
+• QUEUE_CONNECTION=askr — needs --queue-slots *and* a worker
+  queue names found in app/: imports, mail, webhooks
+  this worker would poll:    default
+✗ jobs dispatched to imports, mail, webhooks would never be processed —
+  set ASKR_QUEUE=imports,mail,webhooks,default
+✓ MAIL_MAILER=resend with an API key present
+```
+
+`•` is an observation, `✓` a verified check, `✗` a failure that exits non-zero — so this can
+gate a deploy. The distinction matters: doctor cannot see the flags a later `serve` will
+get, and a tick that means "noted" teaches you to skim ticks.
+
+What it looks for, all of it drawn from failures that cost real time:
+
+- **Queue names.** It greps `app/` for `onQueue('x')` and `$queue = 'x'` and compares them
+  with `ASKR_QUEUE`. A job dispatched to a queue no worker polls sits in the ring
+  indefinitely with no error anywhere — the failure that made a site's password-reset and
+  invitation mail silently stop.
+- **Shared-memory drivers** that need slots. `SESSION_DRIVER=askr` without
+  `--cache-large-slots` loses sessions quietly, which surfaces as 419 on every form.
+- **Mail that looks configured.** `MAIL_MAILER=resend` with neither `RESEND_KEY` (Laravel's
+  name) nor `RESEND_API_KEY` (Resend's own documentation) falls back to writing mail into
+  the log.
+- **Scheduled `->command()` tasks**, which shell out to a `php` binary. Askr compiles PHP
+  in and ships no CLI, so in the Docker image every such task fails with exit code 127.
+
+The grep is a grep: a queue name built at runtime won't be found, which is why the output
+says "found" rather than "all".
+
 ## `askr cache-report`
 
 Measure what caching would buy **before** caching anything — and whether it would be
