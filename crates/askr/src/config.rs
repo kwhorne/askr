@@ -23,6 +23,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub tls: TlsSection,
     #[serde(default)]
+    pub acme: AcmeSection,
+    #[serde(default)]
     pub admin: AdminSection,
     #[serde(default)]
     pub queue: QueueSection,
@@ -260,6 +262,38 @@ pub struct TlsSection {
     pub self_signed: bool,
 }
 
+/// `[acme]` — auto-TLS from a config file.
+///
+/// ACME used to be reachable only through CLI flags, and since `--config` is the whole
+/// configuration rather than a set of defaults, auto-TLS and a config file were mutually
+/// exclusive. That made real combinations unreachable: `trusted_proxies` is file-only, so
+/// "auto-TLS behind a proxy" could not be expressed at all. Every flag has a twin here.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeSection {
+    /// Obtain and renew a certificate over HTTP-01.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Domain(s) to certify. At least one is required when `enabled`.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// Contact email for the ACME account.
+    pub email: Option<String>,
+    /// Where to cache the account key and certificate.
+    pub dir: Option<PathBuf>,
+    /// Use Let's Encrypt staging — untrusted certs, far higher rate limits. Worth doing
+    /// first: the production limits are per-domain and per-week.
+    #[serde(default)]
+    pub staging: bool,
+    /// Custom directory URL (a Pebble test server, say). Distinct from `dir`.
+    pub directory_url: Option<String>,
+    /// Address to answer HTTP-01 challenges on, and to redirect from when
+    /// `server.force_https` is set. Defaults to 0.0.0.0:80.
+    pub http: Option<String>,
+    /// Extra CA root to trust for the directory (testing only).
+    pub ca_root: Option<PathBuf>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdminSection {
@@ -477,6 +511,18 @@ pub struct Resolved {
     pub app_base: Option<PathBuf>,
     pub paranoid: bool,
     pub admin_listen: Option<SocketAddr>,
+    /// Auto-TLS from `[acme]`. See [`AcmeSection`] for why these belong in the file.
+    pub acme: bool,
+    pub acme_domains: Vec<String>,
+    pub acme_email: Option<String>,
+    /// `None` means "use the CLI default", resolved by the caller so the default value
+    /// lives in exactly one place.
+    pub acme_dir: Option<PathBuf>,
+    pub acme_staging: bool,
+    pub acme_directory: Option<String>,
+    /// `None` means 0.0.0.0:80, likewise resolved by the caller.
+    pub acme_http: Option<SocketAddr>,
+    pub acme_ca_root: Option<PathBuf>,
     pub queue_workers: usize,
     pub queue_workers_max: usize,
     pub queue_script: Option<PathBuf>,
@@ -670,7 +716,53 @@ impl FileConfig {
             (None, None) => {}
             _ => anyhow::bail!("tls.cert and tls.key must both be set"),
         }
-        let tls_on = self.tls.cert.is_some() || tls_self_signed;
+        // A certificate from a file, as opposed to one ACME will fetch. The two are
+        // mutually exclusive, so this has to be a separate value from `tls_on` below.
+        let static_tls = self.tls.cert.is_some() || tls_self_signed;
+
+        // ACME validation. The failures here are all things that would otherwise surface
+        // as a rate-limited rejection from Let's Encrypt minutes later.
+        let acme = self.acme;
+        if acme.enabled {
+            anyhow::ensure!(
+                !acme.domains.is_empty(),
+                "acme.enabled needs at least one entry in acme.domains"
+            );
+            anyhow::ensure!(
+                !static_tls,
+                "acme.enabled obtains its own certificate, so tls.cert/key and \
+                 tls.self_signed must be unset"
+            );
+            for d in &acme.domains {
+                anyhow::ensure!(
+                    !d.contains('/') && !d.contains(':') && !d.starts_with('*'),
+                    "acme.domains entry {d:?} must be a bare hostname — no scheme, port \
+                     or wildcard (HTTP-01 cannot validate a wildcard)"
+                );
+            }
+            if let Some(r) = &acme.ca_root {
+                anyhow::ensure!(r.is_file(), "acme.ca_root not found: {}", r.display());
+            }
+        } else {
+            anyhow::ensure!(
+                acme.domains.is_empty() && acme.email.is_none(),
+                "acme.domains/acme.email are set but acme.enabled is false — set \
+                 acme.enabled = true, or remove them (a half-configured section that \
+                 silently does nothing is how a site ends up serving plain HTTP)"
+            );
+        }
+        // ACME counts as TLS: the resolved config has to say the server will speak HTTPS,
+        // even though the certificate doesn't exist yet. Otherwise anything reading it
+        // before the ACME step runs — logging, admin status — reports plain HTTP.
+        let tls_on = static_tls || acme.enabled;
+
+        let acme_http = match &acme.http {
+            Some(a) => Some(
+                a.parse::<SocketAddr>()
+                    .with_context(|| format!("invalid acme.http {a:?}"))?,
+            ),
+            None => None,
+        };
 
         let admin_listen = match &self.admin.listen {
             Some(a) => Some(
@@ -757,6 +849,14 @@ impl FileConfig {
             app_base: self.worker.app_base,
             paranoid: self.worker.paranoid,
             admin_listen,
+            acme: acme.enabled,
+            acme_domains: acme.domains,
+            acme_email: acme.email,
+            acme_dir: acme.dir,
+            acme_staging: acme.staging,
+            acme_directory: acme.directory_url,
+            acme_http,
+            acme_ca_root: acme.ca_root,
             queue_workers,
             queue_workers_max,
             queue_script: self.queue.script,
@@ -822,6 +922,105 @@ mod tests {
 [server]
 root = "{ROOT}"
 "#;
+
+    /// `[acme]` exists so auto-TLS and a config file aren't mutually exclusive. Before
+    /// 1.4.10, ACME was CLI-only while `trusted_proxies` was file-only, which made
+    /// "auto-TLS behind a proxy" impossible to express at all.
+    #[test]
+    fn acme_section_resolves_and_defaults_are_left_to_the_caller() {
+        let r = resolve(
+            "acme-ok",
+            r#"
+[server]
+root = "{ROOT}"
+force_https = true
+trusted_proxies = ["172.17.0.1"]
+
+[acme]
+enabled = true
+domains = ["example.com", "www.example.com"]
+email = "admin@example.com"
+staging = true
+"#,
+        )
+        .expect("an acme section should resolve");
+        assert!(r.acme);
+        assert_eq!(r.acme_domains, ["example.com", "www.example.com"]);
+        assert!(r.acme_staging);
+        assert!(
+            r.acme_dir.is_none() && r.acme_http.is_none(),
+            "absent keys stay None so the CLI's defaults are applied in one place"
+        );
+        assert!(
+            r.config.https,
+            "acme implies https, or workers would serve the cert over plain HTTP"
+        );
+    }
+
+    #[test]
+    fn acme_without_domains_is_refused() {
+        let e = err(
+            "acme-nodomains",
+            r#"
+[server]
+root = "{ROOT}"
+
+[acme]
+enabled = true
+"#,
+        );
+        assert!(e.contains("acme.domains"), "{e}");
+    }
+
+    /// The dangerous shape: keys present, `enabled` absent. TOML defaults it to false, so
+    /// the site would quietly serve plain HTTP while the file looks like it asked for TLS.
+    #[test]
+    fn a_half_configured_acme_section_is_refused() {
+        let e = err(
+            "acme-half",
+            r#"
+[server]
+root = "{ROOT}"
+
+[acme]
+domains = ["example.com"]
+"#,
+        );
+        assert!(e.contains("acme.enabled"), "{e}");
+    }
+
+    #[test]
+    fn acme_alongside_a_static_certificate_is_refused() {
+        let e = err(
+            "acme-and-tls",
+            r#"
+[server]
+root = "{ROOT}"
+
+[tls]
+self_signed = true
+
+[acme]
+enabled = true
+domains = ["example.com"]
+"#,
+        );
+        assert!(e.contains("tls.cert") || e.contains("self_signed"), "{e}");
+    }
+
+    /// HTTP-01 validates a single hostname; a wildcard needs DNS-01, which Askr doesn't
+    /// do. Better to say so now than to be rejected by Let's Encrypt after a
+    /// rate-limited round trip.
+    #[test]
+    fn a_wildcard_or_url_domain_is_refused() {
+        for bad in ["*.example.com", "https://example.com", "example.com:443"] {
+            let body = format!(
+                "\n[server]\nroot = \"{{ROOT}}\"\n\n[acme]\nenabled = true\ndomains = [\"{bad}\"]\n"
+            );
+            let e = err("acme-baddomain", &body);
+            assert!(e.contains("bare hostname"), "{bad}: {e}");
+        }
+    }
 
     #[test]
     fn minimal_config_resolves() {

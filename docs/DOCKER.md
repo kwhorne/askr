@@ -13,7 +13,7 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:1.4.9      # exact — use this in production
+ghcr.io/kwhorne/askr:1.4.10      # exact — use this in production
 ghcr.io/kwhorne/askr:1.4        # latest 1.4.x
 ghcr.io/kwhorne/askr:latest
 ```
@@ -43,7 +43,7 @@ the optional tiers compiled in — the **durable L2 SQL Anywhere backends**
 source:
 
 ```
-ghcr.io/kwhorne/askr:1.4.9-full
+ghcr.io/kwhorne/askr:1.4.10-full
 ghcr.io/kwhorne/askr:1.4-full
 ghcr.io/kwhorne/askr:full
 ```
@@ -74,7 +74,7 @@ bootstrap. Run as the owner of the files:
 ```yaml
 services:
     askr:
-        image: ghcr.io/kwhorne/askr:1.4.9
+        image: ghcr.io/kwhorne/askr:1.4.10
         user: "1000:1000"        # uid:gid that owns the project
         volumes:
             - ../:/var/www/app

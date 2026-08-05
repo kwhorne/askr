@@ -73,9 +73,46 @@ Omit this whole section to run in per-request mode. Present it to enable
 Enabling TLS negotiates HTTP/2 or HTTP/1.1 via ALPN and sets `HTTPS=on` in
 `$_SERVER` (so Laravel emits `secure` cookies). Certs must be **X.509 v3**.
 
-**Auto-TLS (ACME / Let's Encrypt)** is configured via flags (`--acme`,
-`--acme-domain`, `--acme-email`, …) — combine with `--config`. See
-[Auto-TLS](AUTOTLS.md).
+**Auto-TLS (ACME / Let's Encrypt)** has its own section — see [`[acme]`](#acme). Do not
+set both: `[tls]` is a certificate you supply, `[acme]` is one Askr fetches.
+
+### `[acme]`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Obtain and renew a certificate over HTTP-01. |
+| `domains` | list | `[]` | Hostnames to certify. At least one required. Bare hostnames — no scheme, port or wildcard. |
+| `email` | string | `admin@<first domain>` | Contact address for the ACME account. |
+| `dir` | path | `/var/lib/askr/acme` | Where the account key and certificate are cached. Must survive restarts, or you will hit Let's Encrypt's rate limits. |
+| `staging` | bool | `false` | Use Let's Encrypt staging: untrusted certs, far higher limits. **Do this first.** |
+| `directory_url` | string | Let's Encrypt | Custom ACME directory (a Pebble test server). Distinct from `dir`. |
+| `http` | address | `0.0.0.0:80` | Where HTTP-01 challenges are answered — and, with `force_https`, where plain HTTP is redirected from. |
+| `ca_root` | path | – | Extra CA root to trust for the directory. Testing only. |
+
+```toml
+[server]
+listen = "0.0.0.0:443"
+root = "/var/www/example.com/public"
+force_https = true
+trusted_proxies = ["172.17.0.1"]   # file-only, which is why [acme] had to exist
+
+[acme]
+enabled = true
+domains = ["example.com", "www.example.com"]
+email = "admin@example.com"
+dir = "/var/lib/askr/acme"
+```
+
+One long-lived listener on `http` answers challenges *and* 308s everything else, so a
+certificate can be issued and HTTP redirected without the two fighting over port 80.
+
+Askr refuses to start rather than let a mistake here become a site quietly serving plain
+HTTP: `domains` without `enabled`, `enabled` without `domains`, `[acme]` alongside
+`[tls]`, and a wildcard domain (HTTP-01 cannot validate one) are all errors.
+
+Until 1.4.10 ACME was flags-only. Since `--config` is the whole configuration rather than a
+set of defaults, that made auto-TLS and a config file mutually exclusive — and combinations
+like "auto-TLS behind a proxy" unreachable, because `trusted_proxies` has never had a flag.
 
 ### `[admin]`
 

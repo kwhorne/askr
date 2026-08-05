@@ -29,6 +29,7 @@ struct Job {
     queue_hash: u64,
     available_at: u64,   // unix ms — poppable when now >= this
     reserved_until: u64, // unix ms — 0 = not reserved; lapsed if now >= this
+    created_at: u64,     // unix ms — when push() accepted the job; never changes
     attempts: u32,
     payload_len: u32,
     payload: [u8; PAYLOAD_MAX],
@@ -142,7 +143,8 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
     let ring = NEXT_ID.load(Ordering::SeqCst);
     let id = unsafe { (*ring).next_id.fetch_add(1, Ordering::SeqCst) } + 1;
     let qh = hash_q(queue);
-    let available_at = now_ms() + delay * 1000;
+    let created_at = now_ms();
+    let available_at = created_at + delay * 1000;
     // Start the probe at a spot derived from the id, so concurrent pushes spread.
     let start = (id as usize) % slots;
     for i in 0..slots {
@@ -153,6 +155,7 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
                 ptr::write(ptr::addr_of_mut!((*e).id), id);
                 ptr::write(ptr::addr_of_mut!((*e).queue_hash), qh);
                 ptr::write(ptr::addr_of_mut!((*e).available_at), available_at);
+                ptr::write(ptr::addr_of_mut!((*e).created_at), created_at);
                 ptr::write(ptr::addr_of_mut!((*e).reserved_until), 0);
                 ptr::write(ptr::addr_of_mut!((*e).attempts), 0);
                 ptr::write(ptr::addr_of_mut!((*e).payload_len), payload.len() as u32);
@@ -304,6 +307,64 @@ pub fn stats() -> (usize, usize, u64) {
     (ready, total, oldest)
 }
 
+/// Counts for one queue, from a single pass over the slot table.
+///
+/// Laravel 13's `Queue` contract wants these separately, and until 1.4.10 the driver had
+/// to report zeros because only [`size`] was reachable from PHP — so `queue:monitor` saw
+/// no delayed backlog at all. Reporting invented numbers to a dashboard would have been
+/// worse, but reporting none was still lying by omission.
+///
+/// The three buckets are disjoint and sum to the number of occupied slots for the queue,
+/// which is the invariant worth testing: a job is reserved, or waiting for its delay, or
+/// available now.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Counts {
+    /// Delay elapsed, no live reservation — a worker can take it now.
+    pub pending: u64,
+    /// Waiting for `available_at`.
+    pub delayed: u64,
+    /// Held by a worker whose visibility window hasn't lapsed.
+    pub reserved: u64,
+    /// `created_at` of the oldest pending job, unix ms; 0 when there are none.
+    pub oldest_pending_created_ms: u64,
+}
+
+/// Walk the table once and bucket every occupied slot for `queue`.
+pub fn counts(queue: &[u8]) -> Counts {
+    let Some((p, slots)) = base() else {
+        return Counts::default();
+    };
+    let qh = hash_q(queue);
+    let now = now_ms();
+    let mut c = Counts::default();
+    for idx in 0..slots {
+        let e = unsafe { p.add(idx) };
+        let _g = Slot::lock(e);
+        unsafe {
+            let id = r_u64(ptr::addr_of!((*e).id));
+            if id == 0 || r_u64(ptr::addr_of!((*e).queue_hash)) != qh {
+                continue;
+            }
+            let avail = r_u64(ptr::addr_of!((*e).available_at));
+            let reserved = r_u64(ptr::addr_of!((*e).reserved_until));
+            // Order matters: a reserved job may also be past its availability time, and
+            // counting it in both buckets would break the sum invariant.
+            if reserved > now {
+                c.reserved += 1;
+            } else if avail > now {
+                c.delayed += 1;
+            } else {
+                c.pending += 1;
+                let created = r_u64(ptr::addr_of!((*e).created_at));
+                if c.oldest_pending_created_ms == 0 || created < c.oldest_pending_created_ms {
+                    c.oldest_pending_created_ms = created;
+                }
+            }
+        }
+    }
+    c
+}
+
 pub fn size(queue: &[u8]) -> u64 {
     let Some((p, slots)) = base() else {
         return 0;
@@ -388,6 +449,24 @@ extern "C" fn c_size(q: *const c_char, qlen: usize) -> c_long {
     size(q) as c_long
 }
 
+extern "C" fn c_counts(
+    q: *const c_char,
+    qlen: usize,
+    out_pending: *mut c_long,
+    out_delayed: *mut c_long,
+    out_reserved: *mut c_long,
+    out_oldest_ms: *mut c_long,
+) {
+    let q = unsafe { crate::ffi::bytes(q, qlen) };
+    let c = counts(q);
+    unsafe {
+        *out_pending = c.pending as c_long;
+        *out_delayed = c.delayed as c_long;
+        *out_reserved = c.reserved as c_long;
+        *out_oldest_ms = c.oldest_pending_created_ms as c_long;
+    }
+}
+
 /// Register the queue callbacks with the PHP shim for this process.
 pub fn register_bridge() {
     if !enabled() {
@@ -396,7 +475,7 @@ pub fn register_bridge() {
     // SAFETY: one-time registration; trampolines are 'static fns.
     unsafe {
         askr_php::queue_bridge::askr_php_set_queue_bridge(
-            c_push, c_pop, c_delete, c_release, c_size,
+            c_push, c_pop, c_delete, c_release, c_size, c_counts,
         );
     }
 }
@@ -404,6 +483,69 @@ pub fn register_bridge() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_bucket_every_job_exactly_once() {
+        init(128);
+        assert!(enabled());
+        let q = b"counts-test";
+
+        assert_eq!(counts(q), Counts::default(), "empty queue reports nothing");
+
+        // Two available now, one delayed a minute.
+        push(q, b"a", 0);
+        push(q, b"b", 0);
+        push(q, b"c", 60);
+
+        let c = counts(q);
+        assert_eq!(c.pending, 2);
+        assert_eq!(c.delayed, 1);
+        assert_eq!(c.reserved, 0);
+        assert_eq!(
+            c.pending + c.delayed + c.reserved,
+            3,
+            "the buckets must sum to the occupied slots — a job counted twice or not at \
+             all is what makes a queue dashboard lie"
+        );
+        assert!(
+            c.oldest_pending_created_ms > 0,
+            "a pending job has a creation time"
+        );
+        assert_eq!(
+            size(q),
+            c.pending,
+            "size() and pending must agree, or every existing queue:monitor threshold \
+             silently changes meaning"
+        );
+
+        // Popping reserves: the job moves from pending to reserved, sum unchanged.
+        let job = pop(q, 90).expect("a job is available");
+        let c = counts(q);
+        assert_eq!(c.pending, 1);
+        assert_eq!(c.reserved, 1);
+        assert_eq!(c.delayed, 1);
+        assert_eq!(c.pending + c.delayed + c.reserved, 3);
+
+        // Deleting removes it from every bucket.
+        assert!(delete(job.id));
+        let c = counts(q);
+        assert_eq!(c.pending + c.delayed + c.reserved, 2);
+
+        // Another queue's jobs must not leak into these counts.
+        push(b"other-queue", b"x", 0);
+        assert_eq!(counts(q).pending, 1, "counts are per queue");
+
+        // The oldest pending job's creation time is the *earliest*, not the latest.
+        let c = counts(q);
+        let first = c.oldest_pending_created_ms;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        push(q, b"newer", 0);
+        assert_eq!(
+            counts(q).oldest_pending_created_ms,
+            first,
+            "a newer job must not move the oldest-pending timestamp forward"
+        );
+    }
 
     #[test]
     fn push_pop_delay_reserve_release() {

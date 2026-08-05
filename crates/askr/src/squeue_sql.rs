@@ -145,6 +145,31 @@ fn do_size(conn: &Connection, queue: &[u8]) -> rusqlite::Result<i64> {
     )
 }
 
+/// Per-queue counts for Laravel 13's `Queue` contract — the L2 twin of
+/// [`crate::squeue::counts`].
+///
+/// The buckets are evaluated in the same order as the shared-memory backend (reserved,
+/// then delayed, then available), because a reserved job can also be past its
+/// availability time and counting it twice would break the sum invariant. Note the unit:
+/// this table stores seconds, while the FFI contract is milliseconds.
+fn do_counts(conn: &Connection, queue: &[u8]) -> rusqlite::Result<(i64, i64, i64, i64)> {
+    conn.query_row(
+        "SELECT
+           count(*) FILTER (WHERE (reserved_until IS NULL OR reserved_until <= unixepoch())
+                AND available_at <= unixepoch())                              AS pending,
+           count(*) FILTER (WHERE (reserved_until IS NULL OR reserved_until <= unixepoch())
+                AND available_at > unixepoch())                               AS delayed,
+           count(*) FILTER (WHERE reserved_until IS NOT NULL
+                AND reserved_until > unixepoch())                             AS reserved,
+           coalesce(min(created_at) FILTER (WHERE
+                (reserved_until IS NULL OR reserved_until <= unixepoch())
+                AND available_at <= unixepoch()), 0) * 1000                   AS oldest_ms
+         FROM askr_jobs WHERE queue = ?1",
+        params![String::from_utf8_lossy(queue)],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+}
+
 /// Backlog across all queues: (ready, total, oldest_ms) — the same shape as
 /// `squeue::stats()`, feeding the backlog-driven worker autoscaler (elyra-8).
 fn do_stats(conn: &Connection) -> rusqlite::Result<(usize, usize, u64)> {
@@ -212,12 +237,42 @@ pub fn size(queue: &[u8]) -> u64 {
     with_conn(|c| do_size(c, queue)).unwrap_or(0) as u64
 }
 
+/// Per-queue counts; zeros when the backend is unreachable, matching `size()`.
+pub fn counts(queue: &[u8]) -> crate::squeue::Counts {
+    let (pending, delayed, reserved, oldest) =
+        with_conn(|c| do_counts(c, queue)).unwrap_or((0, 0, 0, 0));
+    crate::squeue::Counts {
+        pending: pending.max(0) as u64,
+        delayed: delayed.max(0) as u64,
+        reserved: reserved.max(0) as u64,
+        oldest_pending_created_ms: oldest.max(0) as u64,
+    }
+}
+
 /// Backlog across all queues for the worker autoscaler: (ready, total, oldest_ms).
 pub fn stats() -> (usize, usize, u64) {
     with_conn(do_stats).unwrap_or((0, 0, 0))
 }
 
 // --- PHP bridge (identical shape to squeue.rs) --------------------------------
+
+extern "C" fn c_counts(
+    q: *const c_char,
+    qlen: usize,
+    out_pending: *mut c_long,
+    out_delayed: *mut c_long,
+    out_reserved: *mut c_long,
+    out_oldest_ms: *mut c_long,
+) {
+    let q = unsafe { crate::ffi::bytes(q, qlen) };
+    let c = counts(q);
+    unsafe {
+        *out_pending = c.pending as c_long;
+        *out_delayed = c.delayed as c_long;
+        *out_reserved = c.reserved as c_long;
+        *out_oldest_ms = c.oldest_pending_created_ms as c_long;
+    }
+}
 
 extern "C" fn c_push(
     q: *const c_char,
@@ -285,19 +340,58 @@ pub fn register_bridge() {
     // SAFETY: one-time registration; trampolines are 'static fns.
     unsafe {
         askr_php::queue_bridge::askr_php_set_queue_bridge(
-            c_push, c_pop, c_delete, c_release, c_size,
+            c_push, c_pop, c_delete, c_release, c_size, c_counts,
         );
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         init_schema(&c).unwrap();
         c
+    }
+
+    /// The same invariant as the shared-memory backend: every job lands in exactly one
+    /// bucket, and the buckets sum to the jobs on the queue. The two backends are an
+    /// independent SQL query and a pointer walk, so this is where they're held to the
+    /// same meaning — the unit included, since this table stores seconds while the FFI
+    /// contract is milliseconds.
+    #[test]
+    fn counts_bucket_every_job_exactly_once() {
+        let c = db();
+        do_push(&c, b"q", b"a", 0).unwrap();
+        do_push(&c, b"q", b"b", 0).unwrap();
+        do_push(&c, b"q", b"c", 3600).unwrap();
+        // Another queue must not leak into the counts.
+        do_push(&c, b"other", b"x", 0).unwrap();
+
+        let (pending, delayed, reserved, oldest) = do_counts(&c, b"q").unwrap();
+        assert_eq!((pending, delayed, reserved), (2, 1, 0));
+        assert_eq!(pending, do_size(&c, b"q").unwrap(), "size() == pending");
+        assert!(
+            oldest > 1_600_000_000_000,
+            "milliseconds, not seconds: {oldest} — a factor-of-1000 unit mismatch would \
+             make every queue-age reading wrong"
+        );
+
+        // Claiming moves a job from pending to reserved; the sum is unchanged.
+        let r = do_pop(&c, b"q", 90).unwrap().expect("a ready job");
+        let (pending, delayed, reserved, _) = do_counts(&c, b"q").unwrap();
+        assert_eq!((pending, delayed, reserved), (1, 1, 1));
+        assert_eq!(pending + delayed + reserved, 3);
+
+        assert!(do_delete(&c, r.id).unwrap());
+        let (pending, delayed, reserved, _) = do_counts(&c, b"q").unwrap();
+        assert_eq!(pending + delayed + reserved, 2);
+
+        // An empty queue reports nothing rather than failing.
+        let (p, d, rv, o) = do_counts(&c, b"nothing-here").unwrap();
+        assert_eq!((p, d, rv, o), (0, 0, 0, 0));
     }
 
     #[test]

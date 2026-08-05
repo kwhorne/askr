@@ -515,6 +515,7 @@ fn main() -> anyhow::Result<()> {
                 cache_persist,
                 cache_persist_key,
                 broadcast,
+                acme_set,
             ) = if let Some(path) = config_file {
                 // A config file is the WHOLE configuration: every other serve flag is
                 // ignored below, because this is an either/or rather than a merge.
@@ -568,6 +569,22 @@ fn main() -> anyhow::Result<()> {
                     r.cache_persist,
                     r.cache_persist_key,
                     r.broadcast,
+                    AcmeSettings {
+                        on: r.acme,
+                        domains: r.acme_domains,
+                        email: r.acme_email,
+                        // The CLI's default lives on the clap attribute; mirror it rather
+                        // than duplicating the literal in config.rs.
+                        dir: r
+                            .acme_dir
+                            .unwrap_or_else(|| PathBuf::from("/var/lib/askr/acme")),
+                        staging: r.acme_staging,
+                        directory: r.acme_directory,
+                        http: r
+                            .acme_http
+                            .unwrap_or_else(|| "0.0.0.0:80".parse().expect("literal addr")),
+                        ca_root: r.acme_ca_root,
+                    },
                 )
             } else {
                 let max_body_size = parse_size(&max_body_size)?;
@@ -660,6 +677,16 @@ fn main() -> anyhow::Result<()> {
                     None,
                     None,
                     broadcast,
+                    AcmeSettings {
+                        on: acme,
+                        domains: acme_domain,
+                        email: acme_email,
+                        dir: acme_dir,
+                        staging: acme_staging,
+                        directory: acme_directory,
+                        http: acme_http,
+                        ca_root: acme_ca_root,
+                    },
                 )
             };
 
@@ -710,25 +737,29 @@ fn main() -> anyhow::Result<()> {
             // Auto-TLS via ACME: obtain the cert in the master (HTTP-01 on
             // --acme-http) before forking; workers serve HTTPS from the cache.
             let mut config = config;
-            if acme {
-                anyhow::ensure!(!acme_domain.is_empty(), "--acme requires --acme-domain");
-                let email = acme_email
+            if acme_set.on {
+                anyhow::ensure!(
+                    !acme_set.domains.is_empty(),
+                    "--acme requires --acme-domain (or acme.domains in a config file)"
+                );
+                let email = acme_set
+                    .email
                     .clone()
-                    .unwrap_or_else(|| format!("admin@{}", acme_domain[0]));
-                let directory_url = acme_directory.clone().unwrap_or_else(|| {
-                    if acme_staging {
+                    .unwrap_or_else(|| format!("admin@{}", acme_set.domains[0]));
+                let directory_url = acme_set.directory.clone().unwrap_or_else(|| {
+                    if acme_set.staging {
                         instant_acme::LetsEncrypt::Staging.url().to_string()
                     } else {
                         instant_acme::LetsEncrypt::Production.url().to_string()
                     }
                 });
                 let acfg = acme::AcmeConfig {
-                    domains: acme_domain.clone(),
+                    domains: acme_set.domains.clone(),
                     email,
-                    cache_dir: acme_dir.clone(),
+                    cache_dir: acme_set.dir.clone(),
                     directory_url,
-                    challenge_addr: acme_http,
-                    ca_root: acme_ca_root.clone(),
+                    challenge_addr: acme_set.http,
+                    ca_root: acme_set.ca_root.clone(),
                     renew_after_days: 60,
                 };
                 // Start the plain-HTTP front *before* the first issuance, so one
@@ -736,14 +767,17 @@ fn main() -> anyhow::Result<()> {
                 // being bound and torn down per renewal. That's what makes an
                 // http→https redirect possible while ACME is in use — previously the
                 // two would have fought over port 80.
-                acme::spawn_front(acme_http, force_https);
-                if acme::needs_renewal(&acme_dir) {
+                // config.force_https, not the CLI flag: with `[acme]` now expressible in
+                // a config file, the flag is empty on that path and the redirect would
+                // have silently switched itself off.
+                acme::spawn_front(acme_set.http, config.force_https);
+                if acme::needs_renewal(&acme_set.dir) {
                     acme::obtain_blocking(&acfg)?;
                 } else {
                     tracing::info!("acme: cached certificate still valid");
                 }
-                config.tls_cert = Some(acme::cert_path(&acme_dir));
-                config.tls_key = Some(acme::key_path(&acme_dir));
+                config.tls_cert = Some(acme::cert_path(&acme_set.dir));
+                config.tls_key = Some(acme::key_path(&acme_set.dir));
                 config.tls_self_signed = false;
                 config.https = true;
                 // Renew before expiry in a background thread, then roll workers.
@@ -930,6 +964,22 @@ fn main() -> anyhow::Result<()> {
 /// Default worker count: the container's CPU limit (cgroup) when running in one,
 /// else the host's core count. Without this a `cpus: 2` container on a 64-core
 /// host would fork 64 workers (nproc reads the host, not the cgroup limit).
+/// Auto-TLS settings, from either the command line or `[acme]`.
+///
+/// Collected into a struct rather than eight more elements on an already twelve-wide
+/// tuple. Both sources resolve their defaults here, so `--acme-dir`'s default and
+/// `acme.dir`'s absence mean the same thing in one place.
+struct AcmeSettings {
+    on: bool,
+    domains: Vec<String>,
+    email: Option<String>,
+    dir: PathBuf,
+    staging: bool,
+    directory: Option<String>,
+    http: SocketAddr,
+    ca_root: Option<PathBuf>,
+}
+
 /// Serve flags that a config file would silently override.
 ///
 /// Read from argv rather than from the parsed values, so an explicitly-passed flag that

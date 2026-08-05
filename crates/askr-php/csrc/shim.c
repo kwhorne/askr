@@ -902,21 +902,26 @@ typedef int  (*askr_queue_pop_fn)(const char *q, size_t qlen, long visibility,
 typedef int  (*askr_queue_delete_fn)(long id);
 typedef int  (*askr_queue_release_fn)(long id, long delay);
 typedef long (*askr_queue_size_fn)(const char *q, size_t qlen);
+typedef void (*askr_queue_counts_fn)(const char *q, size_t qlen, long *pending,
+                                     long *delayed, long *reserved, long *oldest_ms);
 
 static askr_queue_push_fn    g_queue_push = NULL;
 static askr_queue_pop_fn     g_queue_pop = NULL;
 static askr_queue_delete_fn  g_queue_delete = NULL;
 static askr_queue_release_fn g_queue_release = NULL;
 static askr_queue_size_fn    g_queue_size = NULL;
+static askr_queue_counts_fn  g_queue_counts = NULL;
 
 void askr_php_set_queue_bridge(askr_queue_push_fn push, askr_queue_pop_fn pop,
                                askr_queue_delete_fn del, askr_queue_release_fn rel,
-                               askr_queue_size_fn size) {
+                               askr_queue_size_fn size,
+                               askr_queue_counts_fn counts) {
     g_queue_push = push;
     g_queue_pop = pop;
     g_queue_delete = del;
     g_queue_release = rel;
     g_queue_size = size;
+    g_queue_counts = counts;
 }
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_queue_push, 0, 0, 2)
@@ -995,6 +1000,31 @@ static PHP_FUNCTION(askr_queue_size) {
     RETURN_LONG(g_queue_size ? g_queue_size(q, qlen) : 0);
 }
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_queue_stats, 0, 0, 1)
+    ZEND_ARG_INFO(0, queue)
+ZEND_END_ARG_INFO()
+/* askr_queue_stats(string $queue): array{pending:int, delayed:int, reserved:int,
+ *                                        oldest_pending_created_ms:int}
+ *
+ * Laravel 13's Queue contract asks for these separately. Returning them from one
+ * slot-table pass keeps them mutually consistent: a caller that read pending and
+ * delayed with two calls could see a job in neither if it became available between. */
+static PHP_FUNCTION(askr_queue_stats) {
+    char *q; size_t qlen;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(q, qlen)
+    ZEND_PARSE_PARAMETERS_END();
+    long pending = 0, delayed = 0, reserved = 0, oldest = 0;
+    if (g_queue_counts) {
+        g_queue_counts(q, qlen, &pending, &delayed, &reserved, &oldest);
+    }
+    array_init(return_value);
+    add_assoc_long(return_value, "pending", pending);
+    add_assoc_long(return_value, "delayed", delayed);
+    add_assoc_long(return_value, "reserved", reserved);
+    add_assoc_long(return_value, "oldest_pending_created_ms", oldest);
+}
+
 /* ------------------------------------------------------------------ */
 /* broadcast bridge (askr_broadcast)                                  */
 /* ------------------------------------------------------------------ */
@@ -1067,6 +1097,7 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_queue_delete, arginfo_askr_queue_delete)
     ZEND_FE(askr_queue_release, arginfo_askr_queue_release)
     ZEND_FE(askr_queue_size, arginfo_askr_queue_size)
+    ZEND_FE(askr_queue_stats, arginfo_askr_queue_stats)
     ZEND_FE(askr_broadcast, arginfo_askr_broadcast)
     ZEND_FE(askr_cow_ready, arginfo_askr_cow_ready)
     ZEND_FE_END

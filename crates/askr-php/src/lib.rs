@@ -439,6 +439,10 @@ pub mod queue_bridge {
     pub type DeleteFn = extern "C" fn(c_long) -> c_int;
     pub type ReleaseFn = extern "C" fn(c_long, c_long) -> c_int;
     pub type SizeFn = extern "C" fn(*const c_char, usize) -> c_long;
+    /// Fills pending/delayed/reserved counts and the oldest pending job's creation time
+    /// (unix ms, 0 when there are none) from one pass over the slot table.
+    pub type CountsFn =
+        extern "C" fn(*const c_char, usize, *mut c_long, *mut c_long, *mut c_long, *mut c_long);
 
     extern "C" {
         pub fn askr_php_set_queue_bridge(
@@ -447,6 +451,7 @@ pub mod queue_bridge {
             del: DeleteFn,
             rel: ReleaseFn,
             size: SizeFn,
+            counts: CountsFn,
         );
     }
 }

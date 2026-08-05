@@ -199,6 +199,22 @@ limiter) is truly atomic across all workers.
 
 ## Queue workers & autoscaling
 
+`queue:monitor` and anything else that reads the queue's depth work from Askr 1.4.10, which
+exposes all four counters Laravel 13's contract asks for from one pass over the shared
+slot table:
+
+| Method | Meaning |
+| --- | --- |
+| `size()` / `pendingSize()` | Delay elapsed, no live reservation — a worker can take it now. |
+| `delayedSize()` | Still waiting for its delay. |
+| `reservedSize()` | Held by a worker whose visibility window hasn't lapsed. |
+| `creationTimeOfOldestPendingJob()` | When the oldest available job was pushed. |
+
+The three buckets are disjoint and sum to the jobs on that queue, which is the invariant
+worth knowing: a number that doesn't add up is worse than a missing one. Against a server
+older than 1.4.10 the driver reports `pendingSize()` accurately and the rest as
+`0`/`null` — "unknown", not "empty".
+
 `--queue N` runs N supervised queue-worker processes. Add `--queue-max M` to turn
 it into a **backlog-driven autoscaling range** — Horizon's `balance=auto`, native,
 with no extra daemon (Askr sees the backlog in shared memory *and* owns the worker

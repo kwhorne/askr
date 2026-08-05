@@ -15,6 +15,29 @@ askr serve \
 That's it: on first start Askr obtains a certificate for `example.com` from
 Let's Encrypt, serves HTTPS on `:443`, and renews automatically before expiry.
 
+## From a config file
+
+```toml
+[server]
+listen = "0.0.0.0:443"
+root = "/var/www/example.com/public"
+force_https = true
+
+[acme]
+enabled = true
+domains = ["example.com"]
+email = "admin@example.com"
+staging = true          # start here; swap to false once you see a certificate issued
+```
+
+```bash
+askr serve --config /etc/askr/askr.toml
+```
+
+Every flag below has a key in [`[acme]`](CONFIGURATION.md#acme). Prefer the file if you
+need anything that is file-only — `trusted_proxies`, `[[site]]`, `[cache]` — because
+`--config` is the whole configuration and Askr refuses to mix the two.
+
 ## How it works (and why it's prefork-safe)
 
 The prefork model (one worker process per core, all accepting on the shared

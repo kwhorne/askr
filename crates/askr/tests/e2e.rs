@@ -1294,6 +1294,62 @@ script = "{}"
 /// serve flag was silently dropped. On a real deployment that turned
 /// `--workers=4 --worker-script=…` into 20 per-request workers with nothing in the log
 /// to explain it. Refusing costs one clear error; ignoring costs an afternoon.
+/// Auto-TLS has to be expressible in a config file.
+///
+/// It used to be CLI-only, and since `--config` is the whole configuration rather than a
+/// set of defaults, that made auto-TLS and a config file mutually exclusive — so
+/// "auto-TLS behind a proxy" was unreachable, because `trusted_proxies` is file-only.
+///
+/// Issuing a real certificate needs a CA, so this asserts the next best thing: the
+/// section parses, validates, and the ACME step actually runs from the config path. A
+/// bogus directory URL means it fails *there* rather than at "unknown field `acme`",
+/// which is exactly the difference between wired up and not.
+#[test]
+fn acme_can_be_configured_from_a_config_file() {
+    let dir = unique_dir("acmecfg");
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/index.php"), "<?php echo 'ok';").unwrap();
+    let cfg = dir.join("askr.toml");
+    // A directory URL nothing is listening on: the ACME client must be reached and fail.
+    let dead = free_port();
+    std::fs::write(
+        &cfg,
+        format!(
+            "[server]\nlisten = \"127.0.0.1:{}\"\nroot = \"{}\"\n\
+             force_https = true\ntrusted_proxies = [\"172.17.0.1\"]\n\n\
+             [acme]\nenabled = true\ndomains = [\"askr-test.invalid\"]\n\
+             email = \"admin@askr-test.invalid\"\ndir = \"{}\"\n\
+             directory_url = \"http://127.0.0.1:{dead}/dir\"\nhttp = \"127.0.0.1:{}\"\n",
+            free_port(),
+            dir.join("app").to_str().unwrap(),
+            dir.join("acme").to_str().unwrap(),
+            free_port(),
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args(["serve", "--config", cfg.to_str().unwrap()])
+        .output()
+        .expect("run askr");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !text.contains("unknown field"),
+        "the [acme] section must be understood, not rejected as unknown: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("acme") || text.contains("directory"),
+        "expected the failure to come from the ACME step, so we know the config path \
+         reached it: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn config_file_with_conflicting_flags_is_refused() {
     let dir = unique_dir("configflags");

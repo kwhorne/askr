@@ -3,7 +3,56 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
-## Unreleased
+## 1.4.10 — 2026-08-05
+
+Two configurations that were unreachable rather than merely awkward.
+
+### Added
+
+- **`[acme]` — auto-TLS from a config file** ([Askr-47]). ACME was flags-only, and since
+  1.4.6 `--config` is the whole configuration rather than a set of defaults, so auto-TLS
+  and a config file were mutually exclusive. That made real setups impossible to express:
+  `trusted_proxies` has never had a flag, so "auto-TLS behind a proxy" could not be
+  written down at all. Every flag now has a key — `enabled`, `domains`, `email`, `dir`,
+  `staging`, `directory_url`, `http`, `ca_root`.
+
+  The section refuses to start on the mistakes that would otherwise end with a site
+  quietly serving plain HTTP: `domains` without `enabled` (TOML defaults a missing bool to
+  false, so the file *looks* like it asked for TLS), `enabled` without `domains`, `[acme]`
+  alongside `[tls]`, and a wildcard domain — HTTP-01 cannot validate one, and finding that
+  out from a rate-limited Let's Encrypt rejection is a poor way to learn it.
+
+  Two things fell out of writing it. The redirect front was started with the *CLI*
+  `--force-https` flag, which is empty on the config path — auto-TLS from a file would have
+  silently stopped redirecting HTTP. And the resolved config reported `https = false` with
+  ACME enabled, because `https` was only implied by a certificate on disk; anything reading
+  it before the ACME step ran, logging and admin status included, said plain HTTP. Both
+  found by tests written for the feature rather than by review.
+
+  `--config` still refuses to run alongside flags it would ignore. The difference is that
+  the error is now actionable: there is somewhere to move them to.
+
+- **Real queue introspection: `askr_queue_stats()`** ([Askr-48]). Laravel 13's `Queue`
+  contract asks for pending, delayed and reserved counts plus the oldest pending job's age.
+  1.4.9 could only answer the first, so `queue:monitor` saw no delayed backlog at all —
+  honest, but still an operator watching a flat line that meant nothing.
+
+  Queue entries gained a `created_at`, and one pass over the slot table buckets every job.
+  Reading all four together is the point: with separate calls, a job that becomes available
+  in between can be counted twice or not at all, and a dashboard built on numbers that
+  don't add up is worse than no dashboard. The test asserts the sum invariant, not just the
+  individual counts.
+
+  The package uses it when the server offers it and keeps 1.4.9's honest fallbacks
+  otherwise, since it supports servers older than itself. `size()` and `pendingSize()`
+  remain identical, so existing `queue:monitor` thresholds keep their meaning.
+
+  The `--features sql-backend` build caught what review didn't: the L2 SQLite queue
+  registers the same bridge and needed its own implementation. It has both backends
+  answering to one invariant test now — and its table stores seconds where shared memory
+  stores milliseconds, so the test asserts the unit rather than trusting it.
+
+### Also in this release
 
 - **CI now tests the Laravel package against every Laravel major it claims to support.**
   Nothing ever had. `packages/laravel/composer.json` has declared
@@ -1770,3 +1819,6 @@ config and an admin dashboard. See [`docs/`](docs/README.md).
 ### Not yet
 - HTTP/3 (QUIC), the per-core io_uring I/O core (Linux), multipart `$_FILES`,
   and the `askr-laravel` composer package.
+
+[Askr-47]: https://wirelabs.youtrack.cloud/issue/Askr-47
+[Askr-48]: https://wirelabs.youtrack.cloud/issue/Askr-48

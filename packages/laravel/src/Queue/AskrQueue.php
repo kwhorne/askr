@@ -40,36 +40,62 @@ final class AskrQueue extends BaseQueue implements QueueContract
     /**
      * Jobs waiting for their delay to elapse.
      *
-     * Askr's shared-memory queue tracks this per entry (`available_at`), but does not yet
-     * expose it to PHP — `askr_queue_size()` is the only counter there is. Returning 0 is
-     * a deliberate understatement rather than a guess: `queue:monitor` and friends will
-     * see no delayed backlog on this driver. Tracked in the Askr issue tracker; when the
-     * server grows a stats function this will use it.
+     * Needs Askr 1.4.10 or newer, which exposes `askr_queue_stats()`. Against an older
+     * server there is no way to know, and 0 is a deliberate understatement rather than a
+     * guess — see {@see stats()}.
      */
     public function delayedSize($queue = null): int
     {
-        return 0;
+        return $this->stats($queue)['delayed'];
     }
 
     /**
-     * Jobs currently reserved by a worker. Not yet exposed to PHP — see
-     * {@see delayedSize()}.
+     * Jobs currently held by a worker whose visibility window hasn't lapsed.
+     * Needs Askr 1.4.10 or newer — see {@see delayedSize()}.
      */
     public function reservedSize($queue = null): int
     {
-        return 0;
+        return $this->stats($queue)['reserved'];
     }
 
     /**
-     * When the oldest available job was created, as a Unix timestamp.
+     * When the oldest job that is available right now was pushed, as a Unix timestamp.
      *
-     * Askr's queue entries carry an id and an availability time, not a creation time, so
-     * there is nothing honest to return here. `null` is a documented value in the
-     * contract and means "unknown" rather than "no jobs".
+     * `null` means "unknown", which is what the contract documents and what an older
+     * server can honestly say. It does **not** mean the queue is empty.
      */
     public function creationTimeOfOldestPendingJob($queue = null): ?int
     {
-        return null;
+        $ms = $this->stats($queue)['oldest_pending_created_ms'];
+
+        return $ms > 0 ? intdiv($ms, 1000) : null;
+    }
+
+    /**
+     * All four counters from a single pass over the shared-memory slot table.
+     *
+     * Reading them together matters: with separate calls a job that becomes available
+     * between two of them can be counted twice or not at all, and a dashboard built on
+     * numbers that don't add up is worse than no dashboard.
+     *
+     * Askr before 1.4.10 exposed only `askr_queue_size()`, so the three counters it
+     * couldn't answer stay at their "unknown" values instead of being invented. The
+     * package supports servers older than itself, so the check is a runtime one.
+     *
+     * @return array{pending:int, delayed:int, reserved:int, oldest_pending_created_ms:int}
+     */
+    protected function stats($queue = null): array
+    {
+        if (function_exists('askr_queue_stats')) {
+            return askr_queue_stats($this->queueName($queue));
+        }
+
+        return [
+            'pending' => askr_queue_size($this->queueName($queue)),
+            'delayed' => 0,
+            'reserved' => 0,
+            'oldest_pending_created_ms' => 0,
+        ];
     }
 
     public function push($job, $data = '', $queue = null)
