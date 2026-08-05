@@ -3,6 +3,27 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+- **`docs/MAINTENANCE.md`** — what to do after the server is running, which no existing page
+  covered: the 30-second check and which `/api/status` fields actually matter (`respawns`
+  climbing by itself is the most informative number on the box), reload-not-restart and why
+  (shared memory holds the sessions, cache and queue), the three independent caches and the
+  browser one that isn't on the server, certificate checks, backups of the three things that
+  matter, capacity starting points, and a monthly ten-minute list whose normal outcome is
+  "nothing to do".
+
+  Two entries are there because they cost real time: **access and traffic logs never
+  rotate** — append-only descriptors that will fill a disk, so the logrotate recipe needs
+  `copytruncate` or a renamed file goes on receiving lines invisibly — and a "things not to
+  do" table where every row has actually gone wrong.
+
+- **Fixed a stale liveness recommendation in `docs/UBUNTU.md`.** It told you to probe
+  `/api/status`, which 1.4.2 gated behind `ASKR_ADMIN_TOKEN` — so following the docs and
+  then setting a token made every orchestrator declare a healthy server unhealthy. That is
+  the exact failure `/healthz` was added to remove, and the page still pointed at the wrong
+  endpoint.
+
 ## 1.4.10 — 2026-08-05
 
 Two configurations that were unreachable rather than merely awkward.

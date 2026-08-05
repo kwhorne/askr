@@ -40,6 +40,7 @@ requests against it, eliminating per-request framework bootstrap.
 | [Deployment](DEPLOYMENT.md) | Production: systemd, TLS, zero-downtime reload, recycling, scaling, hardening. |
 | [Upgrading](UPGRADING.md) | How to upgrade and roll back, what's worth adopting at each version, and an honest list of what can bite you. |
 | [Ubuntu setup](UBUNTU.md) | **Recommended production install** on Ubuntu (release tarball, systemd, TLS, tuning). |
+| [Maintenance](MAINTENANCE.md) | **After it's running**: the 30-second check, deploys, clearing the three caches, certificates, log rotation, backups, and the mistakes already made in production. |
 
 ## 60-second tour
 
@@ -57,7 +58,8 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
   --workers "$(nproc)" --tls-self-signed --admin 127.0.0.1:9000
 ```
 
-Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md).
+Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md). Then
+[Maintenance](MAINTENANCE.md) for the operating side.
 Building from source: [Building](BUILDING.md).
 
 ## What works today (1.4.10)

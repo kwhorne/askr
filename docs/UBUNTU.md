@@ -268,8 +268,20 @@ curl -s http://127.0.0.1:9000/api/status     # workers alive, RSS, uptime
 curl -s http://127.0.0.1:9000/api/metrics    # req/s, PHP vs I/O, latency
 ```
 
-Use `workers_alive > 0` on `/api/status` as a liveness probe. See
-[Admin](ADMIN.md).
+For a liveness probe use **`/healthz`**, not `/api/status`:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9000/healthz
+```
+
+`/api/status` returns PIDs and memory figures, so it is gated as soon as you set
+`ASKR_ADMIN_TOKEN` — and a probe pointed at it then declares a healthy server
+unhealthy. `/healthz` is deliberately unauthenticated and answers liveness only.
+See [Admin](ADMIN.md).
+
+Day-to-day operations — what to check, log rotation, backups, cache clearing,
+certificates and the mistakes worth avoiding — are in
+[Maintenance](MAINTENANCE.md).
 
 ### Logs
 

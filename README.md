@@ -79,6 +79,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 
 - [**Laravel setup**](docs/LARAVEL.md) — **recommended Laravel guide**: `composer require kwhorne/askr-laravel`, `.env`, queue/scheduler/broadcasting, durable L2
 - [Ubuntu setup](docs/UBUNTU.md) — **recommended production install** (systemd, TLS, tuning)
+- [Maintenance](docs/MAINTENANCE.md) — operating it: checks, deploys, caches, certs, log rotation, backups
 - [Architecture](docs/ARCHITECTURE.md) — how it works, and why processes not threads
 - [Building](docs/BUILDING.md) — `libphp` + `askr`, the extension matrix
 - [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
