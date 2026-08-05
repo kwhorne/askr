@@ -24,6 +24,7 @@ longer than it looks. `examples/laravel-worker.php` clears:
 | Scoped instances + the `request` | Anything bound per request. |
 | Open DB transactions | A request that died mid-transaction would poison the next one. |
 | Locale, log context, `Str` caches | Smaller drift, same class of bug. |
+| `Livewire::flushState()` | Livewire's `hasRenderedScripts` singleton decides whether `@livewireScripts` emits its `<script>` tag. Left set, only the **first** response from each worker included `livewire.js` — and Alpine ships in that bundle, so every later page had `x-data`/`x-show`/`wire:` doing nothing, with a completely clean console. Nothing failed; the script was never there. |
 
 If you maintain your own worker script, copy that function rather than writing your own
 list — the session one in particular is not obvious, and its failure mode is silent.

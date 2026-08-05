@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.7; ARCH=$(uname -m)
+VER=v1.4.8; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.7     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.8     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.7-full`) are the same server built with the optional features
+The `-full` tags (`1.4.8-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,22 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.8
+
+**Upgrade if you run Livewire, Flux or anything needing Alpine in worker mode**, and take
+the worker script with it — the fix is in `examples/laravel-worker.php`, so a new binary
+alone changes nothing if you copied the old script into your project:
+
+```bash
+docker pull ghcr.io/kwhorne/askr:1.4.8
+docker run --rm ghcr.io/kwhorne/askr:1.4.8 \
+  sh -lc 'cat /opt/askr/examples/laravel-worker.php' > storage/askr-worker.php   # if you keep your own copy
+```
+
+Symptoms this fixes: interactivity that works for the first page load or two and then
+stops, `wire:` and `x-` attributes doing nothing, a Flux appearance toggle showing both
+icons — all with an empty console, because the script tag was missing rather than broken.
 
 ### To 1.4.7
 

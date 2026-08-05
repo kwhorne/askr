@@ -3,6 +3,31 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.8 — 2026-08-05
+
+**Livewire's JavaScript vanished after the first request per worker.** If you run Livewire
+(or Flux, or anything depending on Alpine) in worker mode, upgrade — and take the new
+worker script with it.
+
+### Fixed
+
+- **`examples/laravel-worker.php` now calls `Livewire::flushState()` between requests.**
+  Livewire tracks in a container singleton whether it has already emitted its
+  `<script>` tag. In a long-lived worker that flag stayed set, so **only the first
+  response from each worker included `livewire.js`** — and since Alpine ships inside that
+  bundle, every later page had `x-data`, `x-show` and `wire:` silently doing nothing.
+
+  The console stayed clean, which is what made it hard: nothing failed, the script simply
+  wasn't there. With four workers the site appeared to work for the first few page loads
+  and then stopped — reported as "it works for a brief moment". What finally gave it away
+  was a Flux dark-mode toggle rendering **both** its sun and moon icons at once: two
+  `x-show` directives, neither evaluated.
+
+  Livewire already knows how to reset this — `flushState()` fires the `flush-state` hook
+  that resets the flag, the same mechanism Octane relies on. Askr's worker script just
+  never asked. Verified on a real deployment: the script tag went from 0 of 10 page loads
+  to 10 of 10.
+
 ## 1.4.7 — 2026-08-05
 
 **Upgrade if you serve HTTPS.** HTTP/2 requests lost the host they were addressed to, and

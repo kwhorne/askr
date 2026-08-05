@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v1.4.7</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v1.4.8</strong> &nbsp;·&nbsp; MIT
 </p>
 
 <p align="center">
@@ -51,7 +51,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v1.4.7; ARCH=$(uname -m)
+VER=v1.4.8; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -100,7 +100,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 - [Upgrading](docs/UPGRADING.md) — how to upgrade and roll back, what to adopt per version, and what can bite you
 
-## What works today (1.4.7)
+## What works today (1.4.8)
 
 - Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
 - **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -212,6 +212,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 | **1.4.5** — **Askr-46 fixed at the root**: the output layer resets between worker requests, `exit()` ends the request not the worker, and an escaping exception costs a 500 instead of a worker | ✅ |
 | **1.4.6** — lessons from a first real deployment: `--config` refuses to silently ignore flags, plus Linux bind-mount ownership, artisan-without-a-PHP-CLI, and running behind nginx | ✅ |
 | **1.4.7** — security/correctness: HTTP/2 requests lost their host, so URLs became `localhost`, vhosts fell through to the default site, and cache keys could collide across domains | ✅ |
+| **1.4.8** — Livewire's JavaScript vanished after the first request per worker, so Alpine never loaded and every `x-show`/`wire:` silently did nothing | ✅ |
 | **Post-1.0** — durable-tier polish, per-site worker pools, and the experiments tracked in the issue tracker (AI/LLM cache, Varnish-grade edge cache, P2P cluster). | 🔭 |
 
 1.0 is a frozen, stress-validated base. The benchmark against FrankenPHP/FPM/RoadRunner

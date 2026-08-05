@@ -210,6 +210,20 @@ function askr_reset_state($app): void
         }
     }
 
+    // Livewire keeps per-request state in container singletons, and the most visible one
+    // decides whether `@livewireScripts` emits its <script> tag at all: after the first
+    // response from a worker, `hasRenderedScripts` stayed true and every later page went
+    // out WITHOUT livewire.js. Alpine ships in that bundle, so on those pages every
+    // `x-data`/`x-show`/`wire:` silently did nothing — and the console was clean, because
+    // nothing failed; the script was simply never there. A Flux dark-mode toggle showed
+    // both its sun and moon icons at once, which is what finally gave it away.
+    //
+    // Livewire already knows how to reset this; it just has to be asked. `flushState()`
+    // fires its `flush-state` hook, which is what Octane relies on too.
+    if ($app->bound('livewire') && $app->resolved('livewire')) {
+        $app->make('livewire')->flushState();
+    }
+
     // Per-request log context (Laravel 10+), so one request's context doesn't annotate
     // the next one's lines.
     if ($app->resolved('log')) {
