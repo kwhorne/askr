@@ -10,6 +10,29 @@ This ships as **Server-Sent Events (SSE)**, which covers most "live update" need
 is also a **Pusher-compatible WebSocket** endpoint (`--pusher`, a drop-in Reverb,
 with private/presence auth) — see [Features](FEATURES.md).
 
+## WebSocket needs HTTP/1.1
+
+The `/app/{key}` endpoint upgrades over **HTTP/1.1 only**. HTTP/2 forbids the `Connection`
+and `Upgrade` headers (RFC 9113 §8.2.2), and Askr does not yet implement the h2 replacement
+for them, extended CONNECT (RFC 8441) — see [Askr-49].
+
+This does not affect browsers: Echo and pusher-js use the browser's WebSocket API, which
+negotiates HTTP/1.1 for this regardless of what the page was loaded over. Broadcasting
+works in production.
+
+It does affect **test clients**. Since TLS negotiates h2 by default via ALPN, a handshake
+check must ask for 1.1 explicitly, or it gets a 404 — which looks exactly like a missing
+endpoint:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' --http1.1 \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  https://example.com/app/YOUR_APP_KEY          # 101, not 404
+```
+
+[Askr-49]: https://wirelabs.youtrack.cloud/issue/Askr-49
+
 ## Enabling it
 
 ```bash

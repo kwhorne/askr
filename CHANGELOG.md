@@ -5,6 +5,24 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **Documented that WebSocket requires HTTP/1.1** ([Askr-49]). HTTP/2 forbids the
+  `Connection` and `Upgrade` headers, so the upgrade check never matches, the request falls
+  through to the front controller, and Laravel answers a perfectly correct **404** with
+  nothing in the log. Since TLS negotiates h2 by default via ALPN, that is the *default*
+  path for any client that doesn't ask for 1.1 — found while verifying a deployment over h2
+  on purpose, because h2 has hidden a bug here before.
+
+  Browsers are unaffected: Echo and pusher-js use the browser's WebSocket API, which does
+  1.1 for this regardless of the page's protocol. What it breaks is test clients, which then
+  conclude the endpoint doesn't exist.
+
+  The fix is RFC 8441 extended CONNECT, tracked in the issue. Not the tempting shortcut of
+  answering 426 when `/app/…` is requested over h2 without upgrade headers: `/app` is an
+  extremely common Laravel route namespace — the deployment this was found on serves its
+  whole dashboard there — and the only thing separating a WebSocket attempt from a real page
+  is the header h2 doesn't send. That heuristic would turn working pages into errors.
+
+
 - **`docs/MAINTENANCE.md`** — what to do after the server is running, which no existing page
   covered: the 30-second check and which `/api/status` fields actually matter (`respawns`
   climbing by itself is the most informative number on the box), reload-not-restart and why
@@ -1843,3 +1861,4 @@ config and an admin dashboard. See [`docs/`](docs/README.md).
 
 [Askr-47]: https://wirelabs.youtrack.cloud/issue/Askr-47
 [Askr-48]: https://wirelabs.youtrack.cloud/issue/Askr-48
+[Askr-49]: https://wirelabs.youtrack.cloud/issue/Askr-49

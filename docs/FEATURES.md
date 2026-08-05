@@ -419,7 +419,9 @@ Two things that catch people:
   what the server says. (Verified the hard way on a real deployment.)
 - Echo opens the socket over HTTP/1.1 on the same port as the site; nothing extra to
   publish or proxy. Verified: `wss://example.com/app/{key}` answers
-  `101 Switching Protocols`.
+  `101 Switching Protocols`. **HTTP/1.1 is required** — h2 has no `Upgrade` header and Askr
+  does not yet do RFC 8441 extended CONNECT, so a test client that defaults to h2 gets a
+  404. Browsers are unaffected; see [BROADCAST.md](BROADCAST.md#websocket-needs-http11).
 
 A `private-`/`presence-` subscription must carry a valid `auth` token — the same
 `HMAC-SHA256(secret, "socket_id:channel[:channel_data]")` Laravel's
