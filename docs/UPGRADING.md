@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.10; ARCH=$(uname -m)
+VER=v1.4.11; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.10     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.11     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.10-full`) are the same server built with the optional features
+The `-full` tags (`1.4.11-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,27 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.11
+
+Nothing to do; everything is additive. Two things you may now see for the first time:
+
+- **`WARN queue backlog is not being consumed`** in the log, naming a queue. It is telling you
+  the truth: jobs on that queue are not being taken. Either no queue worker is running
+  (`--queue` with `--queue-script`) or it doesn't poll that name (`ASKR_QUEUE`,
+  comma-separated). This was previously invisible.
+- **`/api/status` has a `queues` array.** `queue_ready` and friends are unchanged.
+
+Worth running once against a running deployment:
+
+```bash
+askr doctor --app /var/www/example.com        # from inside the container, ideally
+./scripts/smoke.sh https://example.com http://127.0.0.1:9000 "$ASKR_ADMIN_TOKEN"
+```
+
+Both exit non-zero on a failure, so they can gate a deploy. The first found a real
+misconfiguration on the deployment it was written against; the second found a real
+production fault on its first run.
 
 ### To 1.4.10
 

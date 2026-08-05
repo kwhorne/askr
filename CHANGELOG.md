@@ -3,13 +3,15 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
-## Unreleased
+## 1.4.11 — 2026-08-05
 
-Two features against the same thing: **a configuration that cannot work should say so.**
-Every failure worth an afternoon on this project has been silent — a queue with no
-consumer, a worker polling the wrong name, a mailer under the vendor's variable name
-instead of Laravel's, a scheduler shelling out to a binary the image doesn't have. None of
-them produced an error. The server had every number needed to know, and said nothing.
+**Breaking silence.** Every failure worth an afternoon on this project has been silent: a
+queue with no consumer, a worker polling the wrong queue name, a mailer configured under the
+vendor's variable name instead of Laravel's, a scheduler shelling out to a binary the image
+does not contain, a stylesheet that 404s behind a year-long browser cache. None of them
+produced an error. The server held every number needed to know, and said nothing. This
+release is a watchdog that speaks up, a pre-flight check that refuses, per-queue numbers
+that can't be misread, and a smoke test that looks for the absence of the unexpected.
 
 ### Added
 
@@ -32,6 +34,30 @@ them produced an error. The server had every number needed to know, and said not
   "1 job ready" was true and said nothing about *which* queue. Warns once a minute per
   queue, and forgets a queue as soon as it drains so a recurrence is reported immediately.
   Runs regardless of autoscaling — a fixed-size pool is exactly where this goes unnoticed.
+
+- **Per-queue counts in `/api/status`.** A `queues` array with `pending`, `delayed`,
+  `reserved` and `oldest_pending_secs` for every queue holding a job. The aggregate
+  `queue_ready` is what hid the failure above: "1 job ready" is true whether the job is on a
+  queue a worker polls or one nobody listens to. Queue names come from the application, so
+  they are the only field in that document that isn't machine-generated — they are escaped,
+  with a test, because an app may name a queue anything it likes.
+
+- **`scripts/smoke.sh <url> [admin-url] [token]`** — a post-deploy check whose every entry is
+  a failure that shipped: an empty 200, a page that worked once per worker, a form that lost
+  its fields, `localhost` in URLs over HTTP/2, an asset referencing a build that no longer
+  exists, a stale queue backlog. Exits with the number of failures so CI can gate on it.
+
+  **It found a real fault the first time it ran against production**: the home page
+  referenced a stylesheet that 404s. Invisible in a browser, because every browser still had
+  the file cached under `immutable, max-age=1 year`. The cause is worth knowing — Laravel
+  caches Vite's `manifest.json` per process, so workers that booted before `npm run build`
+  serve the previous build's filenames indefinitely. A reload fixed it; it is now in the
+  worker-mode symptom index and in the deploy order.
+
+  Writing it produced its own lesson. The asset check originally tested only the first
+  reference it found, so it caught the 404 on one run and missed it on the next. A check that
+  intermittently notices a real failure is barely better than none; it now checks every
+  referenced asset.
 
 - **`askr doctor --app <path>`** checks the application against the environment it will run
   in, and exits non-zero so it can gate a deploy. It greps `app/` for `onQueue()` and

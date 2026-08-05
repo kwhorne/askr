@@ -185,8 +185,34 @@ fn status_json(info: &Info) -> String {
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    // Per-queue, because the aggregate hides the failure that matters. "queue_ready: 1"
+    // is true whether the job is on a queue a worker polls or one nobody listens to, and
+    // that ambiguity is what let a site's password-reset mail stop without anyone
+    // noticing. The name comes from the ring, so it is what the app actually dispatched to.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let queues = crate::queue::by_queue()
+        .into_iter()
+        .map(|(name, c)| {
+            let age = if c.oldest_pending_created_ms > 0 {
+                now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
+            } else {
+                0
+            };
+            format!(
+                r#"{{"queue":{name},"pending":{p},"delayed":{d},"reserved":{r},"oldest_pending_secs":{age}}}"#,
+                name = json_string(&name),
+                p = c.pending,
+                d = c.delayed,
+                r = c.reserved,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"rollout":"{ro}","workers":[{workers}],"pids":[{pids}]}}"#,
+        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"queues":[{queues}],"rollout":"{ro}","workers":[{workers}],"pids":[{pids}]}}"#,
         ver = env!("CARGO_PKG_VERSION"),
         listen = info.server_listen,
         mode = info.mode,
@@ -201,6 +227,29 @@ fn status_json(info: &Info) -> String {
         qo = s.queue_oldest_secs,
         ro = s.rollout,
     )
+}
+
+/// Quote a string for JSON.
+///
+/// Queue names come from the application, so they are the one field here that is not
+/// machine-generated — everything else in this document is a number or a fixed word. An
+/// app is free to name a queue `say "hi"`, and a hand-built document has to survive it.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn metrics_json() -> String {
@@ -612,6 +661,18 @@ refresh(); setInterval(refresh, 2000);
 
 #[cfg(test)]
 mod tests {
+
+    /// Queue names come from the application, and they are the only field in the status
+    /// document that isn't machine-generated. A name with a quote in it would otherwise
+    /// produce a document that parses as something else — or not at all.
+    #[test]
+    fn queue_names_are_escaped_in_json() {
+        assert_eq!(json_string("mail"), "\"mail\"");
+        assert_eq!(json_string("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+        assert_eq!(json_string("line\nbreak"), "\"line\\nbreak\"");
+        assert_eq!(json_string("bell\u{7}"), "\"bell\\u0007\"");
+    }
     use super::*;
 
     /// These responses are built with `format!`, not a serializer. Nothing interpolated

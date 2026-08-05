@@ -80,6 +80,13 @@ php artisan config:cache
 sudo systemctl reload askr       # last
 ```
 
+**The reload is last for a reason, and a frontend build is the sharpest case.** Laravel caches
+Vite's `manifest.json` for the life of the process, so workers that started before
+`npm run build` keep serving the *previous* build's filenames — which now 404. You will not
+see it: your browser still holds the old asset under `immutable, max-age=1 year`. Every new
+visitor gets a page with no stylesheet. `scripts/smoke.sh` checks every referenced asset for
+exactly this.
+
 ### The Vite trap
 
 `VITE_*` variables are **compiled into the JavaScript bundle**. A frontend built before
@@ -193,6 +200,27 @@ request, including body hashes, so it's both large and sensitive. Turn it on, ga
 representative day, run [`askr cache-report`](CACHE.md), turn it off.
 
 ---
+
+## After every deploy: `scripts/smoke.sh`
+
+```bash
+./scripts/smoke.sh https://example.com http://127.0.0.1:9000 "$ASKR_ADMIN_TOKEN"
+```
+
+Exits with the number of failures, so CI can gate on it. Every check in it is a failure that
+actually shipped: a 200 with an empty body, a page that worked once per worker, a form that
+lost its fields, a URL that said `localhost` over HTTP/2, an asset referencing a build that
+no longer exists, a queue accepting jobs nothing consumed.
+
+Two of its habits are worth copying into anything else you write:
+
+- It checks for the **absence of the unexpected**, not only the presence of the expected.
+  Grepping for `<title>` matched happily with deprecation warnings printed in front of it.
+- It exercises **HTTP/2 as well as 1.1**. TLS negotiates h2 by default, and that is how a bug
+  making every generated URL say `localhost` survived 23 million requests.
+
+It found a real fault the first time it ran against production — a stylesheet 404 nobody
+could see because every browser still had the file cached.
 
 ## Backups
 

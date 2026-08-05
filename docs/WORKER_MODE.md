@@ -26,6 +26,7 @@ before the cause was obvious.
 | A worker dies after the first file response, ~1 request in 3 fails | PHP's output layer kept a "sent" flag across requests, which ext-zlib turned into an `ErrorException` outside the kernel's try. Fixed 1.4.5. |
 | `askr: php worker died mid-request` (502) | Something fatalled or `exit()`ed. **Read the log** — since 1.4.5 it names the class, method, file and line. Most recently: a queue driver missing a contract method added by a new Laravel major. |
 | Generated URLs and redirects point at `localhost` over HTTPS | HTTP/2 sends no `Host` header. Fixed 1.4.7. |
+| Some page loads reference a CSS/JS file that 404s, others are fine — and it looks correct in *your* browser | Laravel caches Vite's `manifest.json` per process. Workers that booted before `npm run build` hand out the previous build's filenames forever. Your browser hides it: it still holds the old file under `immutable, max-age=1 year`. **Reload after every frontend build.** |
 
 The pattern to take away: **a clean console does not mean working JavaScript**, and a 200 does
 not mean a body. Count what the browser actually received before theorising.
