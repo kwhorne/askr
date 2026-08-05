@@ -3,6 +3,36 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.9 — 2026-08-05
+
+**`kwhorne/askr-laravel` was broken on Laravel 13.** Fatal on any page that touched the
+queue — sending mail, most visibly. Upgrade the package: `composer update
+kwhorne/askr-laravel`. No server change.
+
+### Fixed
+
+- **`AskrQueue` now implements Laravel 13's full `Queue` contract.** Laravel 13 added
+  `pendingSize()`, `delayedSize()`, `reservedSize()` and
+  `creationTimeOfOldestPendingJob()`. A class missing an abstract method is a **fatal at
+  load time**, so the queue driver killed the worker the moment anything resolved it —
+  surfacing as `askr: php worker died mid-request` and a 502, not a graceful error. The
+  package claimed `illuminate/queue: ^13` support since 1.4.0 and didn't have it.
+
+  `pendingSize()` maps exactly onto what Askr counts (available now, delay elapsed, no
+  live reservation). The other three are **deliberately understated**: Askr's
+  shared-memory queue tracks delay and reservation per entry but exposes only
+  `askr_queue_size()` to PHP, so `delayedSize()`/`reservedSize()` return 0 and
+  `creationTimeOfOldestPendingJob()` returns `null` — the contract's documented "unknown".
+  Returning invented numbers to `queue:monitor` would be worse than returning none.
+  Proper introspection needs a new server-side function; filed separately.
+
+### Worth noting
+
+The 502 was informative rather than mysterious, and that was the point of 1.4.4's
+diagnosis work: the log named the class, the missing methods, the file and the line. Six
+releases ago the same failure would have printed "fatal/OOM?" and sent someone looking at
+memory limits.
+
 ## 1.4.8 — 2026-08-05
 
 **Livewire's JavaScript vanished after the first request per worker.** If you run Livewire

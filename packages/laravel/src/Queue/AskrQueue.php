@@ -23,6 +23,55 @@ final class AskrQueue extends BaseQueue implements QueueContract
         return askr_queue_size($this->queueName($queue));
     }
 
+    /**
+     * Jobs available to run right now.
+     *
+     * Laravel 13 added four introspection methods to the Queue contract, and a class that
+     * doesn't implement them is a **fatal error the moment it loads** — which in practice
+     * meant a 502 on any page that touched the queue (sending mail, for one) rather than
+     * a graceful failure. Same value as {@see size()}: Askr counts a job as available when
+     * its delay has elapsed and no worker holds a reservation.
+     */
+    public function pendingSize($queue = null): int
+    {
+        return askr_queue_size($this->queueName($queue));
+    }
+
+    /**
+     * Jobs waiting for their delay to elapse.
+     *
+     * Askr's shared-memory queue tracks this per entry (`available_at`), but does not yet
+     * expose it to PHP — `askr_queue_size()` is the only counter there is. Returning 0 is
+     * a deliberate understatement rather than a guess: `queue:monitor` and friends will
+     * see no delayed backlog on this driver. Tracked in the Askr issue tracker; when the
+     * server grows a stats function this will use it.
+     */
+    public function delayedSize($queue = null): int
+    {
+        return 0;
+    }
+
+    /**
+     * Jobs currently reserved by a worker. Not yet exposed to PHP — see
+     * {@see delayedSize()}.
+     */
+    public function reservedSize($queue = null): int
+    {
+        return 0;
+    }
+
+    /**
+     * When the oldest available job was created, as a Unix timestamp.
+     *
+     * Askr's queue entries carry an id and an availability time, not a creation time, so
+     * there is nothing honest to return here. `null` is a documented value in the
+     * contract and means "unknown" rather than "no jobs".
+     */
+    public function creationTimeOfOldestPendingJob($queue = null): ?int
+    {
+        return null;
+    }
+
     public function push($job, $data = '', $queue = null)
     {
         return $this->pushRaw($this->createPayload($job, $this->queueName($queue), $data), $queue);

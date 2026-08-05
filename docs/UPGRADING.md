@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.8; ARCH=$(uname -m)
+VER=v1.4.9; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.8     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.9     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.8-full`) are the same server built with the optional features
+The `-full` tags (`1.4.9-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,18 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.9
+
+**Package-only fix — `composer update kwhorne/askr-laravel`.** On Laravel 13 the queue
+driver was a fatal error at class-load time (missing contract methods), so anything that
+resolved the queue — sending mail, dispatching a job — killed the worker and answered 502
+with `askr: php worker died mid-request`. No server upgrade needed.
+
+Note that `delayedSize()` and `reservedSize()` report 0 and
+`creationTimeOfOldestPendingJob()` reports `null` on this driver: Askr's queue knows those
+values internally but doesn't expose them to PHP yet. If you rely on `queue:monitor`
+thresholds, use `pendingSize()`/`size()`, which are accurate.
 
 ### To 1.4.8
 
