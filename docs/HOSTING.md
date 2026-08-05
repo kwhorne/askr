@@ -180,6 +180,53 @@ to   = "https://domene.no"
 This one instance serves two apps, forces HTTPS, redirects `www.domene.no` to the
 apex, and hot-reloads the certificate when certbot renews it.
 
+## Behind nginx (or any other proxy)
+
+Askr replaces nginx, but on a host where nginx already owns 80/443 and fronts other
+sites, the pragmatic setup is Askr on loopback with nginx proxying in. Two settings
+matter, and both are easy to get subtly wrong:
+
+```toml
+[server]
+listen = "0.0.0.0:8080"
+# The proxy terminated TLS: without this, Laravel builds http:// URLs and you get
+# redirect loops.
+https = true
+# The gateway of the Docker network, NOT 127.0.0.1 — that's the address the container
+# sees the proxy arrive from. Point it at loopback and X-Forwarded-For is ignored, so
+# every visitor looks like one IP and rate limiting lumps them together.
+trusted_proxies = ["172.18.0.0/16"]
+```
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;                      # don't buffer large downloads or SSE
+    proxy_set_header Upgrade    $http_upgrade; # broadcasting / Livewire streams
+    proxy_set_header Connection $connection_upgrade;
+}
+```
+
+**Pass everything through.** No `root`, no `try_files`, no `fastcgi_pass`: Askr already
+serves static files, negotiates gzip and brotli, sets `immutable` on hashed build assets,
+and refuses dotfiles and `.php` sources. Duplicating that in nginx only creates two places
+for the rules to disagree.
+
+Two things worth knowing:
+
+- `client_max_body_size` in nginx must match `max_body_size` in Askr, or one of them
+  returns 413 while the other would have accepted the upload.
+- `$connection_upgrade` isn't defined by default on every distribution. Without it
+  `nginx -t` fails with "unknown variable"; add the usual `map $http_upgrade
+  $connection_upgrade { default upgrade; '' close; }` at the top of the vhost.
+
+Askr sets no security headers of its own. Behind nginx you may already have them at the
+edge; serving directly, they're the application's job.
+
 ---
 
 ## Notes & limits

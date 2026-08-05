@@ -325,8 +325,20 @@ impl Server {
         let addr: SocketAddr = format!("127.0.0.1:{}", self.admin).parse().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-                return;
+            // A completed HTTP exchange, not just a TCP accept: the listener is bound a
+            // moment before it answers, so a connect-only probe let the first real
+            // request hit a closed connection and panic in the client.
+            if let Ok(mut sock) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
+                if sock
+                    .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    .is_ok()
+                {
+                    let mut buf = Vec::new();
+                    if sock.read_to_end(&mut buf).is_ok() && buf.starts_with(b"HTTP/") {
+                        return;
+                    }
+                }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1274,4 +1286,39 @@ script = "{}"
         "the worker must not be respawned by an exit():\n{}",
         s.log_contents()
     );
+}
+
+/// `--config` is the whole configuration, and must say so rather than ignore flags.
+///
+/// The file/CLI split is an either/or, not a merge: with `--config` given, every other
+/// serve flag was silently dropped. On a real deployment that turned
+/// `--workers=4 --worker-script=…` into 20 per-request workers with nothing in the log
+/// to explain it. Refusing costs one clear error; ignoring costs an afternoon.
+#[test]
+fn config_file_with_conflicting_flags_is_refused() {
+    let dir = unique_dir("configflags");
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/index.php"), "<?php echo 'ok';").unwrap();
+    let cfg = dir.join("askr.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "[server]\nlisten = \"127.0.0.1:{}\"\nroot = \"{}\"\n",
+            free_port(),
+            dir.join("app").to_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args(["serve", "--config", cfg.to_str().unwrap(), "--workers", "4"])
+        .output()
+        .expect("run askr");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "should refuse; stderr: {err}");
+    assert!(
+        err.contains("--workers"),
+        "the error must name the ignored flag: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

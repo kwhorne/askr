@@ -3,6 +3,44 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.6 — 2026-08-05
+
+Everything here came from deploying to a real server for the first time. Four traps, each
+of which cost real time, and each invisible on a development Mac.
+
+### Fixed
+
+- **`--config` no longer ignores your other flags — it refuses to start.** The file and the
+  command line were an either/or, not a merge, so `--config x.toml --workers 4
+  --worker-script …` silently ran with the file's defaults: 20 per-request workers, with
+  nothing in the log to explain it. Askr now names the flags that would have been dropped
+  and points at the file. Correct usage is unaffected.
+
+### Documented
+
+- **Bind-mounting an app on Linux** ([DOCKER.md](docs/DOCKER.md)): the image runs as uid
+  999, a bind mount keeps the host's ownership, and Laravel can't write `storage/`. The
+  symptom is precise and misleading — **every PHP route 500s while static files serve
+  fine** — because Monolog fails during bootstrap. Fix: `user: "1000:1000"`. macOS hides
+  this entirely, so a working laptop compose file can fail on a server for this reason
+  alone. Same for a bind-mounted database: a named volume inherits the image's ownership
+  and works; a bind mount doesn't.
+
+- **No PHP CLI in the image** ([DOCKER.md](docs/DOCKER.md)): PHP is compiled into the
+  binary, so `exec askr php artisan` cannot work. Documented the sidecar-container
+  recipe — including why it must pass `SESSION_DRIVER=array` (the `askr` drivers live in
+  the running server's shared memory, not in a detached container).
+
+- **Running behind nginx** ([HOSTING.md](docs/HOSTING.md)): a verified vhost, plus the two
+  settings that are easy to get subtly wrong — `https = true` (or Laravel builds `http://`
+  URLs and loops) and `trusted_proxies` pointing at the **Docker network gateway**, not
+  `127.0.0.1`, or `X-Forwarded-For` is ignored and every visitor looks like one IP to the
+  rate limiter. Also: pass everything through, don't duplicate `try_files`/`fastcgi` —
+  Askr already serves static files, compresses, and refuses dotfiles.
+
+- **`Driver [askr] not supported`** ([package README](packages/laravel/README.md)): the
+  Laravel package wasn't installed. Now findable by searching the exact message.
+
 ## 1.4.5 — 2026-08-05
 
 **Askr-46 is fixed at the root**, and two whole failure classes went with it. In a real

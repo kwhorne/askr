@@ -12,6 +12,11 @@ askr serve --config askr.toml   # run (the file is authoritative)
 When `--config` is given, the file provides everything; other `serve` flags are
 ignored.
 
+> **A config file is the whole configuration.** `--config` is not merged with the other
+> flags — it replaces them. Askr refuses to start if you pass both, naming the flags that
+> would have been ignored, because the alternative is a server that runs with settings you
+> didn't choose and says nothing. Everything a flag can do has a key here.
+
 ## `askr.toml` reference
 
 A complete, commented example lives at

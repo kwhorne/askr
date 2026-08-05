@@ -516,6 +516,21 @@ fn main() -> anyhow::Result<()> {
                 cache_persist_key,
                 broadcast,
             ) = if let Some(path) = config_file {
+                // A config file is the WHOLE configuration: every other serve flag is
+                // ignored below, because this is an either/or rather than a merge.
+                // Silently. That cost an afternoon on a real deployment, where
+                // `--config` alongside `--workers=4 --worker-script=…` produced 20
+                // per-request workers and no hint as to why. Refuse instead: the flags
+                // belong in the file, and saying so beats guessing later.
+                let ignored = ignored_with_config();
+                anyhow::ensure!(
+                    ignored.is_empty(),
+                    "--config is the whole configuration, so these flags would be \
+                     ignored: {}\n\nMove them into {} (see docs/CONFIGURATION.md), or \
+                     drop --config and pass everything on the command line.",
+                    ignored.join(" "),
+                    path.display(),
+                );
                 let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
                 if let Some(base) = &r.app_base {
                     // Exported for the worker script; children inherit it across fork.
@@ -915,6 +930,39 @@ fn main() -> anyhow::Result<()> {
 /// Default worker count: the container's CPU limit (cgroup) when running in one,
 /// else the host's core count. Without this a `cpus: 2` container on a 64-core
 /// host would fork 64 workers (nproc reads the host, not the cgroup limit).
+/// Serve flags that a config file would silently override.
+///
+/// Read from argv rather than from the parsed values, so an explicitly-passed flag that
+/// happens to equal its default is still reported. Only `--config` itself is allowed.
+fn ignored_with_config() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_serve = false;
+    let mut skip_next = false;
+    for a in std::env::args().skip(1) {
+        if !in_serve {
+            in_serve = a == "serve";
+            continue;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--config" || a == "-c" {
+            skip_next = true; // its value
+            continue;
+        }
+        if a.starts_with("--config=") {
+            continue;
+        }
+        if a.starts_with("--") {
+            // Keep the flag name only; a value like a password has no business in an
+            // error message.
+            out.push(a.split('=').next().unwrap_or(&a).to_string());
+        }
+    }
+    out
+}
+
 fn default_workers() -> usize {
     #[cfg(target_os = "linux")]
     if let Some(n) = cgroup_cpu_limit() {

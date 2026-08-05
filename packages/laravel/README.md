@@ -20,6 +20,21 @@ tier. Run the server built with `--features sql-backend` and set
 embedded file, an embedded replica, or a `sqld`-managed database) to get durable
 jobs, a shared/edge cache, and cross-node broadcasting — no app changes.
 
+
+## `Driver [askr] not supported`
+
+`SESSION_DRIVER=askr` (or `CACHE_STORE`/`QUEUE_CONNECTION`) without this package
+installed. The drivers come from here, not from the server:
+
+```bash
+composer require kwhorne/askr-laravel
+php artisan package:discover      # only needed if you installed with --no-scripts
+```
+
+In worker mode the failure is a 500 on every route that touches the driver, and Askr's log
+names it: `uncaught InvalidArgumentException escaped the request handler: Driver [askr] not
+supported.`
+
 ## Why the session driver matters
 
 Running Laravel in a long-lived worker (Octane-style, which is how Askr serves)

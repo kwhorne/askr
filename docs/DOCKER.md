@@ -13,7 +13,7 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:1.4.5      # exact — use this in production
+ghcr.io/kwhorne/askr:1.4.6      # exact — use this in production
 ghcr.io/kwhorne/askr:1.4        # latest 1.4.x
 ghcr.io/kwhorne/askr:latest
 ```
@@ -43,7 +43,7 @@ the optional tiers compiled in — the **durable L2 SQL Anywhere backends**
 source:
 
 ```
-ghcr.io/kwhorne/askr:1.4.5-full
+ghcr.io/kwhorne/askr:1.4.6-full
 ghcr.io/kwhorne/askr:1.4-full
 ghcr.io/kwhorne/askr:full
 ```
@@ -60,6 +60,48 @@ your app on top.
 > **Ready-made scaffold:** [`examples/docker/`](../examples/docker/) has a
 > drop-in `Dockerfile`, `askr.toml`, `docker-compose.yml` and `.dockerignore` —
 > copy them to your Laravel project root and `docker compose up --build`.
+
+## Bind-mounting an app on Linux: file ownership
+
+The image runs as its own user (`askr`, uid 999). On Linux a bind mount keeps the host's
+ownership, so a project owned by your deploy user is **not writable** by the container —
+and Laravel needs to write `storage/` and `bootstrap/cache`.
+
+The symptom is specific and misleading: **every PHP route returns 500 while static files
+serve fine**, because Monolog can't open the log and the exception happens during
+bootstrap. Run as the owner of the files:
+
+```yaml
+services:
+    askr:
+        image: ghcr.io/kwhorne/askr:1.4.6
+        user: "1000:1000"        # uid:gid that owns the project
+        volumes:
+            - ../:/var/www/app
+```
+
+macOS hides this — Docker Desktop and OrbStack fudge ownership on bind mounts — so a
+compose file that works on a laptop can fail on the server for this reason alone.
+
+The same applies to any **database** container you bind-mount: a named volume inherits the
+image's ownership and just works, where a bind mount inherits the host's and doesn't.
+
+## No PHP CLI in the image
+
+PHP is compiled into the `askr` binary; there is no `php` executable. So
+`docker compose exec askr php artisan …` will not work. Run artisan from a small
+PHP image on the same network:
+
+```bash
+docker run --rm --network <your-net> -v "$PWD":/app -w /app \
+  -u "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e DB_HOST=<db-container> -e DB_PORT=3307 \
+  -e SESSION_DRIVER=array -e CACHE_STORE=array -e QUEUE_CONNECTION=sync \
+  php:8.4-cli php artisan migrate --force
+```
+
+`SESSION_DRIVER=array` is deliberate: the `askr` drivers live in the running server's
+shared memory and don't exist in a detached container.
 
 ## Your app image
 

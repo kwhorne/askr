@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.5; ARCH=$(uname -m)
+VER=v1.4.6; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.5     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.6     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.5-full`) are the same server built with the optional features
+The `-full` tags (`1.4.6-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,17 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.6
+
+**If you use `--config` together with other flags, Askr will now refuse to start** and tell
+you which flags it would have ignored. That's the fix: they were never applied. Move them
+into the config file. Nothing else changes.
+
+Worth reading if you deploy with Docker on Linux: the new
+[bind-mount ownership](DOCKER.md#bind-mounting-an-app-on-linux-file-ownership) and
+[behind-nginx](HOSTING.md#behind-nginx-or-any-other-proxy) sections cover the traps that
+make a laptop-tested compose file fail on a server.
 
 ### To 1.4.5
 

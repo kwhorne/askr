@@ -98,7 +98,7 @@ docker compose logs -f                               # PHP diagnostics land here
 into an image so a deploy is a new image rather than a mutated directory — that's
 [`examples/docker/docker-compose.yml`](../examples/docker/docker-compose.yml) with its
 `Dockerfile`, read-only root filesystem and a volume for `storage/`. Pin an exact version
-(`askr:1.4.5`), not `:1.4` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
+(`askr:1.4.6`), not `:1.4` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
 
 Then skip to [step 4: the Laravel side](#4-the-laravel-side).
 
@@ -112,7 +112,7 @@ Nothing is installed system-wide and no system PHP is touched.
 ### B1. Download and unpack
 
 ```bash
-VER=v1.4.5; ARCH=$(uname -m)
+VER=v1.4.6; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz
 cd askr-${VER#v}-linux-$ARCH
@@ -419,6 +419,19 @@ response — `MISS`/`HIT` means the cache is on, no header at all means it isn't
 
 **`Address already in use`.** Something else holds the port — often an earlier Askr you
 forgot: `pkill -f 'askr serve'`.
+
+**Every PHP route returns 500 but static files work.** On Linux, the container can't write
+`storage/` — the image runs as uid 999 and a bind mount keeps the host's ownership. Add
+`user: "1000:1000"` (the uid that owns the project). See
+[DOCKER.md](DOCKER.md#bind-mounting-an-app-on-linux-file-ownership). macOS hides this, so a
+compose file that works on your laptop can fail on the server.
+
+**Flags seem to be ignored.** If you pass `--config`, it *is* the configuration — the other
+flags aren't merged in. Askr now refuses to start and names them; before 1.4.6 it ignored
+them silently. Move them into the file: [CONFIGURATION.md](CONFIGURATION.md).
+
+**`Driver [askr] not supported`.** `SESSION_DRIVER=askr` needs the Laravel package:
+`composer require kwhorne/askr-laravel`.
 
 **`unrecognized subcommand 'askr'` from Docker.** Drop the leading `askr` — the
 image's entrypoint is the launcher already. See [A1](#a1-run-it).
