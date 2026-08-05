@@ -9,6 +9,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  laravel-package:
+    name: laravel package (contracts)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every major composer.json claims. Laravel 13 added four methods to the Queue
+        # contract, AskrQueue didn't have them, and a concrete class missing an abstract
+        # method is a fatal at class-load time — so the driver killed the worker on any
+        # page that resolved the queue. Nothing tested any of these versions until then.
+        laravel: ['11', '12', '13']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+      - name: Install against Laravel ${{ matrix.laravel }}
+        working-directory: packages/laravel
+        run: |
+          composer require --no-interaction --no-progress --dev \
+            "illuminate/support:^${{ matrix.laravel }}" \
+            "illuminate/contracts:^${{ matrix.laravel }}" \
+            "illuminate/queue:^${{ matrix.laravel }}" \
+            "illuminate/cache:^${{ matrix.laravel }}" \
+            "illuminate/database:^${{ matrix.laravel }}" \
+            "illuminate/http:^${{ matrix.laravel }}" \
+            "illuminate/broadcasting:^${{ matrix.laravel }}"
+      - name: Contract conformance
+        working-directory: packages/laravel
+        run: php tests/contracts.php
+      - name: Lint
+        working-directory: packages/laravel
+        run: find src tests -name '*.php' -print0 | xargs -0 -n1 php -l
+
   docs:
     name: docs links
     runs-on: ubuntu-latest

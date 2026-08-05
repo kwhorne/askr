@@ -399,6 +399,28 @@ askr serve … --pusher --pusher-secret "$PUSHER_APP_SECRET"
 # or $ASKR_PUSHER_SECRET / [pusher] secret in askr.toml
 ```
 
+A Laravel 12/13 app is scaffolded for **Reverb**, and its `reverb` connection speaks the
+same Pusher protocol — so point its env at Askr and delete the Reverb process:
+
+```dotenv
+BROADCAST_CONNECTION=reverb
+REVERB_APP_ID=askr
+REVERB_APP_KEY=<any key>
+REVERB_APP_SECRET=<must match --pusher-secret>
+REVERB_HOST=example.com     # your site, not a separate WS host
+REVERB_PORT=443             # the same TLS port the site is on
+REVERB_SCHEME=https
+```
+
+Two things that catch people:
+
+- **`VITE_REVERB_*` are baked into the JavaScript bundle at build time.** Get `.env` right
+  *before* `npm run build`, or the browser keeps trying `wss://localhost:8080` no matter
+  what the server says. (Verified the hard way on a real deployment.)
+- Echo opens the socket over HTTP/1.1 on the same port as the site; nothing extra to
+  publish or proxy. Verified: `wss://example.com/app/{key}` answers
+  `101 Switching Protocols`.
+
 A `private-`/`presence-` subscription must carry a valid `auth` token — the same
 `HMAC-SHA256(secret, "socket_id:channel[:channel_data]")` Laravel's
 `/broadcasting/auth` produces — or it's rejected with a `subscription_error`.

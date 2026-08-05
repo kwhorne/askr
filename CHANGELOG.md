@@ -3,6 +3,33 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+- **CI now tests the Laravel package against every Laravel major it claims to support.**
+  Nothing ever had. `packages/laravel/composer.json` has declared
+  `illuminate/*: ^11 || ^12 || ^13` since 1.4.0, and the first thing to check any of it was
+  a production 502: Laravel 13 added four methods to the `Queue` contract and `AskrQueue`
+  didn't have them.
+
+  `packages/laravel/tests/contracts.php` loads every class in the package — which is the
+  whole test, since PHP raises a fatal at *link* time when a concrete class is missing an
+  abstract method — and names the interface and method when something is absent. A CI
+  matrix runs it under Laravel 11, 12 and 13. Verified by deleting the 1.4.9 fix and
+  watching it fail.
+
+- **`docs/WORKER_MODE.md` gained a symptom → cause index.** Every worker-mode bug shipped
+  and fixed this week, keyed by what you actually see: interactivity that dies after the
+  first page load, an anonymous visitor served as somebody else, 419 on every form, empty
+  file downloads, `localhost` in generated URLs. They share a shape — state the framework
+  expects to be thrown away survives, and the failure is silent — so the index ends with
+  the two lessons that cost the most time: a clean console doesn't mean working
+  JavaScript, and a 200 doesn't mean a body.
+
+- **`docs/FEATURES.md` documents pointing a Reverb-scaffolded app at Askr's WebSocket**
+  (`REVERB_*` env → `--pusher`), including that `VITE_REVERB_*` is baked into the bundle at
+  build time, so `.env` has to be right *before* `npm run build`. Both learned on a real
+  deployment; the WebSocket handshake is verified.
+
 ## 1.4.9 — 2026-08-05
 
 **`kwhorne/askr-laravel` was broken on Laravel 13.** Fatal on any page that touched the

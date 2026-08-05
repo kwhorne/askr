@@ -10,6 +10,26 @@ On a real Laravel + Livewire app this drops per-request latency from ~110 ms to
 ~9 ms and roughly **9×**'s throughput.
 
 
+## Symptoms and their causes
+
+Worker-mode bugs share a shape: something the framework expects to be thrown away per
+request survives, and the failure is **silent**. This index is every one we've actually
+shipped and fixed, with the symptom that identifies it — because each of these cost hours
+before the cause was obvious.
+
+| What you see | What it was |
+|---|---|
+| Interactivity works for the first page load or two, then stops. `wire:`/`x-` do nothing. **Console completely clean.** A Flux appearance toggle shows *both* icons. | Livewire emits its `<script>` tag once per process. Only the first response from each worker carried `livewire.js` — and Alpine ships inside it. Nothing failed; the script was never there. Fixed 1.4.8. |
+| An anonymous visitor is served as a logged-in user, with no cookie at all | `session.store` is a separate singleton holding the loaded session; forgetting the guards wasn't enough. Fixed 1.4.3. |
+| Every HTML form post answers **419**, and `$request->input()` is empty | The urlencoded body was never parsed into the request. Reads as a CSRF bug; is an empty request. Fixed 1.4.3. |
+| File downloads, `flux.js`, streamed exports arrive **empty** with a 200 | `getContent()` returns `false` for `BinaryFileResponse`/`StreamedResponse`, and `echo false` prints nothing. Fixed 1.4.3. |
+| A worker dies after the first file response, ~1 request in 3 fails | PHP's output layer kept a "sent" flag across requests, which ext-zlib turned into an `ErrorException` outside the kernel's try. Fixed 1.4.5. |
+| `askr: php worker died mid-request` (502) | Something fatalled or `exit()`ed. **Read the log** — since 1.4.5 it names the class, method, file and line. Most recently: a queue driver missing a contract method added by a new Laravel major. |
+| Generated URLs and redirects point at `localhost` over HTTPS | HTTP/2 sends no `Host` header. Fixed 1.4.7. |
+
+The pattern to take away: **a clean console does not mean working JavaScript**, and a 200 does
+not mean a body. Count what the browser actually received before theorising.
+
 ## What has to be reset between requests
 
 A booted app that serves many requests must forget the previous one, and the list is

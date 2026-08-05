@@ -72,6 +72,21 @@ rather than only a unit test.
 Broken anchors are invisible on GitHub — the link renders normally and silently lands at
 the top of the page — so CI checks them.
 
+### The Laravel package
+
+`packages/laravel` declares support for three Laravel majors, and CI now checks all three:
+
+```bash
+cd packages/laravel
+composer require --dev "illuminate/support:^13" "illuminate/queue:^13" …
+php tests/contracts.php
+```
+
+It loads every class in the package, because PHP raises a fatal at *link* time when a
+concrete class is missing an abstract method — which is precisely how Laravel 13 broke
+`AskrQueue` in production while composer.json claimed to support it. Nothing had ever
+tested the package against any Laravel version.
+
 ## Releasing
 
 Maintainers: [`docs/RELEASING.md`](docs/RELEASING.md) is the checklist. It exists
