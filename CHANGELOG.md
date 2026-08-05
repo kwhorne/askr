@@ -3,6 +3,38 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## 1.4.7 — 2026-08-05
+
+**Upgrade if you serve HTTPS.** HTTP/2 requests lost the host they were addressed to, and
+three separate things went wrong as a result. ALPN negotiates h2 by default over TLS, so
+this affected every TLS deployment.
+
+### Fixed
+
+- **The request host is now read from `:authority` when there is no `Host` header.**
+  HTTP/2 and HTTP/3 don't send `Host`; the authority arrives as a pseudo-header, which
+  hyper exposes on the URI. Askr read only `Host`, so over h2 it fell back — differently,
+  and wrongly, in three places:
+
+  - **`HTTP_HOST`/`SERVER_NAME` became `localhost`.** Laravel builds URLs from the
+    request, so every redirect and generated link pointed at `https://localhost/…`. On a
+    real deployment, logging in landed the user on `https://localhost/two-factor/setup`.
+  - **Virtual-host matching saw an empty host** and fell through to the default site. With
+    `[[site]]` vhosts, an h2 request for one domain could be served another's application.
+  - **The response-cache key had an empty host component**, so two domains could share
+    cache entries.
+
+  One helper (`cgi::effective_host`) now serves all three, with unit tests for the h1, h2,
+  empty-header and neither-present cases.
+
+### Why it took this long to find
+
+Every test client in this repo speaks HTTP/1.1 — the e2e suite's own client, and the curl
+invocations in every previous verification. The multi-domain soak that drove 23 million
+requests through two hostnames with zero mis-routes ran entirely over h1. The bug needed
+TLS *and* a check of something derived from the host, and until Askr terminated TLS itself
+on a real server, nothing had asked for both at once.
+
 ## 1.4.6 — 2026-08-05
 
 Everything here came from deploying to a real server for the first time. Four traps, each

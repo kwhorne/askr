@@ -591,11 +591,8 @@ where
         .to_owned();
 
     // Request Host (lowercased, port stripped) — drives redirects + virtual hosts.
-    let host = req
-        .headers()
-        .get(hyper::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
+    let host = crate::cgi::effective_host(req.headers(), req.uri())
+        .unwrap_or_default()
         .split(':')
         .next()
         .unwrap_or("")
@@ -1944,7 +1941,10 @@ fn spawn_swr_refresh<B>(rt: &Arc<Runtime>, key: &[u8], req: &Request<B>, peer: S
             .unwrap_or("")
             .to_owned()
     };
-    let host = header(hyper::header::HOST);
+    // Same HTTP/2 trap as everywhere else: over h2/h3 there is no Host header, and a
+    // refresh that rebuilt the request without the host would render the wrong site's
+    // page into this key.
+    let host = crate::cgi::effective_host(req.headers(), req.uri()).unwrap_or_default();
     let accept_encoding = header(hyper::header::ACCEPT_ENCODING);
     // With `vary_user_agent`, the key splits on device class — so the refresh has
     // to render as the same class, or desktop HTML lands under the mobile key.

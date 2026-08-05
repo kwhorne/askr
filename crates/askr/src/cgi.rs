@@ -9,6 +9,35 @@ use hyper::http::request::Parts;
 
 use askr_php::Request;
 
+/// The host this request was addressed to, from either HTTP version.
+///
+/// **HTTP/2 and HTTP/3 have no `Host` header.** The authority arrives in the `:authority`
+/// pseudo-header, which hyper exposes on the URI. Reading only `Host` therefore found
+/// nothing the moment a client negotiated h2 — which happens by default over TLS via
+/// ALPN — and the fallbacks were quietly wrong in three different ways:
+///
+/// * `HTTP_HOST`/`SERVER_NAME` became `localhost`, so Laravel built every URL and
+///   redirect as `https://localhost/…` and login flows dead-ended;
+/// * virtual-host matching saw an empty host and fell through to the default site;
+/// * the response-cache key had an empty host component, so two domains could share
+///   entries.
+///
+/// None of it surfaced in testing, because every test client in this repo speaks
+/// HTTP/1.1. Found on a real deployment, the first time Askr terminated TLS itself.
+///
+/// Returns the authority as sent (port included); callers strip the port if they need to.
+pub fn effective_host(headers: &hyper::HeaderMap, uri: &hyper::Uri) -> Option<String> {
+    if let Some(h) = headers
+        .get(hyper::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(h.to_string());
+    }
+    uri.authority().map(|a| a.as_str().to_string())
+}
+
 /// Build an [`askr_php::Request`] for the front controller.
 #[allow(clippy::too_many_arguments)]
 pub fn build_request(
@@ -29,11 +58,8 @@ pub fn build_request(
         None => path.clone(),
     };
 
-    let host = parts
-        .headers
-        .get(hyper::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.split(':').next().unwrap_or(s).to_string())
+    let host = effective_host(&parts.headers, &parts.uri)
+        .map(|h| h.split(':').next().unwrap_or(&h).to_string())
         .unwrap_or_else(|| "localhost".to_string());
 
     let content_type = parts
@@ -156,5 +182,57 @@ mod tests {
             .server_vars
             .iter()
             .any(|(k, v)| k == "HTTP_X_FOO" && v == "bar"));
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::effective_host;
+
+    fn h(pairs: &[(&str, &str)]) -> hyper::HeaderMap {
+        let mut m = hyper::HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(
+                hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                hyper::header::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn http1_uses_the_host_header() {
+        let uri: hyper::Uri = "/login".parse().unwrap();
+        assert_eq!(
+            effective_host(&h(&[("host", "works.example:8443")]), &uri).as_deref(),
+            Some("works.example:8443")
+        );
+    }
+
+    /// The regression: h2/h3 send no Host header, only `:authority`, which hyper puts on
+    /// the URI. Before this, the host fell back to "localhost" (or to empty for vhost
+    /// matching and cache keys) for every request over TLS, since ALPN picks h2.
+    #[test]
+    fn http2_falls_back_to_the_uri_authority() {
+        let uri: hyper::Uri = "https://works.example/login".parse().unwrap();
+        assert_eq!(
+            effective_host(&hyper::HeaderMap::new(), &uri).as_deref(),
+            Some("works.example")
+        );
+    }
+
+    #[test]
+    fn an_empty_host_header_does_not_win_over_the_authority() {
+        let uri: hyper::Uri = "https://works.example/x".parse().unwrap();
+        assert_eq!(
+            effective_host(&h(&[("host", "  ")]), &uri).as_deref(),
+            Some("works.example")
+        );
+    }
+
+    #[test]
+    fn neither_present_is_none_so_callers_choose_the_fallback() {
+        let uri: hyper::Uri = "/x".parse().unwrap();
+        assert_eq!(effective_host(&hyper::HeaderMap::new(), &uri), None);
     }
 }
