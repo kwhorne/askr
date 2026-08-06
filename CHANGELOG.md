@@ -3,6 +3,25 @@
 All notable changes to Askr. From 1.0, the project follows [Semantic Versioning](https://semver.org)
 and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
+## Unreleased
+
+### Known issues
+
+- **`doctor --app`'s scheduler check matches any method named `command()`** ([Askr-52]).
+  `Artisan::command()` — which defines a console command rather than scheduling one —
+  triggers it, so an app that schedules nothing can be told its scheduled tasks will fail.
+  On the deployment this was found on the conclusion happened to be correct, which is worse
+  than being wrong: right answer, false evidence.
+
+- **`doctor --app` reads `.env` from disk rather than the running process** ([Askr-52]). In
+  any Docker deployment the container's real environment variables win — Laravel's Dotenv
+  does not overwrite an existing variable — so `.env` is the source that loses. The two
+  agree on the deployment tested, by luck rather than design.
+
+  Both make the pre-deploy gate less trustworthy than it should be, and a permanent false
+  `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
+  informational lines, from the other direction.
+
 ## 1.4.11 — 2026-08-05
 
 **Breaking silence.** Every failure worth an afternoon on this project has been silent: a
@@ -1932,3 +1951,4 @@ config and an admin dashboard. See [`docs/`](docs/README.md).
 [Askr-47]: https://wirelabs.youtrack.cloud/issue/Askr-47
 [Askr-48]: https://wirelabs.youtrack.cloud/issue/Askr-48
 [Askr-49]: https://wirelabs.youtrack.cloud/issue/Askr-49
+[Askr-52]: https://wirelabs.youtrack.cloud/issue/Askr-52
