@@ -778,6 +778,29 @@ impl FileConfig {
                 self.queue.script.is_some(),
                 "queue.workers is set but queue.script is missing"
             );
+            // The symmetric check, which was missing and cost a production outage: with
+            // workers but no slots the ring is never mapped, so askr_queue_push() returns
+            // 0, Laravel does not check the return, and every queued job — password
+            // resets, invitations, all outgoing mail — is discarded without an exception,
+            // a log line, or anything in the queue to age. Workers polling a ring that
+            // does not exist is as useless as a ring nobody polls, and quieter.
+            anyhow::ensure!(
+                self.queue.slots > 0,
+                "queue.workers is set but queue.slots is 0 — the shared-memory ring would \
+                 never be mapped, so every queued job would be silently discarded. Set \
+                 queue.slots (8192 is a reasonable start; ~32 KB per slot)."
+            );
+        }
+        // Also the other way round, as a warning rather than an error: slots with no worker
+        // is a legitimate configuration (jobs pushed here, consumed by a worker elsewhere),
+        // but it is far more often a mistake — and it was, on the deployment that taught us
+        // this. The backlog watchdog will name the queue once jobs start ageing.
+        if self.queue.slots > 0 && self.queue.workers == 0 && self.queue.script.is_none() {
+            tracing::warn!(
+                "queue.slots is set but no queue worker is configured (queue.workers + \
+                 queue.script). Jobs will be accepted and never processed unless something \
+                 outside this instance consumes them."
+            );
         }
         if let Some(s) = &self.queue.script {
             anyhow::ensure!(s.is_file(), "queue.script not found: {}", s.display());
@@ -1020,6 +1043,50 @@ domains = ["example.com"]
             let e = err("acme-baddomain", &body);
             assert!(e.contains("bare hostname"), "{bad}: {e}");
         }
+    }
+
+    /// The configuration that dropped every outgoing mail on a live site: queue workers
+    /// running, no slots, so the ring was never mapped and each push returned 0 into a
+    /// framework that does not check the return value. Nothing failed. Nothing was logged.
+    /// The mail simply never went.
+    #[test]
+    fn queue_workers_without_slots_are_refused() {
+        let e = err(
+            "queue-noslots",
+            r#"
+[server]
+root = "{ROOT}"
+
+[queue]
+workers = 4
+script = "{ROOT}/index.php"
+"#,
+        );
+        assert!(e.contains("queue.slots"), "{e}");
+        assert!(
+            e.contains("silently discarded"),
+            "the error must say what happens, not just which key is missing: {e}"
+        );
+    }
+
+    /// The mirror image is allowed — jobs may be consumed by a worker outside this
+    /// instance — but it warns, because far more often it is the same mistake from the
+    /// other side.
+    #[test]
+    fn queue_slots_without_a_worker_still_resolves() {
+        let r = resolve(
+            "queue-noworker",
+            r#"
+[server]
+root = "{ROOT}"
+
+[queue]
+slots = 64
+"#,
+        )
+        .expect("slots without a worker is legal");
+        assert_eq!(r.queue_workers, 0);
+        assert_eq!(r.queue_slots, 64);
     }
 
     #[test]

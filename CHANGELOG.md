@@ -43,9 +43,38 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
   informational lines, from the other direction.
 
-## Unreleased
+## 1.4.13 — 2026-08-14
+
+**Queue workers with no slots discarded every job in silence.** If you run queue workers,
+check that `[queue] slots` (or `--queue-slots`) is set — Askr now refuses to start without
+it rather than letting mail disappear.
 
 ### Fixed
+
+- **`queue.workers` without `queue.slots` is now refused.** The ring is only mapped when
+  slots are configured. Without it `askr_queue_push()` returns 0, Laravel does not check the
+  return value, and every queued job — password resets, invitations, all outgoing mail — was
+  discarded with no exception, no log line, and nothing in the queue to age. Queue workers
+  ran happily, polling a ring that did not exist.
+
+  This is the mirror of a bug fixed a week ago from the other side, where slots were
+  configured and no worker consumed them. Both are now handled: workers without slots is an
+  error naming the consequence; slots without a worker stays legal (something outside the
+  instance may consume them) but warns, because far more often it is the same mistake.
+
+  The CLI gets the same check: `--queue-script` without `--queue-slots` refuses to start.
+
+- **A discarded push now says so.** `push()` into an unmapped ring logs an error naming the
+  queue, once per process. Returning 0 is all the PHP API can express and the framework
+  ignores it, so from the application side the loss was invisible. A job that goes nowhere
+  must not be quieter than one that fails.
+
+  The backlog watchdog added in 1.4.11 could not help here — it warns about jobs that are
+  *waiting*, and these never got far enough to wait. Worth noting for anyone relying on it:
+  an empty queue means either nothing to do or nothing arriving, and until now those looked
+  identical.
+
+### Also fixed
 
 - **The `squeue` unit tests shared the job ring with no serialization.** `init()` maps the
   slot table once and every push lands in it, so unique queue names kept the counts apart but

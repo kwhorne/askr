@@ -51,7 +51,7 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 
 ```json
 {
-  "version": "1.4.12",
+  "version": "1.4.13",
   "listen": "0.0.0.0:8000",
   "mode": "worker",
   "uptime_secs": 3600,

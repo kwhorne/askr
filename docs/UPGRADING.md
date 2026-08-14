@@ -30,7 +30,7 @@ server unless you pass `--restart`.
 Verify the checksum yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.12; ARCH=$(uname -m)
+VER=v1.4.13; ARCH=$(uname -m)
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
@@ -39,14 +39,14 @@ sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.12     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.4.13     # or :1.4 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.4` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.12-full`) are the same server built with the optional features
+The `-full` tags (`1.4.13-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -106,6 +106,21 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.4.13
+
+**If you run queue workers, make sure `[queue] slots` is set** — `8192` is a reasonable
+start. Askr now refuses to start without it when queue workers are configured, so a
+misconfiguration is an error at boot rather than mail that quietly never sends.
+
+```toml
+[queue]
+slots = 8192          # required alongside workers
+workers = 4
+script = "/opt/askr/examples/askr-queue.php"
+```
+
+The equivalent on the command line: `--queue-script` now requires `--queue-slots`.
 
 ### To 1.4.12
 

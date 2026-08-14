@@ -131,6 +131,11 @@ Run queue workers in the same binary, supervised alongside the web workers.
 | `script` | path | Queue runner script (e.g. `examples/askr-queue.php`). |
 | `slots` | int | Shared-memory job queue slots (`0` = off; 32 KB each) — `askr_queue_*` + the `AskrQueue` driver. See [Cache](CACHE.md). |
 
+**`slots` is required when `workers` is set**, and Askr refuses to start without it. The
+ring is only mapped when slots are configured; without it every push returns 0, Laravel does
+not check that, and queued jobs are discarded silently — which is how a live site stopped
+sending mail with nothing in any log.
+
 ### `[scheduler]`
 
 Run the scheduler (built-in cron) in the same binary.

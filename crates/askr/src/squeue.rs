@@ -143,8 +143,23 @@ pub struct Reserved {
 
 /// Enqueue a job. `delay` seconds until it becomes available. Returns the job
 /// id, or 0 if the queue is full/disabled/too large.
+/// Warned once about pushing into a queue that was never mapped.
+static NO_RING_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
     let Some((p, slots)) = base() else {
+        // No ring: the server was started without queue slots. Returning 0 is all the PHP
+        // API can express, and Laravel does not check it — so a dropped job is invisible
+        // from the application side. Say it here instead of losing mail in silence.
+        // Once per process: this is per push, and a busy app would drown the log.
+        if !NO_RING_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            tracing::error!(
+                queue = %String::from_utf8_lossy(queue),
+                "queue push DISCARDED — no shared-memory ring is mapped. Start the server \
+                 with --queue-slots (or [queue] slots) or jobs pushed from PHP go nowhere: \
+                 no exception, no retry, no mail."
+            );
+        }
         return 0;
     };
     if payload.len() > PAYLOAD_MAX {

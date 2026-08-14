@@ -613,6 +613,14 @@ fn main() -> anyhow::Result<()> {
                 let tls_on = tls_cert.is_some() || tls_self_signed;
                 if let Some(qs) = &queue_script {
                     anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
+                    // See config.rs: workers without slots means the ring is never mapped
+                    // and every queued job is discarded in silence.
+                    anyhow::ensure!(
+                        queue_slots > 0,
+                        "--queue-script needs --queue-slots — without it the shared-memory \
+                         ring is never mapped and every queued job is silently discarded \
+                         (8192 is a reasonable start)"
+                    );
                 }
                 if let Some(ss) = &scheduler_script {
                     anyhow::ensure!(ss.is_file(), "scheduler script not found: {}", ss.display());
