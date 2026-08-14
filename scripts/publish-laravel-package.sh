@@ -69,6 +69,26 @@ published() {
     echo "  packagist       serves $tag"
   else
     echo "  packagist       does not serve $tag yet (knows: ${vs:-nothing})"; ok=1
+    # Report what is *observable* rather than a mechanism. It is tempting to say a tag on an
+    # existing commit fires no webhook — but earlier tags on this very commit did reach
+    # Packagist, so that explanation is contradicted by the evidence and would send the next
+    # person down the wrong path. What can be stated is that the content is identical, which
+    # is what decides whether anyone is affected.
+    local sha prev
+    sha=$(git ls-remote --tags "https://github.com/$REPO.git" "refs/tags/$tag" 2>/dev/null | cut -f1)
+    if [ -n "$sha" ]; then
+      prev=$(git ls-remote --tags "https://github.com/$REPO.git" 2>/dev/null \
+        | awk -v s="$sha" -v t="refs/tags/$tag" '$1==s && $2!=t {print $2}' \
+        | sed 's|refs/tags/||' | tr '\n' ' ')
+      if [ -n "${prev// /}" ]; then
+        echo "  note            $tag points at the same commit as: ${prev% }"
+        echo "                  so the package is byte-identical to those, and anyone on a"
+        echo "                  ^1.4 constraint already has this code. Packagist has served"
+        echo "                  earlier tags on this same commit, so this is most likely lag"
+        echo "                  rather than something structurally broken — but it is not"
+        echo "                  installable at this version number until it catches up."
+      fi
+    fi
   fi
   return $ok
 }

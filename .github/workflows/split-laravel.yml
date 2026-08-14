@@ -111,3 +111,50 @@ jobs:
             "https://packagist.org/api/update-package?username=${PU}&apiToken=${PT}" \
             -d '{"repository":{"url":"https://github.com/kwhorne/askr-laravel"}}' \
             && echo "Packagist notified"
+
+      # "The tag exists" is not "the release is installable". Packagist is what a user's
+      # `composer require` actually talks to, so that is what gets asked.
+      #
+      # This step needs no credentials — repo.packagist.org is public — which is the point:
+      # a check that depends on a secret is a check that silently skips when the secret is
+      # missing, and that is exactly how the split reported green while publishing nothing
+      # for four months.
+      - name: Verify Packagist serves this version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          URL="https://repo.packagist.org/p2/kwhorne/askr-laravel.json"
+          for i in $(seq 1 20); do
+            if versions=$(curl -sf "$URL" | python3 -c 'import json,sys; print(" ".join(p["version"] for p in json.load(sys.stdin)["packages"]["kwhorne/askr-laravel"]))' 2>/dev/null); then
+              case " $versions " in
+                *" $TAG "*)
+                  echo "Packagist serves $TAG"
+                  exit 0 ;;
+              esac
+              echo "not yet ($i/20) — Packagist knows: $versions"
+            else
+              # Could not ask. Not the same answer as "it is not there", so keep trying.
+              echo "::warning::could not read $URL ($i/20)"
+            fi
+            sleep 15
+          done
+          echo "::error::Packagist does not serve $TAG, so 'composer require kwhorne/askr-laravel:$TAG' will fail."
+          echo ""
+          echo "Two things make this happen, and the fix differs:"
+          echo ""
+          echo "  1. No PACKAGIST_TOKEN secret, so nothing tells Packagist to look. It will"
+          echo "     find the tag on its own crawl, which can take hours. Setting"
+          echo "     PACKAGIST_USERNAME + PACKAGIST_TOKEN removes the wait entirely."
+          echo ""
+          echo "  2. Plain lag. Packagist has served tags on the same commit before, so a"
+          echo "     tag pointing at existing content is not in itself a blocker — do not"
+          echo "     assume a missed webhook without checking, that theory has already been"
+          echo "     wrong once."
+          echo ""
+          echo "If the release changed nothing under packages/laravel, the tag points at the"
+          echo "same commit as the previous one and anyone on a ^1.x constraint already has"
+          echo "this code — they are on an older version *number*, not older code. Click"
+          echo "Update on https://packagist.org/packages/kwhorne/askr-laravel, or set the"
+          echo "secrets to remove the wait."
+          exit 1

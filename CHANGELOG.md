@@ -43,6 +43,30 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
   informational lines, from the other direction.
 
+## Unreleased
+
+- **The release now fails if Packagist isn't serving the version.** Verification stopped at
+  "the tag exists in the split repo", which is not the same as installable — Packagist is
+  what a user's `composer require` actually talks to. It now polls the public
+  `repo.packagist.org` endpoint for up to five minutes and fails with an actionable message.
+
+  No credentials, deliberately. A check that depends on a secret is a check that silently
+  skips when the secret is missing, and that is exactly how the split reported green while
+  publishing nothing for four months. The `Notify Packagist` step still skips without
+  `PACKAGIST_TOKEN` — it is an optimisation — but the *verification* no longer can.
+
+  `scripts/publish-laravel-package.sh` reports the same thing, and adds the one piece of
+  context that decides whether anyone is affected: whether the tag points at the same commit
+  as earlier tags, in which case the package is byte-identical and anyone on a `^1.x`
+  constraint already has the code — an older version *number*, not older code.
+
+  Worth recording a wrong turn. The first version of that note asserted a mechanism: that a
+  tag pushed onto an existing commit fires no webhook, so Packagist is never told. It reads
+  well and it is contradicted by the evidence — `v1.4.10` through `v1.4.13` all point at that
+  same commit and all reached Packagist. Stating it would have sent the next person down a
+  path I had already ruled out without noticing. The note now says what is observable and
+  calls the cause most likely lag.
+
 ## 1.4.14 — 2026-08-14
 
 ### Fixed
