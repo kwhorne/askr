@@ -44,6 +44,12 @@ fetch() { # url outfile
 }
 
 # --- extension flags for the laravel profile ------------------------------
+#
+# Expanded below as ${DEP_FLAGS[@]+"${DEP_FLAGS[@]}"} rather than "${DEP_FLAGS[@]}":
+# macOS ships bash 3.2, where expanding an *empty* array under `set -u` is an unbound
+# variable error. So `PROFILE=minimal` failed on macOS with "DEP_FLAGS[@]: unbound
+# variable" — a latent break in the profile the test suite uses, hit while verifying an
+# unrelated change.
 DEP_FLAGS=()
 if [ "$PROFILE" = "laravel" ]; then
     DEP_FLAGS=(
@@ -130,6 +136,35 @@ cd "$SRC"
 # --disable-zend-signals: the host (Askr) owns process signals. If PHP also
 # installs a SIGTERM handler it chains with Rust's (tokio/signal-hook) handler,
 # and on PHP 8.5 the two call each other forever → stack overflow at shutdown.
+#
+# --with-iconv: needed by bacon/bacon-qr-code, which Laravel Fortify uses to draw
+# two-factor QR codes. It declares ext-iconv and calls @iconv() — and a missing
+# function is a fatal Error in PHP 8, which @ does not suppress, so the whole page
+# answers 500. It cost a production outage on the one screen a user cannot get past:
+# the forced 2FA enrolment after the grace period expires.
+#
+# It was --without-iconv before, with no comment next to it, which is why it looks
+# like it came along with the --disable-all sweep rather than being a decision.
+#
+# No new dependency on Linux: glibc has iconv in libc itself, and the runtime image is
+# ubuntu:24.04. (On musl/Alpine this would need gnu-libiconv.) macOS is not so simple —
+# a bare --with-iconv fails there with "Please specify the install prefix of iconv",
+# because the header and libiconv live under the SDK rather than /usr. So the flag is
+# OS-dependent, which the original one-liner would not have been.
+if [ "$OS" = "Darwin" ]; then
+    SDK="$(xcrun --show-sdk-path 2>/dev/null || true)"
+    if [ -f "$SDK/usr/include/iconv.h" ]; then
+        ICONV_FLAG="--with-iconv=$SDK/usr"
+    else
+        # Better to build without it than to fail the build: iconv only matters for
+        # QR codes, and this is the dev/test target, not what ships.
+        echo ">> WARNING: no iconv.h under the macOS SDK — building without iconv"
+        echo ">>          (QR codes / Fortify 2FA will fatal on this build)"
+        ICONV_FLAG="--without-iconv"
+    fi
+else
+    ICONV_FLAG="--with-iconv"
+fi
 echo ">> configure (embed shared, non-ZTS, no zend-signals, profile=$PROFILE, os=$OS)"
 make distclean >/dev/null 2>&1 || true
 ./configure \
@@ -137,9 +172,9 @@ make distclean >/dev/null 2>&1 || true
     --enable-embed=shared \
     --disable-all \
     --disable-zend-signals \
-    "${DEP_FLAGS[@]}" \
+    ${DEP_FLAGS[@]+"${DEP_FLAGS[@]}"} \
     --disable-cgi --disable-cli --disable-fpm --disable-phpdbg \
-    --without-iconv
+    "$ICONV_FLAG"
 
 echo ">> make (-j$JOBS)"
 make -j"$JOBS"

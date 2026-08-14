@@ -43,8 +43,10 @@ const REQUIRED: &[&str] = &[
 const DB_DRIVERS: &[&str] = &["pdo_sqlite", "pdo_mysql", "pdo_pgsql"];
 
 /// Extensions many real apps need (Filament needs intl; gd for images; zip/exif
-/// are common). Present in the Linux release/Docker image. Not fatal.
-const RECOMMENDED: &[&str] = &["intl", "gd", "zip", "exif", "bcmath"];
+/// are common; iconv is required by the QR-code library behind Fortify's two-factor
+/// setup). Present in the Linux release/Docker image. Not fatal — an app with no QR
+/// codes does without.
+const RECOMMENDED: &[&str] = &["intl", "gd", "zip", "exif", "bcmath", "iconv"];
 
 struct PhpInfo {
     version: String,

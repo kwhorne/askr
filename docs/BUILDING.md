@@ -90,6 +90,7 @@ Booting a real Laravel app surfaces, in order, which extensions it needs. The
 | `Call to undefined function mb_split()` | mbstring (mbregex) | oniguruma |
 | `Call to undefined function openssl_*` | openssl | OpenSSL |
 | `Class "DOMDocument" not found` | dom / xml / simplexml | libxml2 |
+| `Call to undefined function iconv()` (QR codes, Fortify 2FA) | iconv | glibc / libiconv |
 | — | pdo_sqlite, tokenizer, session, ctype, filter, fileinfo, phar, bcmath, pcntl, posix, opcache | bundled / built-in |
 
 On Ubuntu these come from the `-dev` packages via pkg-config. On macOS the

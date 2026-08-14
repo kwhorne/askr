@@ -43,6 +43,41 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
   informational lines, from the other direction.
 
+## 1.4.12 — 2026-08-07
+
+### Fixed
+
+- **`iconv` is now compiled in.** `bacon/bacon-qr-code`, which Laravel Fortify uses to draw
+  two-factor QR codes, declares `ext-iconv` and calls `@iconv()`. A missing function is a
+  fatal `Error` in PHP 8 and `@` does not suppress it, so the whole page answered 500:
+
+  ```
+  production.ERROR: Call to undefined function BaconQrCode\Encoder\iconv()
+  ```
+
+  It hit both enrolment screens, including the forced one after the two-factor grace period
+  expires — the one screen a user cannot get past. `--without-iconv` was in the configure
+  line with no comment beside it, unlike its neighbours, so it looks like it came along with
+  the `--disable-all` sweep rather than being a decision.
+
+  No new dependency on Linux: glibc has iconv in libc, and the runtime image is
+  `ubuntu:24.04`. **macOS is not so simple**, which the one-line change would have missed —
+  a bare `--with-iconv` fails there with *"Please specify the install prefix of iconv"*,
+  because the header and libiconv live under the SDK rather than `/usr`. The flag is now
+  OS-dependent, and falls back to building without iconv (with a warning naming the
+  consequence) if the SDK header is absent, since that target is dev and test rather than
+  what ships.
+
+  Verified by building and calling it, not by trusting configure: `function_exists('iconv')`
+  is `true` and `iconv('UTF-8', 'ASCII//TRANSLIT', 'æøå')` transliterates. `askr doctor`
+  reports `✓ ext-iconv (recommended)` — recommended, not required, because an app with no QR
+  codes does without.
+
+- **`PROFILE=minimal` was broken on macOS.** `"${DEP_FLAGS[@]}"` expands an empty array,
+  which bash 3.2 — the version macOS ships — treats as an unbound variable under `set -u`:
+  `DEP_FLAGS[@]: unbound variable`. The profile the test suite uses could not build there.
+  Found by rebuilding to verify the change above, which is the only reason it surfaced.
+
 ## 1.4.11 — 2026-08-05
 
 **Breaking silence.** Every failure worth an afternoon on this project has been silent: a
