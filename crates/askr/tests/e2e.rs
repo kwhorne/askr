@@ -321,6 +321,38 @@ impl Server {
     /// thread a moment later, so a test that goes straight at it races startup and fails
     /// with "Connection refused" perhaps one run in ten. A flaky test is worse than no
     /// test — it teaches you to re-run instead of read.
+    /// Worker PIDs as the master reports them.
+    ///
+    /// Tolerant of a refused or truncated exchange: this is polled *during* a rolling
+    /// reload, and the shared test client panics on a connection that goes away mid-read.
+    /// A harness that panics under the conditions it exists to observe reports a product
+    /// failure that isn't one — three runs in ten died here before this retried.
+    fn worker_pids(&self) -> Vec<i32> {
+        for _ in 0..5 {
+            if let Some(v) = self.try_worker_pids() {
+                return v;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        Vec::new()
+    }
+
+    fn try_worker_pids(&self) -> Option<Vec<i32>> {
+        let admin = self.admin;
+        let body = std::panic::catch_unwind(move || get(admin, "/api/status").body).ok()?;
+        let mut out = Vec::new();
+        if let Some(rest) = body.split("\"pids\":[").nth(1) {
+            if let Some(list) = rest.split(']').next() {
+                for p in list.split(',') {
+                    if let Ok(n) = p.trim().parse::<i32>() {
+                        out.push(n);
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
     fn wait_admin(&self) {
         let addr: SocketAddr = format!("127.0.0.1:{}", self.admin).parse().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -1294,6 +1326,70 @@ script = "{}"
 /// serve flag was silently dropped. On a real deployment that turned
 /// `--workers=4 --worker-script=…` into 20 per-request workers with nothing in the log
 /// to explain it. Refusing costs one clear error; ignoring costs an afternoon.
+/// A reload must replace **every** worker, or a deploy half-lands.
+///
+/// The rolling reload is a chain: each rolled worker's exit is what signals the next. If a
+/// link is dropped, the roll stops partway and reports success — which on a live site meant
+/// requests served by the previous release, including a Vite manifest from before the last
+/// build, so the page referenced a stylesheet that 404'd on some requests and not others.
+///
+/// Sidecars are in the fleet here on purpose: a queue worker recycling on its own during the
+/// roll is exactly the event that competes with the chain.
+#[test]
+fn a_reload_replaces_every_worker() {
+    let dir = unique_dir("reloadall");
+    let queue_script = dir.join("queue.php");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&queue_script, "<?php\nusleep(200000);\n").unwrap();
+
+    let s = Server::start_in(
+        dir,
+        &[("index.php", "<?php echo getmypid();")],
+        &format!(
+            "[server]\nlisten = \"127.0.0.1:{{PORT}}\"\nroot = \"{{ROOT}}\"\nworkers = \"4\"\n\n\
+             [admin]\nlisten = \"127.0.0.1:{{ADMIN}}\"\n\n\
+             [queue]\nslots = 64\nworkers = 2\nscript = \"{}\"\n\n\
+             [scheduler]\nscript = \"{}\"\n\n\
+             [reload]\ncanary = false\n",
+            queue_script.to_str().unwrap(),
+            queue_script.to_str().unwrap()
+        ),
+    );
+    s.wait_admin();
+
+    let pids_before = s.worker_pids();
+    assert!(
+        pids_before.len() >= 4,
+        "expected the fleet to be up, got {pids_before:?}"
+    );
+
+    unsafe { libc::kill(s.pid(), libc::SIGHUP) };
+
+    // Generous: rolling four workers one at a time with a 600 ms settle is a few seconds,
+    // and a CI box is slower. The point is what is true once it is finished, not how fast.
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut survivors: Vec<i32> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = s.worker_pids();
+        survivors = pids_before
+            .iter()
+            .copied()
+            .filter(|p| now.contains(p))
+            .collect();
+        if survivors.is_empty() {
+            break;
+        }
+    }
+
+    assert!(
+        survivors.is_empty(),
+        "these workers were never rolled: {survivors:?} — a reload that leaves a worker on \
+         the old code serves the previous release from a fraction of requests, and says it \
+         succeeded. before={pids_before:?}"
+    );
+}
+
 /// Auto-TLS has to be expressible in a config file.
 ///
 /// It used to be CLI-only, and since `--config` is the whole configuration rather than a

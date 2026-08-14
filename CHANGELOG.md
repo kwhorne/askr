@@ -5,6 +5,15 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Added
+
+- **A reload is now held to "every worker was replaced"** by a regression test
+  (`a_reload_replaces_every_worker`), rather than to `rollout: idle`. It records every PID,
+  sends SIGHUP, and polls until no pre-reload PID remains — with sidecars in the fleet,
+  since a queue worker recycling on its own is the event most likely to compete with the
+  roll. A reload that leaves a worker on the old code serves the previous release from a
+  fraction of requests and reports success.
+
 ### Known issues
 
 - **`doctor --app`'s scheduler check matches any method named `command()`** ([Askr-52]).
@@ -17,6 +26,18 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   any Docker deployment the container's real environment variables win — Laravel's Dotenv
   does not overwrite an existing variable — so `.env` is the source that loses. The two
   agree on the deployment tested, by luck rather than design.
+
+- **`SIGHUP` may leave a worker on old code** ([Askr-51]) — measured once on a live
+  deployment, **not reproduced**: the new test passes 12/12 against the same fleet shape.
+  The reasoned diagnosis in that issue is withdrawn, and the mixed content observed
+  alongside it is unexplained rather than explained. `scripts/deploy.sh` uses
+  `--force-recreate` until it is understood, at the cost of logging everyone out per deploy.
+
+  Worth recording how close that came to being reported as confirmed: 3 of 10 runs failed
+  while writing the test, and the panic was in the **test client**, which dies on a
+  connection that goes away mid-read — polling admin during a roll is exactly when that
+  happens. A harness that crashes under the conditions it exists to observe reports a
+  product failure that isn't one.
 
   Both make the pre-deploy gate less trustworthy than it should be, and a permanent false
   `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
@@ -1952,3 +1973,4 @@ config and an admin dashboard. See [`docs/`](docs/README.md).
 [Askr-48]: https://wirelabs.youtrack.cloud/issue/Askr-48
 [Askr-49]: https://wirelabs.youtrack.cloud/issue/Askr-49
 [Askr-52]: https://wirelabs.youtrack.cloud/issue/Askr-52
+[Askr-51]: https://wirelabs.youtrack.cloud/issue/Askr-51
