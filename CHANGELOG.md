@@ -43,6 +43,53 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
   informational lines, from the other direction.
 
+## 1.4.14 — 2026-08-14
+
+### Fixed
+
+- **`doctor --app` reads the environment the application will actually see** ([Askr-52]).
+  It parsed `.env` from disk, which in any container deployment is the source that *loses*:
+  Laravel's Dotenv skips a variable that already exists, so real environment variables win.
+  Values now resolve the same way the app resolves them, and every report names its source
+  (`environment` or `.env`) so the reader can tell whether doctor is looking at the same
+  thing the workers are.
+
+  A precision that had to be corrected mid-implementation: an **empty** real variable does
+  not fall back to `.env`. Dotenv will not overwrite it, so the application sees the empty
+  string. Reporting the `.env` value would describe something the app never uses — and that
+  exact shape (`TOKEN: ${TOKEN}` in a compose file with an empty entry in its own `.env`) is
+  how an admin plane ended up unauthenticated while the file it was configured from looked
+  populated. Now a test.
+
+- **The scheduler check no longer matches any method named `command()`** ([Askr-52]). It
+  looked for `->command(` or `::command(` anywhere, and on the application it was written
+  against the only match was `Artisan::command()` — which *defines* a console command and
+  schedules nothing. It reported that scheduled tasks would fail on an app that scheduled
+  none. The conclusion happened to be true for other reasons, which is worse than being
+  wrong: right answer, false evidence, and it looks verified.
+
+  Now anchored on `Schedule::command(` and `schedule->command(`, and it also reads
+  `bootstrap/app.php`, where Laravel 11+ puts scheduling inside `withSchedule()`.
+
+  **This is a trade, not a free improvement.** The old pattern cried wolf; the new one will
+  miss scheduling registered from a service provider or a package. It is the right trade
+  because a check that cries wolf gets skimmed, and then the real findings beside it are
+  skimmed too — but it is a narrower check than it was.
+
+### Withdrawn
+
+- The claim that Askr's admin-plane warning asserts protection it has not verified
+  ([Askr-54]) was **wrong**, and is retracted. `admin.rs` already filters an empty token to
+  `None` and already has a separate, correctly-worded warning for the unauthenticated case.
+  Verified by running it both ways.
+
+  The mistake was measurement, not reasoning: the token's length was read with
+  `printf %s "${ASKR_ADMIN_TOKEN:-<TOM>}" | wc -c`, and `<TOM>` is five characters — a
+  fallback string mistaken for a five-character token. The log line quoted as evidence had
+  been captured *after* the token was set, so it was accurate. The exposure it was found
+  alongside was real and is fixed; the diagnosis of why Askr had not warned was not, because
+  Askr had warned, in the exact words the issue asked for, and nobody read it.
+
 ## 1.4.13 — 2026-08-14
 
 **Queue workers with no slots discarded every job in silence.** If you run queue workers,
@@ -2063,3 +2110,5 @@ config and an admin dashboard. See [`docs/`](docs/README.md).
 [Askr-52]: https://wirelabs.youtrack.cloud/issue/Askr-52
 [Askr-51]: https://wirelabs.youtrack.cloud/issue/Askr-51
 [Askr-53]: https://wirelabs.youtrack.cloud/issue/Askr-53
+[Askr-52]: https://wirelabs.youtrack.cloud/issue/Askr-52
+[Askr-54]: https://wirelabs.youtrack.cloud/issue/Askr-54

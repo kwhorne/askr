@@ -5,7 +5,7 @@ embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
 memory-safe hot path, and — in worker mode — boots your app once and serves many
 requests against it, eliminating per-request framework bootstrap.
 
-> Version **1.4.13**. Production target is Linux; development also works on macOS.
+> Version **1.4.14**. Production target is Linux; development also works on macOS.
 
 > 📘 These pages are also published, with navigation and search, at
 > **[elyracode.com/docs/askr](https://elyracode.com/docs/askr)** — product information is
@@ -47,7 +47,7 @@ requests against it, eliminating per-request framework bootstrap.
 Install a self-contained release (Linux x86_64 / arm64) and serve a Laravel app:
 
 ```bash
-VER=v1.4.13; ARCH=$(uname -m)
+VER=v1.4.14; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -62,7 +62,7 @@ Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md). Then
 [Maintenance](MAINTENANCE.md) for the operating side.
 Building from source: [Building](BUILDING.md).
 
-## What works today (1.4.13)
+## What works today (1.4.14)
 
 - Embedded PHP (non-ZTS) running real Laravel 12, **~9× the per-request/FPM model**
 - Multi-core via one worker **process per core** on a shared listen socket

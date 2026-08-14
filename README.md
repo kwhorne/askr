@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v1.4.13</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v1.4.14</strong> &nbsp;·&nbsp; MIT
 </p>
 
 <p align="center">
@@ -51,7 +51,7 @@ Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
 embedded PHP, opcache, and examples in one tarball, nothing else to install:
 
 ```bash
-VER=v1.4.13; ARCH=$(uname -m)
+VER=v1.4.14; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -101,7 +101,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 - [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
 - [Upgrading](docs/UPGRADING.md) — how to upgrade and roll back, what to adopt per version, and what can bite you
 
-## What works today (1.4.13)
+## What works today (1.4.14)
 
 - Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
 - **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
@@ -219,6 +219,7 @@ The same pages are also in [`docs/`](docs/README.md) in this repository:
 | **1.4.11** — breaking silence: backlog watchdog, `doctor --app`, per-queue status, `scripts/smoke.sh` | ✅ |
 | **1.4.12** — `iconv` compiled in: Fortify's two-factor QR codes 500'd without it | ✅ |
 | **1.4.13** — queue workers without slots discarded every job in silence; now refused at boot | ✅ |
+| **1.4.14** — `doctor --app` reads the running environment, not `.env`; scheduler check no longer cries wolf | ✅ |
 | **Post-1.0** — durable-tier polish, per-site worker pools, and the experiments tracked in the issue tracker (AI/LLM cache, Varnish-grade edge cache, P2P cluster). | 🔭 |
 
 1.0 is a frozen, stress-validated base. The benchmark against FrankenPHP/FPM/RoadRunner

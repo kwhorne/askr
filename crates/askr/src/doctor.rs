@@ -156,6 +156,62 @@ pub fn run(ini: Option<String>, app: Option<std::path::PathBuf>) -> bool {
     ok
 }
 
+/// Where a value came from, because that is half the answer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// A real environment variable — what the application will actually see.
+    Process,
+    /// The app's `.env` file, which loses to a real variable of the same name.
+    DotEnv,
+}
+
+impl Source {
+    fn label(self) -> &'static str {
+        match self {
+            Source::Process => "environment",
+            Source::DotEnv => ".env",
+        }
+    }
+}
+
+/// Resolve a variable the way Laravel will, and say which source won.
+///
+/// Laravel's Dotenv **does not overwrite a variable that already exists**, so in any
+/// container deployment the real environment wins and `.env` is the lower-priority source.
+/// Reading only `.env` — which this did until 1.4.14 — means reporting on the source that
+/// loses, confidently. On the deployment it was written against the two happened to agree,
+/// which is luck: that compose file sets `APP_URL` and `DB_HOST` precisely because `.env`
+/// says something else.
+///
+/// Run inside the container (`docker compose exec askr askr doctor --app …`) this sees the
+/// same environment the workers do. Run from the host against a containerised server it
+/// does not, and cannot — so every reported value names its source and the reader can tell.
+fn resolve(
+    env_file: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Option<(String, Source)> {
+    // Existence, not emptiness, is what Laravel's Dotenv checks: it skips any variable
+    // already present in the environment, so an *empty* real variable wins over a populated
+    // `.env` line and the application sees the empty string. Falling back to `.env` here
+    // would report a value the app will never use.
+    //
+    // That case is not hypothetical. A compose file with `TOKEN: ${TOKEN}` and an empty
+    // entry in its own `.env` exports an empty variable — which is how an admin plane ended
+    // up unauthenticated while the file it was configured from looked populated.
+    if let Some(v) = std::env::var_os(key) {
+        let v = v.to_string_lossy().into_owned();
+        return if v.is_empty() {
+            None // set, but empty: the app sees nothing, and neither should we
+        } else {
+            Some((v, Source::Process))
+        };
+    }
+    env_file
+        .get(key)
+        .filter(|v| !v.is_empty())
+        .map(|v| (v.clone(), Source::DotEnv))
+}
+
 /// Read `KEY=value` pairs from an app's `.env`, with the quoting Laravel allows.
 ///
 /// Deliberately not a full dotenv implementation: this reads it to *report*, and a value
@@ -248,15 +304,38 @@ fn app_checks(ok: &mut bool, dir: &std::path::Path) {
         check(ok, false, "no composer.json here — is this the app root?");
         return;
     }
-    let env = read_env(&dir.join(".env"));
-    let get = |k: &str| -> Option<&String> { env.get(k).filter(|v| !v.is_empty()) };
+    let env_file = read_env(&dir.join(".env"));
+    // Values are resolved the way the application will resolve them: a real environment
+    // variable beats `.env`. `get` keeps the value, `src` says where it came from.
+    let get = |k: &str| -> Option<String> { resolve(&env_file, k).map(|(v, _)| v) };
+    let src = |k: &str| -> &'static str {
+        resolve(&env_file, k)
+            .map(|(_, s)| s.label())
+            .unwrap_or("unset")
+    };
+    if env_file.is_empty() && std::env::var("APP_ENV").is_err() {
+        note("no .env here and no APP_ENV in the environment — reading what little there is");
+    }
 
     // --- shared-memory drivers need slots, and fail silently without them -------------
-    let session = get("SESSION_DRIVER").map(|s| s.as_str()).unwrap_or("");
+    note(&format!(
+        "reading configuration from: {} (a real environment variable beats .env, which is \
+         how Laravel resolves them too)",
+        [
+            "APP_ENV",
+            "SESSION_DRIVER",
+            "QUEUE_CONNECTION",
+            "MAIL_MAILER"
+        ]
+        .iter()
+        .map(|k| format!("{k}={}", src(k)))
+        .collect::<Vec<_>>()
+        .join(" ")
+    ));
+    let session = get("SESSION_DRIVER").unwrap_or_default();
     let cache = get("CACHE_STORE")
         .or_else(|| get("CACHE_DRIVER"))
-        .map(|s| s.as_str())
-        .unwrap_or("");
+        .unwrap_or_default();
     if session == "askr" {
         note("SESSION_DRIVER=askr — needs --cache-large-slots (sessions exceed 4 KB)");
         note("  without slots, sessions vanish silently and every form POST answers 419");
@@ -266,9 +345,7 @@ fn app_checks(ok: &mut bool, dir: &std::path::Path) {
     }
 
     // --- the queue, which is where silence has cost the most --------------------------
-    let conn = get("QUEUE_CONNECTION")
-        .map(|s| s.as_str())
-        .unwrap_or("sync");
+    let conn = get("QUEUE_CONNECTION").unwrap_or_else(|| "sync".to_string());
     if conn == "askr" {
         note("QUEUE_CONNECTION=askr — needs --queue-slots *and* a worker");
         note("  --queue-slots alone accepts jobs that nothing consumes: no error, no mail");
@@ -310,7 +387,7 @@ fn app_checks(ok: &mut bool, dir: &std::path::Path) {
     }
 
     // --- mail, where "looks configured" is the failure mode ---------------------------
-    match get("MAIL_MAILER").map(|s| s.as_str()) {
+    match get("MAIL_MAILER").as_deref() {
         Some("log") | Some("array") => {
             note("MAIL_MAILER writes mail to the log — nothing leaves the building")
         }
@@ -337,14 +414,25 @@ fn app_checks(ok: &mut bool, dir: &std::path::Path) {
     }
 
     // --- scheduled ->command() tasks need a php binary this image does not have -------
-    // Both spellings: Laravel 11+ scaffolds `Schedule::command(...)` in routes/console.php,
-    // while older code and providers use `$schedule->command(...)`. Looking for only one
-    // missed the common case — found by testing this check against a fixture using the
-    // other, which is the sort of thing a check for silent failures had better not do.
-    let scheduled = ["routes/console.php", "app/Console/Kernel.php"]
-        .iter()
-        .filter_map(|f| std::fs::read_to_string(dir.join(f)).ok())
-        .any(|t| t.contains("->command(") || t.contains("::command("));
+    // Anchored on Laravel's scheduler, not on the method name.
+    //
+    // `command()` is an extremely common name. The first version of this looked for
+    // `->command(` or `::command(` anywhere, and on the app it was written against the only
+    // match was `Artisan::command()` — which *defines* a console command and schedules
+    // nothing. It reported that scheduled tasks would fail on an app with no scheduled
+    // tasks in those files at all. The conclusion happened to be true for other reasons,
+    // which is worse than being wrong: right answer, false evidence, and it looks verified.
+    //
+    // `bootstrap/app.php` is included because Laravel 11+ puts scheduling in
+    // `withSchedule(function (Schedule $schedule) { $schedule->command(...) })`.
+    let scheduled = [
+        "routes/console.php",
+        "app/Console/Kernel.php",
+        "bootstrap/app.php",
+    ]
+    .iter()
+    .filter_map(|f| std::fs::read_to_string(dir.join(f)).ok())
+    .any(|t| t.contains("Schedule::command(") || t.contains("schedule->command("));
     if scheduled {
         let php = std::env::var("PATH")
             .unwrap_or_default()
@@ -503,4 +591,69 @@ fn mark(pass: bool, label: &str) {
 /// teaches you to skim ticks, which defeats the point of a tool built to break silence.
 fn note(label: &str) {
     println!("  • {label}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `.env` is the source that *loses*. Laravel's Dotenv skips a variable that already
+    /// exists, so in any container deployment the real environment decides — and doctor
+    /// reading only `.env` meant reporting confidently on the wrong one.
+    #[test]
+    fn a_real_environment_variable_beats_dot_env() {
+        let mut file = std::collections::HashMap::new();
+        file.insert("ASKR_T_QUEUE".to_string(), "sync".to_string());
+
+        let (v, s) = resolve(&file, "ASKR_T_QUEUE").expect("from .env when nothing is set");
+        assert_eq!(v, "sync");
+        assert!(s == Source::DotEnv && s.label() == ".env");
+
+        // SAFETY: single-threaded test, and the name is unique to this test.
+        unsafe { std::env::set_var("ASKR_T_QUEUE", "askr") };
+        let (v, s) = resolve(&file, "ASKR_T_QUEUE").expect("the environment wins");
+        assert_eq!(v, "askr");
+        assert_eq!(s.label(), "environment");
+
+        // Set but empty is what the application will see — not the .env value behind it.
+        // This is the shape that left an admin plane unauthenticated while its .env looked
+        // populated: `TOKEN: ${TOKEN}` in compose with an empty entry in compose's own .env.
+        unsafe { std::env::set_var("ASKR_T_QUEUE", "") };
+        assert!(
+            resolve(&file, "ASKR_T_QUEUE").is_none(),
+            "an empty real variable must not fall back to .env — Dotenv would not overwrite it"
+        );
+
+        unsafe { std::env::remove_var("ASKR_T_QUEUE") };
+        assert!(
+            resolve(&file, "ASKR_T_QUEUE").is_some(),
+            "back to .env once removed"
+        );
+    }
+
+    #[test]
+    fn dot_env_quoting_is_handled() {
+        let dir = std::env::temp_dir().join(format!(
+            "askr-doctor-env-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(".env");
+        std::fs::write(
+            &f,
+            "# comment\nPLAIN=one\nQUOTED=\"two words\"\nSINGLE='three'\nEMPTY=\nNOEQUALS\n",
+        )
+        .unwrap();
+        let m = read_env(&f);
+        assert_eq!(m.get("PLAIN").map(String::as_str), Some("one"));
+        assert_eq!(m.get("QUOTED").map(String::as_str), Some("two words"));
+        assert_eq!(m.get("SINGLE").map(String::as_str), Some("three"));
+        assert_eq!(m.get("EMPTY").map(String::as_str), Some(""));
+        assert!(!m.contains_key("NOEQUALS"));
+        assert!(!m.contains_key("# comment"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

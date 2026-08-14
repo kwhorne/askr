@@ -157,6 +157,12 @@ docker compose exec askr /opt/askr/askr doctor --app /var/www/example.com
 ✓ MAIL_MAILER=resend with an API key present
 ```
 
+Configuration is resolved the way the application will resolve it: **a real environment
+variable beats `.env`**, because Laravel's Dotenv skips variables that already exist. Each
+run names the source it used, so running it from the host against a containerised server —
+where it cannot see the container's environment — is visible rather than silently wrong. An
+empty real variable counts as unset, since that is what the application sees.
+
 `•` is an observation, `✓` a verified check, `✗` a failure that exits non-zero — so this can
 gate a deploy. The distinction matters: doctor cannot see the flags a later `serve` will
 get, and a tick that means "noted" teaches you to skim ticks.
