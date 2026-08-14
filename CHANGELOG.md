@@ -14,36 +14,7 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   roll. A reload that leaves a worker on the old code serves the previous release from a
   fraction of requests and reports success.
 
-### Known issues
-
-- **`doctor --app`'s scheduler check matches any method named `command()`** ([Askr-52]).
-  `Artisan::command()` — which defines a console command rather than scheduling one —
-  triggers it, so an app that schedules nothing can be told its scheduled tasks will fail.
-  On the deployment this was found on the conclusion happened to be correct, which is worse
-  than being wrong: right answer, false evidence.
-
-- **`doctor --app` reads `.env` from disk rather than the running process** ([Askr-52]). In
-  any Docker deployment the container's real environment variables win — Laravel's Dotenv
-  does not overwrite an existing variable — so `.env` is the source that loses. The two
-  agree on the deployment tested, by luck rather than design.
-
-- **`SIGHUP` may leave a worker on old code** ([Askr-51]) — measured once on a live
-  deployment, **not reproduced**: the new test passes 12/12 against the same fleet shape.
-  The reasoned diagnosis in that issue is withdrawn, and the mixed content observed
-  alongside it is unexplained rather than explained. `scripts/deploy.sh` uses
-  `--force-recreate` until it is understood, at the cost of logging everyone out per deploy.
-
-  Worth recording how close that came to being reported as confirmed: 3 of 10 runs failed
-  while writing the test, and the panic was in the **test client**, which dies on a
-  connection that goes away mid-read — polling admin during a roll is exactly when that
-  happens. A harness that crashes under the conditions it exists to observe reports a
-  product failure that isn't one.
-
-  Both make the pre-deploy gate less trustworthy than it should be, and a permanent false
-  `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
-  informational lines, from the other direction.
-
-## Unreleased
+### Changed
 
 - **The release now fails if Packagist isn't serving the version.** Verification stopped at
   "the tag exists in the split repo", which is not the same as installable — Packagist is
@@ -66,6 +37,24 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   same commit and all reached Packagist. Stating it would have sent the next person down a
   path I had already ruled out without noticing. The note now says what is observable and
   calls the cause most likely lag.
+
+### Known issues
+
+- **`SIGHUP` may leave a worker on old code** ([Askr-51]) — measured once on a live
+  deployment, **not reproduced**: the new test passes 12/12 against the same fleet shape.
+  The reasoned diagnosis in that issue is withdrawn, and the mixed content observed
+  alongside it is unexplained rather than explained. `scripts/deploy.sh` uses
+  `--force-recreate` until it is understood, at the cost of logging everyone out per deploy.
+
+  Worth recording how close that came to being reported as confirmed: 3 of 10 runs failed
+  while writing the test, and the panic was in the **test client**, which dies on a
+  connection that goes away mid-read — polling admin during a roll is exactly when that
+  happens. A harness that crashes under the conditions it exists to observe reports a
+  product failure that isn't one.
+
+  It makes the reload less trustworthy than it should be. The two `doctor --app` faults
+  listed here alongside it were fixed in 1.4.14; this one is still open because nobody
+  can say what happened.
 
 ## 1.4.14 — 2026-08-14
 
