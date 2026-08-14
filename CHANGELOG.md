@@ -43,6 +43,30 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   `✗` teaches an operator to skim past a real one. Same failure as printing `✓` on
   informational lines, from the other direction.
 
+## Unreleased
+
+### Fixed
+
+- **The `squeue` unit tests shared the job ring with no serialization.** `init()` maps the
+  slot table once and every push lands in it, so unique queue names kept the counts apart but
+  not the table — and `by_queue()` walks all of it. `cache.rs` has had a `TEST_GUARD` mutex
+  for exactly this reason; squeue did not, and passed for weeks on scheduling luck.
+
+  Found while checking two Dependabot bumps. The suite failed 3 of 8 runs with both merged,
+  and the obvious conclusion was that a bump had broken something. The control says
+  otherwise: `main` clean 8/8, each PR clean 8/8 alone, and the crates involved are `cc`,
+  `clap`, `rusqlite`, `rcgen` — nothing that touches the async runtime or IO. The bumps
+  changed compile output, which reshuffled test timing, which made a latent problem visible.
+  **A dependency bump exposed it; it did not cause it.**
+
+### Known issues
+
+- **The e2e suite is not deterministic** ([Askr-53]) — roughly one run in twenty, spread
+  across four timing-sensitive tests now named in that issue, with run times varying from 8
+  to 90 seconds on the same machine. Recorded as a bug with a measured rate rather than the
+  vague caveat it has been, because at one in twenty the habit it teaches is to re-run red
+  pipelines, and once that habit exists a real regression gets one re-run and a shrug.
+
 ## 1.4.12 — 2026-08-07
 
 ### Fixed
@@ -2009,3 +2033,4 @@ config and an admin dashboard. See [`docs/`](docs/README.md).
 [Askr-49]: https://wirelabs.youtrack.cloud/issue/Askr-49
 [Askr-52]: https://wirelabs.youtrack.cloud/issue/Askr-52
 [Askr-51]: https://wirelabs.youtrack.cloud/issue/Askr-51
+[Askr-53]: https://wirelabs.youtrack.cloud/issue/Askr-53

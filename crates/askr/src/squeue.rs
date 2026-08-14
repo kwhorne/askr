@@ -549,8 +549,25 @@ pub fn register_bridge() {
 mod tests {
     use super::*;
 
+    // These tests share the process-wide job ring — `init()` maps it once and every push
+    // lands in the same table — so they have to be serialized. Unique queue names keep the
+    // *counts* apart, but not the slot table itself, and `by_queue()` walks all of it.
+    //
+    // `cache.rs` has had this guard for the same reason; squeue did not, and the tests
+    // passed for weeks on scheduling luck. A Dependabot bump of `cc` and `clap` — crates
+    // that touch nothing at runtime — was enough to change compile output, reshuffle test
+    // timing, and fail one run in ten. The dependency bump was not the bug; it was the
+    // thing that finally showed it.
+    //
+    // `into_inner` ignores poisoning so one failing test doesn't cascade into the rest.
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn counts_bucket_every_job_exactly_once() {
+        let _g = guard();
         init(128);
         assert!(enabled());
         let q = b"counts-test";
@@ -616,6 +633,7 @@ mod tests {
     /// 1.4.11 only the hash was, which routed jobs perfectly and diagnosed nothing.
     #[test]
     fn by_queue_names_each_backlog_separately() {
+        let _g = guard();
         init(256);
         // Unique names: the ring is a process-global, so a test that used "default" would
         // see (and be seen by) every other test in this module. A shared fixture that
@@ -669,6 +687,7 @@ mod tests {
 
     #[test]
     fn push_pop_delay_reserve_release() {
+        let _g = guard();
         init(128);
         assert!(enabled());
 
