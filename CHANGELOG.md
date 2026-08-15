@@ -5,6 +5,27 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+- **The scheduler sidecar no longer dies on an error from `schedule:run`, and says what
+  happened.** A `TypeError` has been seen escaping it in production — six times over three
+  days, always in the second after a scheduled job ran, then nothing for 22 hours across two
+  restarts and an upgrade. The events had already run: the failure is on the return path,
+  not the work, so nothing was lost.
+
+  The cause is **not known**, and the investigation is worth reading before anyone starts
+  again: every command in the application declares `: int`, no `handle()` has an early
+  return, there is no `bindMethod` anywhere in the tree, the framework version is identical
+  to local, and it does not reproduce. `Kernel::call()` is declared `: int`, so the
+  TypeError is thrown inside Laravel as it returns and the offending value never reaches the
+  caller — which is why this logs the exception rather than the return value. That is all
+  that can be observed from outside.
+
+  Catching earns its place regardless of the mystery: uncaught, this ended the process, the
+  supervisor respawned it, and the scheduler missed the boundary it had been sleeping for. A
+  cosmetic error should not cost a tick. The message now carries class, file, line, and the
+  sentence that would have saved the most time — that scheduled events had already run, so
+  the next person does not begin by hunting for lost work.
+
+
 ### Added
 
 - **A reload is now held to "every worker was replaced"** by a regression test

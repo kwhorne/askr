@@ -42,7 +42,47 @@ for ($tick = 0; $tick < $maxTicks; $tick++) {
     $sleep = $interval - ($now % $interval);
     sleep($sleep);
 
-    $kernel->call('schedule:run', [], $output);
+    // Why this is wrapped.
+    //
+    // A TypeError has been seen escaping `schedule:run` in production — six times over
+    // three days, always in the second after a scheduled job ran, then nothing for
+    // 22 hours across two restarts and an upgrade. The events themselves had already run:
+    // the failure is on the way out, not on the way in, so no work was lost.
+    //
+    // The cause is not known. `Kernel::call()` is declared `: int`, so the TypeError is
+    // thrown inside Laravel as it returns, and the offending value never reaches us —
+    // which is why the message below records the exception rather than the return value.
+    // It is all that can be observed from here.
+    //
+    // Catching matters for its own sake regardless: uncaught, this ends the process, the
+    // supervisor respawns it, and the scheduler misses the boundary it was sleeping for.
+    // A cosmetic error should not cost a tick.
+    try {
+        $rc = $kernel->call('schedule:run', [], $output);
+
+        // Belt and braces: the declared return type makes a non-int impossible in theory,
+        // and the whole reason for this block is that something impossible happened.
+        if (! is_int($rc)) {
+            fwrite(STDERR, sprintf(
+                "askr-scheduler: schedule:run returned %s, expected int%s\n",
+                get_debug_type($rc),
+                is_object($rc) ? ' (' . $rc::class . ')' : ''
+            ));
+        }
+    } catch (\Throwable $e) {
+        // Class, message, and origin — the three things missing when this was investigated
+        // from a bare log line. Scheduled events have already run by this point; say so, so
+        // the next person does not start by looking for lost work.
+        fwrite(STDERR, sprintf(
+            "askr-scheduler: %s escaped schedule:run at %s:%d — %s\n" .
+            "askr-scheduler:   scheduled events had already run; this is the return path, " .
+            "not the work. Continuing.\n",
+            $e::class,
+            $e->getFile(),
+            $e->getLine(),
+            $e->getMessage()
+        ));
+    }
 }
 
 exit(0);
