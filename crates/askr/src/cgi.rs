@@ -38,6 +38,30 @@ pub fn effective_host(headers: &hyper::HeaderMap, uri: &hyper::Uri) -> Option<St
     uri.authority().map(|a| a.as_str().to_string())
 }
 
+/// Strip a trailing `:port` from an authority, leaving an IPv6 literal intact.
+///
+/// `authority.split(':').next()` turned `[::1]:8080` into `"["`, and that string became
+/// `SERVER_NAME`, the virtual-host routing key and a field of the response-cache key.
+/// Only a client addressing the server by IPv6 literal reaches it, which is why it
+/// survived: every test client in this repo uses a name or an IPv4 address.
+///
+/// Brackets are kept — `[::1]` is the form an authority uses, and a bare `::1` would be
+/// ambiguous with a host:port pair.
+pub fn host_without_port(authority: &str) -> &str {
+    let a = authority.trim();
+    // Bracketed IPv6 literal: any port sits after the closing bracket.
+    if let Some(end) = a.rfind(']') {
+        return &a[..=end];
+    }
+    match a.rfind(':') {
+        // More than one colon and no brackets: an unbracketed IPv6 literal, not a
+        // host:port pair. Leave it whole rather than truncate it.
+        Some(i) if a[..i].contains(':') => a,
+        Some(i) if a[i + 1..].bytes().all(|b| b.is_ascii_digit()) => &a[..i],
+        _ => a,
+    }
+}
+
 /// Build an [`askr_php::Request`] for the front controller.
 #[allow(clippy::too_many_arguments)]
 pub fn build_request(
@@ -59,7 +83,7 @@ pub fn build_request(
     };
 
     let host = effective_host(&parts.headers, &parts.uri)
-        .map(|h| h.split(':').next().unwrap_or(&h).to_string())
+        .map(|h| host_without_port(&h).to_string())
         .unwrap_or_else(|| "localhost".to_string());
 
     let content_type = parts
@@ -122,6 +146,17 @@ pub fn build_request(
         if key.eq_ignore_ascii_case("proxy") {
             continue;
         }
+        // Underscores collapse into the same $_SERVER key as dashes, so
+        // `X_Forwarded_For:` and `X-Forwarded-For:` both become
+        // HTTP_X_FORWARDED_FOR — and which one wins depends on header iteration
+        // order. Anything that filters the dashed spelling (a WAF, a proxy that
+        // rewrites X-Forwarded-For, Laravel's TrustProxies reading $_SERVER) is
+        // then bypassed by sending the underscored one. This is why nginx ships
+        // `underscores_in_headers off` as its default, and it is the same default
+        // here: an underscore in a header name is dropped rather than merged.
+        if key.contains('_') {
+            continue;
+        }
         if let Ok(v) = value.to_str() {
             let upper = key.to_ascii_uppercase().replace('-', "_");
             server_vars.push((format!("HTTP_{upper}"), v.to_string()));
@@ -159,6 +194,65 @@ mod tests {
             b = b.header(*k, *v);
         }
         b.body(()).unwrap().into_parts().0
+    }
+
+    /// `X_Forwarded_For` used to collapse into the same $_SERVER key as
+    /// `X-Forwarded-For`, and which one PHP saw depended on header iteration order.
+    /// Anything filtering the dashed spelling — a WAF, a proxy that rewrites the
+    /// header, Laravel's TrustProxies reading $_SERVER — was bypassed by sending the
+    /// underscored one. nginx ships `underscores_in_headers off` for this reason.
+    /// `authority.split(':').next()` turned `[::1]:8080` into `"["`, and that landed
+    /// in SERVER_NAME, the virtual-host routing key and the response-cache key.
+    #[test]
+    fn strips_the_port_without_shredding_an_ipv6_literal() {
+        assert_eq!(host_without_port("example.com:8080"), "example.com");
+        assert_eq!(host_without_port("example.com"), "example.com");
+        assert_eq!(host_without_port("[::1]:8080"), "[::1]");
+        assert_eq!(host_without_port("[::1]"), "[::1]");
+        assert_eq!(host_without_port("[2001:db8::1]:443"), "[2001:db8::1]");
+        // Unbracketed and multi-colon: a bare IPv6 literal, not host:port.
+        assert_eq!(host_without_port("::1"), "::1");
+        // Not a port, so not stripped.
+        assert_eq!(
+            host_without_port("example.com:notaport"),
+            "example.com:notaport"
+        );
+        assert_eq!(host_without_port("  example.com:80  "), "example.com");
+    }
+
+    #[test]
+    fn drops_underscored_header_spellings() {
+        let parts = parts_with(&[
+            ("X_Forwarded_For", "9.9.9.9"),
+            ("X-Forwarded-For", "10.0.0.1"),
+            ("X-Foo", "bar"),
+        ]);
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000);
+        let req = build_request(
+            &parts,
+            Vec::new(),
+            Path::new("/srv"),
+            Path::new("/srv/index.php"),
+            "/index.php",
+            peer,
+            false,
+            80,
+        );
+        let xff: Vec<&str> = req
+            .server_vars
+            .iter()
+            .filter(|(k, _)| k == "HTTP_X_FORWARDED_FOR")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            xff,
+            vec!["10.0.0.1"],
+            "only the dashed spelling may reach PHP, and exactly once"
+        );
+        assert!(req
+            .server_vars
+            .iter()
+            .any(|(k, v)| k == "HTTP_X_FOO" && v == "bar"));
     }
 
     #[test]

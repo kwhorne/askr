@@ -8,10 +8,18 @@
 //! (lost/garbled sessions, cache, queue jobs).
 //!
 //! This lock stores the **holder's PID** in the slot (0 = free). If we can't
-//! acquire within a spin budget, we look at who holds it: we steal *only* from a
-//! holder the kernel confirms is dead (`kill(pid, 0)` → `ESRCH`). A live but
-//! preempted holder is waited on (with backoff), so we never corrupt shared
-//! state — the worst case degrades to a short wait, never UB.
+//! acquire within a spin budget, we look at who holds it: we steal from a holder the
+//! kernel confirms is dead (`kill(pid, 0)` → `ESRCH`). A live but preempted holder is
+//! waited on with backoff, so a mid-copy holder is never interrupted.
+//!
+//! `kill(pid, 0)` answers "does a process with this number exist", which is not quite
+//! the question asked. A holder can die while `pid_max` wraps and the number be reused
+//! by something long-lived — after which every waiter sees a live holder that will
+//! never release, and the region wedges for good. So there is a second, far slower
+//! condition: a holder whose PID has not changed for `STUCK_LIMIT` (10 s) is stolen
+//! from as well, with an error logged. That is the same steal this module was written
+//! to remove, four orders of magnitude further out — a bounded stall instead of a
+//! permanent hang, and never the sub-millisecond theft that corrupted state.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -41,6 +49,9 @@ fn process_alive(pid: u32) -> bool {
 pub fn acquire(lock: &AtomicU32) {
     let me = my_pid();
     let mut idle_rounds: u32 = 0;
+    // The holder we have been waiting on, and since when. Local state, so this needs
+    // no extra word in the slot and works the same on Linux and macOS.
+    let mut watched: Option<(u32, std::time::Instant)> = None;
     loop {
         // Fast path: a bounded spin for an uncontended / briefly-held lock.
         for _ in 0..40_000 {
@@ -70,6 +81,44 @@ pub fn acquire(lock: &AtomicU32) {
             continue;
         }
 
+        // A live-looking holder may be a *different* process that inherited the PID.
+        //
+        // `kill(pid, 0)` answers "does a process with this number exist", which is not
+        // the question. The holder can die while pid_max wraps — minutes on a
+        // fork-heavy box — and the number be handed to something long-lived. From then
+        // on every waiter sees a live holder that will never release, and the wait
+        // below is unbounded: the region wedges permanently, with no log to say why.
+        //
+        // So a holder that does not move for STUCK_LIMIT is stolen from regardless of
+        // what `kill` says. This is the same steal the module header argues against,
+        // and the difference is the timescale: the old scheme stole after 100–200 µs,
+        // shorter than a scheduler slice, which is why it corrupted state. A holder
+        // copying at most 64 KB that has not finished in ten seconds is not preempted,
+        // it is gone — and a bounded stall with a loud log beats a permanent hang.
+        match watched {
+            Some((p, since)) if p == holder => {
+                if since.elapsed() >= STUCK_LIMIT {
+                    if lock
+                        .compare_exchange(holder, me, Ordering::Acquire, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        tracing::error!(
+                            holder,
+                            waited_secs = STUCK_LIMIT.as_secs(),
+                            "shared-memory slot lock stolen from a holder the kernel \
+                             still reports as live — most likely the original holder \
+                             died and its PID was reused. If this repeats, the region \
+                             may be corrupt; restart the server."
+                        );
+                        return;
+                    }
+                    watched = None;
+                    continue;
+                }
+            }
+            _ => watched = Some((holder, std::time::Instant::now())),
+        }
+
         // Live holder, almost certainly preempted mid-copy. Prefer *yielding*
         // (which keeps the thread runnable, unlike a sleep that parks it and — on
         // a Tokio worker — stalls that reactor) for a good while: a holder copying
@@ -87,6 +136,12 @@ pub fn acquire(lock: &AtomicU32) {
         }
     }
 }
+
+/// How long a holder may sit unchanged before a waiter takes the lock anyway.
+///
+/// Four orders of magnitude above any legitimate critical section here (a ≤64 KB copy
+/// under a slot lock), so reaching it means the holder is not coming back.
+const STUCK_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Release a lock we hold.
 #[inline]

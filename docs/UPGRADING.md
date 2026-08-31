@@ -77,7 +77,10 @@ If you can afford one more moving part, the sturdiest sequence is:
 1. `askr upgrade` (new binary on disk, old one kept)
 2. `askr config-check askr.toml` — catches a config that the new version rejects
    *before* you stop anything
-3. restart
+3. **drain the queue** — the shared-memory ring does not survive a restart, and jobs
+   still in it are lost with no error anywhere the application can see
+   ([Maintenance](MAINTENANCE.md#drain-the-ring-before-a-restart-or-an-upgrade))
+4. restart
 
 Turn on the canary so a bad **application** deploy can't take the fleet with it —
 worth having in place before you start upgrading things:

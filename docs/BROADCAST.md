@@ -92,6 +92,11 @@ persisted.
 
 ## Notes
 
+- **`private-` and `presence-` channels are not available over SSE** — the stream
+  answers `403`. The Pusher/WebSocket path HMAC-verifies subscriptions to those
+  prefixes; this bridge has no socket id and no signature to check one against, so it
+  cannot honour the same rule and must not be a way around it. Public channels are
+  unaffected.
 - SSE is one-way (server → client). For client → server, make a normal request.
 - Behind a proxy, disable response buffering for `/askr/events` (Askr sets
   `X-Accel-Buffering: no` for nginx; other proxies may need their own setting).

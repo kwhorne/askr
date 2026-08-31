@@ -310,6 +310,25 @@ Queue workers are sidecars of the same binary (`[queue] workers`, `[queue] scrip
 share the shared-memory ring with the web workers, which is why a `restart` loses queued
 jobs and a reload doesn't.
 
+### ⚠️ Drain the ring before a restart or an upgrade
+
+The ring is an anonymous shared mapping. It exists for the lifetime of the process tree
+and there is no persist path for it — a restart comes up with an empty queue, and the
+jobs that were in it never ran. Nothing in the application sees an error, so this reads
+as "Laravel lost the mail".
+
+```bash
+# 1. stop accepting new work at the app level, then watch it empty
+watch -n1 'curl -s http://127.0.0.1:9000/api/status | jq .queue'
+# 2. restart only once pending + delayed + reserved are zero
+sudo systemctl restart askr
+```
+
+Askr logs an error at shutdown naming the number of jobs still in the ring, so a restart
+that lost work is at least on the record afterwards. If you cannot drain — or cannot
+accept the risk on an unattended restart — run the durable L2 backend instead
+(`ASKR_QUEUE_DB`, feature `sql-backend`), which survives a restart by design.
+
 ---
 
 ## Security hygiene

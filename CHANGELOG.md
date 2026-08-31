@@ -28,6 +28,207 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Fixed
 
+- **A deleted cache key could come back, so a logged-out session could log itself back
+  in.** The probe loop in `Cache::set` holds one slot lock at a time, so two concurrent
+  `set`s of the same key can pick different targets — one finds a slot empty that the
+  other has since filled, or the two disagree about which live entry is oldest because
+  `written_at` moved underneath them. The key then exists in two slots, and `delete`
+  returned at the first match: it tombstoned one copy and left the other live, so the
+  next lookup found it. For a session key that is a user who logged out and is logged
+  in again.
+
+  The comment sitting at the end of `set` claimed the target was re-validated under the
+  lock. It was not — the write was unconditional, and the comment described the fix
+  that was missing. `delete` now tombstones every match in the chain, and `set` sweeps
+  the chain afterwards so duplicates converge to one entry instead of accumulating. The
+  sweep takes slot locks in the same ascending order as the probe, so it cannot deadlock
+  against one.
+
+  The race is not reproducible on demand, so the regression test plants the duplicate
+  directly and asserts the consequence: after `delete`, `get` must return nothing. It
+  fails against the old `delete`.
+
+- **A full queue ring dropped jobs in silence.** The no-ring branch of `squeue::push`
+  carries the argument for why that is unacceptable — returning 0 is all the PHP API can
+  express, Laravel does not check it, so from the application side a lost job looks like
+  a job that ran — and then the full-ring branch a few lines down was a bare `0` with no
+  log at all. It now reports the queue name and slot count, throttled to once every 30 s
+  because a full ring recurs and clears and an operator needs to see each occurrence,
+  not just the first since boot.
+
+- **A crash mid-`push` leaked a queue slot permanently.** `id` was the *first* field
+  written, and `id != 0` is what makes a slot occupied — so a process that died anywhere
+  in the writes that followed left a slot claimed by a job that does not exist: `pop`
+  could hand out the previous occupant's payload under the new id, and nothing ever
+  frees it. One slot lost per crash until the ring is full of them. `id` is now written
+  last as the commit marker, which is the discipline `broadcast::publish` already
+  follows with its `seq`; a crash mid-push now leaves `id == 0` and the slot simply
+  still free.
+
+- **A recycled PID could wedge a shared-memory region for good.** `shmlock` steals a
+  slot lock only from a holder the kernel confirms is dead, which is the right rule and
+  rests on `kill(pid, 0)` answering a question it does not answer: it says whether *a*
+  process has that number, not whether it is the one that took the lock. A holder can
+  die while `pid_max` wraps — minutes on a fork-heavy box — and the number be reused by
+  something long-lived, after which every waiter sees a live holder that will never
+  release. Unbounded wait, no log.
+
+  A holder whose PID has not changed for ten seconds is now stolen from as well, with an
+  error naming it. That is the same steal the module was written to remove, four orders
+  of magnitude further out: the old scheme stole after 100–200 µs, shorter than a
+  scheduler slice, which is why it corrupted state. A ≤64 KB copy that has not finished
+  in ten seconds is not preempted. Tracked in the waiter's own stack, so no extra word
+  in the slot and the same behaviour on Linux and macOS.
+
+- **`[server] force_https` in TOML was ignored when validating `http_redirect`.** The
+  address was read from the flag *or* the config, and then the guard checked only the
+  CLI flag — so a perfectly good TOML setting both keys was refused at startup, by an
+  error message that named the config key it was ignoring. The ACME front a few lines
+  above already makes this exact distinction, with a comment explaining why.
+
+- **`Host: [::1]:8080` became `"["`.** The port was stripped with
+  `authority.split(':').next()`, which truncates an IPv6 literal at its first colon.
+  That string became `SERVER_NAME`, the virtual-host routing key, and a field of the
+  response-cache key. One helper now does it correctly for all three call sites — and
+  for the new admin `Host` check, which had grown a fourth copy of the same logic. Only
+  a client addressing the server by IPv6 literal reached it, which is why it survived:
+  every test client in this repo uses a name or an IPv4 address.
+
+- **The rate limiter discarded its refill remainder.** `last_ms` jumped to `now`
+  whether or not the integer division produced anything, so a client arriving faster
+  than one token's worth of milliseconds refilled zero on every call and stayed blocked
+  however long it had actually been waiting. `limit < window` makes that ordinary — 10
+  per 60 s is 6 s per token, so any polling faster than every 6 ms starved. `last_ms`
+  now advances only by the time the refill accounts for. Low severity, and a real
+  regression test: `consume` takes `now`, so the test drives 7 000 fabricated
+  milliseconds instead of sleeping for six seconds.
+
+- **`Accept-Encoding: br;q=0` was served brotli.** `q=0` is not a weak preference, it
+  is a refusal, and `starts_with("br")` matched `br;q=0` exactly as happily as `br`.
+  Tokens are now matched exactly — `starts_with` also accepted `brotli`, which nobody
+  serves — and a `q=0` token is treated as not offered. Ranking is unchanged: br before
+  gzip, other q-values still ignored.
+
+- **Shutting down with jobs still in the queue is now on the record.** The ring is an
+  anonymous shared mapping: it lives as long as the process tree and has no persist
+  path, so a restart — `askr upgrade` included — comes up empty and the jobs that were
+  in it never run. Nothing in the application sees an error, which is how this reads as
+  "Laravel lost the mail". The master now logs an error naming the number of jobs being
+  lost, counted after every worker is reaped so the region is quiescent and the count is
+  exact. `docs/MAINTENANCE.md` gains a drain procedure and `docs/UPGRADING.md` gains it
+  as a step in the upgrade sequence.
+
+- **`PURGE`/`BAN` were open to the internet behind a local reverse proxy.** With no
+  `ASKR_ADMIN_TOKEN` set, cache invalidation was accepted from loopback peers — which
+  is a sound rule for a server that is its own front door and no rule at all behind
+  nginx or Caddy on 127.0.0.1, where *every* request arrives from loopback. Anyone
+  could then send `BAN` with `X-Ban-Url: /*` and empty the cache on demand.
+  `trusted_proxies` is the operator stating in writing that loopback is where the
+  proxy sits, so once it is set the loopback fallback no longer applies and a token is
+  required.
+
+- **The SSE bridge subscribed to `private-` and `presence-` channels without
+  authenticating them.** `pusher.rs` HMAC-verifies a subscription to those prefixes
+  before adding it to a socket; `GET /askr/events?channel=private-orders` did no such
+  thing and streamed everything published on the channel to whoever asked. Two
+  transports for one channel namespace, one of them enforcing the rule.
+
+  The SSE path has no socket id and no signature to verify one against, so it cannot
+  honour the same check — it now refuses those prefixes with `403` instead. Public
+  channels are unaffected. Signed SSE subscriptions would be the feature; declining to
+  be the hole in the meantime is the fix.
+
+- **The admin plane accepted DNS-rebound reads and cross-site reloads.** Neither
+  needed the token to be unset to work, which is why both checks now apply whether or
+  not one is configured.
+
+  `Host` was never looked at. A page on an attacker's domain re-resolves its own
+  hostname to 127.0.0.1; the browser then treats `http://evil.test:9000/api/status` as
+  same-origin and hands the response — PIDs, RSS, error records — to the attacker's
+  script. Nothing in that request looks cross-site, because to the browser it isn't:
+  the only thing that gives it away is `Host: evil.test` naming a listener that is not
+  called that. A loopback-bound plane now requires a `Host` that names it, with
+  `ASKR_ADMIN_HOSTS` for a proxy that forwards its own.
+
+  And `POST /api/reload` is a CORS "simple request" — no custom headers, so no
+  preflight, so CORS never got a say and any web page could roll the fleet. Requests a
+  browser reports as cross-site (`Sec-Fetch-Site`, or an `Origin` that disagrees with
+  `Host`) are refused. `curl` and deploy scripts send neither header and keep working:
+  this refuses what identifies itself as cross-site rather than demanding proof of not
+  being a browser.
+
+- **The admin reload and an ACME renewal bypassed the canary gate.** `[reload] canary`
+  was honoured by the SIGHUP handler and by nothing else: `trigger_reload()` — the
+  admin API, a renewed certificate, the cert-mtime watcher — called `roll_next()`
+  directly and rolled the whole fleet with no health check. Those are exactly the
+  reloads that happen with nobody watching, so they are the ones that needed the gate
+  most. Both paths now enter through it.
+
+- **The response cache ignored the application's `Vary`, and kept no scheme in the
+  key.** Three defects with one cause: the key can express negotiated encoding and
+  device class, and everything else the response said about its own variance was
+  dropped.
+
+  `Vary: Accept-Language` from a localised Laravel app meant the first visitor's
+  language was cached and served to everyone. Such responses are now not cached at
+  all. That costs hit rate on exactly the responses that were being served wrong, and
+  honouring `Vary` properly needs a two-level lookup in `rcache` — a variant list per
+  primary key — which is a design change, not a patch. Recorded under known issues.
+
+  Scheme is now part of the key. Without it one entry was shared by http and https, so
+  with `force_https` off a page holding absolute URLs (`url()`, `asset()`, a canonical
+  tag) could be rendered over http and then served to https clients with http links
+  baked in. It is appended last, because `rcache::key_parts` reads the first three
+  fields — `PURGE` and `BAN` keep working and stay scheme-agnostic, which is what
+  anyone purging a URL means.
+
+  And a response the app had gzipped itself was cached as garbage: `storable_header`
+  drops `Content-Encoding`, and `compress::maybe` returns an already-compressed body
+  unchanged because re-compressing it comes out larger — so the entry held gzip bytes
+  with nothing declaring them, and every hit sent binary to the browser. Those are
+  refused too.
+
+- **Upload temp files could be streamed into a directory another local user owned.**
+  `$TMPDIR/askr-uploads` is a fixed, world-known path, and on a shared host somebody
+  else can create it first. Every result that would have revealed it was discarded:
+  with `recursive(true)` an existing directory is not an error, `set_permissions()` on
+  a directory owned by another user fails with EPERM, and both were `let _ =`. Uploads
+  — whatever people type into forms — then landed somewhere readable by its owner, who
+  could also substitute an entry with a symlink between our create and PHP's read.
+
+  The directory is verified now rather than assumed: `lstat`, owned by this process,
+  no access for anybody else, and a chmod that is checked instead of trusted. When the
+  shared path isn't ours the server uses a private `askr-uploads-<uid>-<pid>` beside it
+  and says so, because an image that pre-creates `/tmp/askr-uploads` as root and then
+  drops to www-data is a legitimate setup and should not take uploads down. Files are
+  created `O_CREAT|O_EXCL|O_NOFOLLOW` at 0600.
+
+- **`X_Forwarded_For` and `X-Forwarded-For` became the same `$_SERVER` key.** Header
+  names were upper-cased with dashes replaced by underscores, so both spellings
+  collapsed to `HTTP_X_FORWARDED_FOR` and which one PHP saw depended on header
+  iteration order. Anything filtering the dashed spelling — a WAF, a proxy that
+  rewrites the header, Laravel's `TrustProxies` reading `$_SERVER` — was bypassed by
+  sending the underscored one. An underscore in a header name is now dropped rather
+  than merged, which is the same default nginx ships as `underscores_in_headers off`.
+
+- **The crash-loop guard did not count a worker killed by a signal.** It tested
+  `WIFEXITED && WEXITSTATUS != 0`, so a worker that segfaulted on boot — the loudest
+  form of the thing the guard exists to stop — respawned forever. Worse than not
+  counting: it took the healthy branch and *cleared* the streak, so a fleet mixing
+  fatals and faults never accumulated one either. Fault signals now count
+  (`SIGSEGV`/`BUS`/`ILL`/`FPE`/`ABRT`/`SYS`/`TRAP`); `SIGTERM` deliberately does not,
+  because every intentional termination in `supervisor.rs` uses it and a rolling reload
+  must not look like a crash-loop. `SIGSYS` is in the list because a seccomp filter
+  killing the worker is a boot loop like any other.
+
+- **ACME wrote the key and the certificate in place, one after the other.** A worker
+  spawning or reloading in between read a new key against the old certificate and
+  failed to start; the window was the length of two file writes. Both are staged and
+  renamed now, key first and certificate last — the cert-mtime watcher keys on the
+  certificate, so by the time anything notices a change the matching key is already
+  there. The key's temp file carries 0600 from creation rather than being tightened
+  afterwards.
+
 - **A stale read offset could have handed heap memory back as a request body.** In
   worker mode the offset `php://input` reads from was never reset between requests:
   `askr_req_reset()` freed the body and zeroed its length and never touched the third
@@ -107,6 +308,66 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   calls the cause most likely lag.
 
 ### Known issues
+
+- **`squeue` `delete`/`release` are unfenced against an expired lease.** `pop` reserves
+  a job by moving `reserved_until` and leaves `id` alone, so once a lease lapses another
+  worker takes the same job under the same id. A delayed first worker then calls
+  `delete(id)` and acks the job the second one is still running, or `release(id, delay)`
+  and makes it immediately poppable while two are already on it. Nothing detects the
+  stale ack because there is nothing to detect it with.
+
+  The fix is a lease generation in the slot, carried in `Reserved` and required by
+  `delete`/`release`. That crosses the FFI: `askr_queue_delete_fn(long id)` and
+  `askr_queue_release_fn(long id, long delay)` in `shim.c`, the Rust bridge, and the
+  Laravel queue driver in `packages/laravel` all take the id alone. A signature change
+  through three layers is not something to bury in a batch of small fixes, so it is
+  written down rather than done.
+
+- **Shared-memory regions do not survive `exec`.** Every region is `MAP_ANON|MAP_SHARED`
+  created before fork, so it is shared across the process tree and gone on restart. For
+  the response cache and the rate limiter that is correct — the cache has a persist path
+  anyway. For pending jobs it is data loss, now logged and documented (see Fixed) but
+  still loss. Real persistence means a named mapping (`shm_open`) with a
+  `{magic, version, geometry}` header so a re-attached region can be validated or
+  rejected. Adding the header alone was considered and skipped: an unused version field
+  freezes a layout whose migration has not been designed, which is a worse position than
+  having no header. The durable L2 backend (`ASKR_QUEUE_DB`) is the answer available
+  today.
+
+- **A panic in an `extern "C"` trampoline aborts the worker.** There are around twenty
+  of them across `cache`, `cache_sql`, `broadcast`, `broadcast_sql` and `squeue`, and no
+  `catch_unwind` anywhere in the workspace, so a panic at the boundary aborts the
+  process. The supervisor respawns it — and since a fault-killed worker now counts
+  toward the crash-loop guard (see Fixed), a panic that reproduces will at least stop
+  the fleet instead of looping forever. The fix is a small `guard(default, f)` wrapper
+  applied to each trampoline: mechanical, twenty call sites, and worth reviewing on its
+  own rather than inside a security pass.
+
+- **The sandbox is fail-open, and does not stop the thing most people expect it to.**
+  `sandbox::apply()` logs `warn!` and continues when seccomp or Landlock cannot be
+  applied, so a worker that failed to harden serves traffic looking exactly like one
+  that succeeded, and nothing in `/api/status` distinguishes them. Landlock is pinned
+  to `ABI::V1`, below what current kernels offer. And `--sandbox` blocks `execve`,
+  which is not how a webshell runs here: Askr *interprets* PHP in-process, so a `.php`
+  file written into the docroot needs no process creation at all — Landlock write rules
+  are the control for that, and they are opt-in.
+
+  What it needs is a `sandbox = "required"` mode that refuses to serve unhardened, the
+  ABI negotiated rather than pinned, and the applied state attested in `/api/status`.
+  That is a feature with a config surface, so it is not being done as part of a
+  security pass.
+
+- **The response cache refuses what it cannot vary on, rather than varying on it.** A
+  response carrying a `Vary` the key cannot express is not cached (see Fixed). Doing it
+  properly means a variant list per primary key in `rcache` and a two-phase lookup —
+  the primary key cannot be computed from the request alone once the response gets a
+  say in it. Until then, `Vary: Accept-Language` costs hit rate instead of correctness.
+
+- **`ASKR_ADMIN_TOKEN` is still opt-in.** The plane warns at startup when it is bound
+  off-box without one, and the `Host` and cross-site checks now apply with or without
+  it, but an unset token still means an open reload trigger to anything that can reach
+  the socket. Making it mandatory would break every existing deployment that relies on
+  loopback isolation, so it stays a decision rather than a default.
 
 - **The self-update trust chain ends at GitHub.** `askr upgrade` fetches the tarball and
   its `.sha256` from the same release, so the checksum proves the download arrived

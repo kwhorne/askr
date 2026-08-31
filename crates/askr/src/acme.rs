@@ -73,6 +73,45 @@ pub fn key_path(dir: &Path) -> PathBuf {
 /// and the ACME account credentials landed as 0644, readable by every local user. The
 /// mode is set at creation rather than chmod'ed afterwards, so there's no window where
 /// the key exists with wider permissions.
+/// Write `bytes` to a sibling temporary file and `rename()` it into place, so a
+/// reader either sees the whole previous file or the whole new one and never a
+/// half-written or mode-0644-for-an-instant version of either.
+///
+/// The temp file carries the final mode from creation — creating it 0644 and
+/// tightening afterwards would expose a private key for the interval between.
+fn stage_and_rename(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+
+    // A leftover temp from a killed process must not fail the renewal forever.
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = opts.open(&tmp)?;
+    let write = f.write_all(bytes).and_then(|()| f.sync_all());
+    if let Err(e) = write {
+        drop(f);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(f);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
@@ -217,8 +256,16 @@ async fn obtain(cfg: &AcmeConfig) -> anyhow::Result<()> {
         .await
         .context("acme: fetching certificate")?;
 
-    write_private(&key_path(&cfg.cache_dir), key_pem.as_bytes()).context("acme: writing key")?;
-    std::fs::write(cert_path(&cfg.cache_dir), cert_pem).context("acme: writing cert")?;
+    // Both files are staged and then renamed, key first, cert last. Written in
+    // place, a worker spawning or reloading mid-write reads a new key against the
+    // old certificate and fails to start; the window was the length of two file
+    // writes. It is now one syscall, and the order is deliberate: the cert-mtime
+    // watcher in supervisor.rs keys on the *certificate*, so by the time anything
+    // notices a change the matching key is already in place.
+    stage_and_rename(&key_path(&cfg.cache_dir), key_pem.as_bytes(), 0o600)
+        .context("acme: writing key")?;
+    stage_and_rename(&cert_path(&cfg.cache_dir), cert_pem.as_bytes(), 0o644)
+        .context("acme: writing cert")?;
     let renew_at = now_secs() + cfg.renew_after_days * 86_400;
     let _ = std::fs::write(cfg.cache_dir.join("renew_at"), renew_at.to_string());
 

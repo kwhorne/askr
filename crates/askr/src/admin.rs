@@ -87,7 +87,7 @@ pub fn spawn(addr: SocketAddr, info: Info) {
                     let token = token.clone();
                     tokio::task::spawn(async move {
                         let service =
-                            service_fn(move |req| handle(req, info.clone(), token.clone()));
+                            service_fn(move |req| handle(req, addr, info.clone(), token.clone()));
                         let _ = http1::Builder::new().serve_connection(io, service).await;
                     });
                 }
@@ -98,6 +98,7 @@ pub fn spawn(addr: SocketAddr, info: Info) {
 
 async fn handle(
     req: Request<hyper::body::Incoming>,
+    addr: SocketAddr,
     info: Info,
     token: Arc<Option<String>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
@@ -115,6 +116,15 @@ async fn handle(
     // its own and the API calls it makes are gated.
     let protected = !path_is_open(&path);
     if protected {
+        // Who is asking, before what they know. Both checks below cost nothing and
+        // apply whether or not a token is configured — a token is opt-in, and these
+        // two attacks both work fine against a plane that never had one.
+        if !host_names_this_listener(&req, addr) {
+            return Ok(deny("askr: unexpected Host header for the admin plane"));
+        }
+        if browser_says_cross_site(&req) {
+            return Ok(deny("askr: cross-site request refused"));
+        }
         if let Some(tok) = token.as_ref() {
             if !bearer_ok(&req, tok) {
                 return Ok(Response::builder()
@@ -143,6 +153,100 @@ async fn handle(
             .unwrap(),
     };
     Ok(resp)
+}
+
+fn deny(msg: &'static str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .body(Full::new(Bytes::from(msg)))
+        .unwrap()
+}
+
+/// Does the `Host` header name this listener?
+///
+/// This is the defence against DNS rebinding, and it is the only one that works. A
+/// page on the attacker's domain re-resolves its own hostname to 127.0.0.1; the
+/// browser then considers `http://evil.test:9000/api/status` same-origin and hands
+/// the response to the attacker's script. Nothing about the request looks
+/// cross-site — no `Origin`, `Sec-Fetch-Site: same-origin` — because as far as the
+/// browser is concerned it isn't. What the attacker cannot change is that `Host:`
+/// says `evil.test` and this listener is not called that.
+///
+/// Enforced only for a loopback bind. Bound to a private address the admin plane is
+/// legitimately reached by name, and that is also the case rebinding cannot reach.
+/// `ASKR_ADMIN_HOSTS` (comma-separated) extends the list for a loopback bind sitting
+/// behind a proxy that forwards the original `Host`.
+fn host_names_this_listener<B>(req: &Request<B>, addr: SocketAddr) -> bool {
+    if !addr.ip().is_loopback() {
+        return true;
+    }
+    // HTTP/1.1 requires Host and this listener is http1-only, so absence is not a
+    // client we need to accommodate.
+    let Some(host) = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let name = crate::cgi::host_without_port(host)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // Any loopback literal: only loopback can reach a loopback bind anyway.
+    if name
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+    {
+        return true;
+    }
+    std::env::var("ASKR_ADMIN_HOSTS").is_ok_and(|allowed| {
+        allowed
+            .split(',')
+            .map(str::trim)
+            .any(|a| !a.is_empty() && a.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Did a browser tell us this request came from another site?
+///
+/// `POST /api/reload` with no custom headers is a CORS "simple request": no
+/// preflight, so CORS never gets a say, and any page anywhere could roll the fleet.
+/// Browsers do say where a request came from, in `Sec-Fetch-Site` and `Origin`.
+///
+/// This rejects what identifies itself as cross-site rather than demanding proof of
+/// not being a browser: curl and deploy scripts send neither header and keep working,
+/// which is the point — `POST /api/reload` is documented and in use.
+fn browser_says_cross_site<B>(req: &Request<B>) -> bool {
+    if let Some(site) = req
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+    {
+        let site = site.trim();
+        if !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none") {
+            return true;
+        }
+    }
+    if let Some(origin) = req
+        .headers()
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        let host = req
+            .headers()
+            .get(hyper::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        // "null" (a sandboxed or file:// origin) matches nothing and is refused.
+        let origin_host = origin.trim().rsplit("//").next().unwrap_or("");
+        if !origin_host.eq_ignore_ascii_case(host) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Constant-time check of an `Authorization: Bearer <token>` header.
@@ -665,6 +769,85 @@ mod tests {
     /// Queue names come from the application, and they are the only field in the status
     /// document that isn't machine-generated. A name with a quote in it would otherwise
     /// produce a document that parses as something else — or not at all.
+    /// DNS rebinding is the attack this stops, and the reason it needs stopping at
+    /// `Host` rather than at `Origin`: after the rebind the browser believes the
+    /// request is same-origin and says so, or says nothing at all.
+    #[test]
+    fn a_rebound_host_is_refused_on_a_loopback_bind() {
+        let local: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let req = |host: &str| {
+            hyper::Request::builder()
+                .uri("/api/status")
+                .header("host", host)
+                .body(())
+                .unwrap()
+        };
+
+        assert!(host_names_this_listener(&req("127.0.0.1:9000"), local));
+        assert!(host_names_this_listener(&req("localhost:9000"), local));
+        assert!(host_names_this_listener(&req("localhost"), local));
+        assert!(host_names_this_listener(&req("[::1]:9000"), local));
+
+        assert!(
+            !host_names_this_listener(&req("evil.test:9000"), local),
+            "an attacker's hostname resolved to 127.0.0.1 is the whole attack"
+        );
+        assert!(!host_names_this_listener(&req("192.168.1.10:9000"), local));
+
+        // No Host at all: HTTP/1.1 requires one and this listener is http1-only.
+        let bare = hyper::Request::builder()
+            .uri("/api/status")
+            .body(())
+            .unwrap();
+        assert!(!host_names_this_listener(&bare, local));
+
+        // Bound off-box the plane is reached by name on purpose — and that is also
+        // the case rebinding cannot reach.
+        let public: SocketAddr = "10.0.0.5:9000".parse().unwrap();
+        assert!(host_names_this_listener(&req("admin.internal"), public));
+    }
+
+    /// `POST /api/reload` is a CORS "simple request", so no preflight ever ran and
+    /// any page could roll the fleet. curl sends neither header and must keep
+    /// working: this refuses what says it is cross-site, it does not demand proof of
+    /// not being a browser.
+    #[test]
+    fn a_cross_site_request_is_refused_and_a_script_is_not() {
+        let plain = hyper::Request::builder()
+            .uri("/api/reload")
+            .body(())
+            .unwrap();
+        assert!(
+            !browser_says_cross_site(&plain),
+            "curl and deploy scripts send neither header"
+        );
+
+        let from_a_page = hyper::Request::builder()
+            .uri("/api/reload")
+            .header("host", "127.0.0.1:9000")
+            .header("sec-fetch-site", "cross-site")
+            .body(())
+            .unwrap();
+        assert!(browser_says_cross_site(&from_a_page));
+
+        let mismatched_origin = hyper::Request::builder()
+            .uri("/api/reload")
+            .header("host", "127.0.0.1:9000")
+            .header("origin", "https://evil.test")
+            .body(())
+            .unwrap();
+        assert!(browser_says_cross_site(&mismatched_origin));
+
+        let own_dashboard = hyper::Request::builder()
+            .uri("/api/reload")
+            .header("host", "127.0.0.1:9000")
+            .header("sec-fetch-site", "same-origin")
+            .header("origin", "http://127.0.0.1:9000")
+            .body(())
+            .unwrap();
+        assert!(!browser_says_cross_site(&own_dashboard));
+    }
+
     #[test]
     fn queue_names_are_escaped_in_json() {
         assert_eq!(json_string("mail"), "\"mail\"");

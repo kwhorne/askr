@@ -172,8 +172,29 @@ fn consume(b: *mut Bucket, now: u64, limit: u64, window: u64, capacity: u64) -> 
         let elapsed = now.saturating_sub(last);
         if elapsed > 0 {
             let refill = elapsed.saturating_mul(limit) / window;
-            tokens = tokens.saturating_add(refill).min(capacity);
-            ptr::write(ptr::addr_of_mut!((*b).last_ms), now);
+            // `last` used to jump to `now` whether or not the division produced
+            // anything, so the sub-token remainder was thrown away on every call. A
+            // client arriving faster than one token's worth of milliseconds (possible
+            // whenever `limit < window`, e.g. 10 per 60 s ⇒ 6 s per token) refilled
+            // zero every time and stayed blocked indefinitely, however long it had
+            // actually been waiting. Advancing `last` only by the time the refill
+            // accounts for carries the remainder into the next call instead.
+            if refill == 0 {
+                // Nothing to credit yet — leave `last` alone so the elapsed time
+                // keeps accumulating.
+            } else if tokens.saturating_add(refill) >= capacity {
+                // Full: there is no remainder worth carrying, and letting `last` lag
+                // behind a saturated bucket would hand out a burst later.
+                tokens = capacity;
+                ptr::write(ptr::addr_of_mut!((*b).last_ms), now);
+            } else {
+                tokens += refill;
+                let credited_ms = refill.saturating_mul(window) / limit.max(1);
+                ptr::write(
+                    ptr::addr_of_mut!((*b).last_ms),
+                    last.saturating_add(credited_ms).min(now),
+                );
+            }
         }
         if tokens >= MILLI {
             tokens -= MILLI;
@@ -253,6 +274,42 @@ mod tests {
             assert!(check(b"t3:x", 2, 60, 3).allowed, "request {i}");
         }
         assert!(!check(b"t3:x", 2, 60, 3).allowed);
+    }
+
+    /// The refill used to move `last_ms` to `now` even when the integer division
+    /// produced nothing, discarding the sub-token remainder on every call. A client
+    /// arriving faster than one token's worth of milliseconds — which `limit < window`
+    /// makes ordinary, 10 per 60 s is 6 s per token — then refilled zero forever.
+    ///
+    /// `consume` takes `now`, so this drives it directly rather than sleeping for the
+    /// six seconds a real-time version of this test would need.
+    #[test]
+    fn the_refill_remainder_is_carried_not_discarded() {
+        let (limit, window) = (10u64, 60u64); // 6 s per token
+        let capacity = limit * MILLI;
+        let mut b = Bucket {
+            lock: AtomicU32::new(0),
+            key_hash: 1,
+            tokens_milli: 0,
+            last_ms: 0,
+        };
+
+        // Hammer every millisecond. Each call on its own refills nothing
+        // (1 × 10 / 60 == 0), so the only way a token ever appears is if the
+        // remainder survives between calls.
+        let mut allowed_at = None;
+        for ms in 1..=7000u64 {
+            let v = consume(&mut b as *mut Bucket, ms, limit, window, capacity);
+            if v.allowed {
+                allowed_at = Some(ms);
+                break;
+            }
+        }
+        let ms = allowed_at.expect("a token must eventually accrue under 1 ms polling");
+        assert!(
+            (5900..=6100).contains(&ms),
+            "one token per 6 s; got one at {ms} ms"
+        );
     }
 
     #[test]

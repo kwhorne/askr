@@ -245,6 +245,12 @@ curl -X BAN -H 'X-Ban-Url: /category/tech/*' https://example.com/
 Both answer with a count, so a purge that matched nothing is visible rather than
 silent: `{"purged":3}` / `{"banned":12}`.
 
+Authenticated with `ASKR_ADMIN_TOKEN` as a bearer token. Without a token they are
+accepted from loopback peers only — **except** when `trusted_proxies` is set, because
+behind nginx or Caddy on 127.0.0.1 every request arrives from loopback and that
+fallback would authenticate the whole internet to run `BAN /*`. Declaring
+`trusted_proxies` therefore makes the token mandatory for `PURGE`/`BAN`.
+
 - **`PURGE`** targets the request URL. With a query string it purges that exact URL;
   without one, every query variant of the path. Matching stops at a component
   boundary, so purging `/posts/1` never touches `/posts/12`.
@@ -505,7 +511,11 @@ $request->input('name');                       // multipart fields too
 ```
 
 Temp files land under `$TMPDIR/askr-uploads` (created `0700` on Unix so other local
-users on a shared host can't read them) and are removed after each request.
+users on a shared host can't read them) and are removed after each request. That
+path is verified, not assumed: if it already exists and isn't a `0700` directory
+owned by the server's own uid — which on a shared host it may not be — Askr logs a
+warning and uses a private `askr-uploads-<uid>-<pid>` beside it instead, and refuses
+uploads if neither can be made safe.
 The `--max-body-size` limit is enforced on the stream (`413` above it); set PHP's
 `upload_max_filesize`/`post_max_size` via `[worker] ini` if your app checks them.
 

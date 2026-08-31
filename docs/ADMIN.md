@@ -31,7 +31,24 @@ Then open <http://127.0.0.1:9000/>.
 >
 > The same token also gates **`PURGE`/`BAN`** cache invalidation on the *public*
 > listener (see [Features](FEATURES.md#purge--ban-over-http)); without a token those
-> are accepted from loopback only.
+> are accepted from loopback only — unless `trusted_proxies` is set, in which case a
+> loopback peer is the proxy rather than a local operator and a token is required.
+>
+> **Two checks apply to the gated endpoints whether or not a token is set**, because
+> both attacks work fine against a plane that never had one:
+>
+> - **`Host` must name this listener** when the admin plane is bound to loopback.
+>   Otherwise a page on the attacker's domain can re-resolve its own hostname to
+>   127.0.0.1 (DNS rebinding), at which point the browser treats
+>   `http://evil.test:9000/api/status` as same-origin and hands the response to the
+>   attacker's script. `localhost` and any loopback literal are accepted; set
+>   **`ASKR_ADMIN_HOSTS`** (comma-separated hostnames) if a proxy in front forwards
+>   its own `Host`. A non-loopback bind is reached by name on purpose, so the check
+>   does not apply there.
+> - **Requests a browser reports as cross-site are refused** (`Sec-Fetch-Site`, or an
+>   `Origin` that doesn't match `Host`). `POST /api/reload` is a CORS "simple
+>   request": no preflight runs, so without this any web page could roll the fleet.
+>   `curl` and deploy scripts send neither header and are unaffected.
 
 ```bash
 ASKR_ADMIN_TOKEN=$(openssl rand -hex 32) askr serve … --admin 0.0.0.0:9000

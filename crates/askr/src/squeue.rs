@@ -177,7 +177,6 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
         let _g = Slot::lock(e);
         unsafe {
             if r_u64(ptr::addr_of!((*e).id)) == 0 {
-                ptr::write(ptr::addr_of_mut!((*e).id), id);
                 ptr::write(ptr::addr_of_mut!((*e).queue_hash), qh);
                 ptr::write(ptr::addr_of_mut!((*e).available_at), available_at);
                 ptr::write(ptr::addr_of_mut!((*e).created_at), created_at);
@@ -196,12 +195,57 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
                     ptr::addr_of_mut!((*e).payload) as *mut u8,
                     payload.len(),
                 );
+                // `id` last, as the commit marker — the same discipline
+                // `broadcast::publish` already uses with its `seq`.
+                //
+                // It used to be written first. `id != 0` is what makes a slot
+                // occupied, so a process that died anywhere in the writes below it
+                // left a slot claimed by a job that does not exist: `pop` could hand
+                // out the previous occupant's payload under the new id, and nothing
+                // ever frees it — one permanently lost slot per crash, until the ring
+                // fills up with them. Written last, a crash mid-push leaves `id == 0`
+                // and the slot simply still free.
+                //
+                // The fence is for store order in the compiled code, not for a
+                // concurrent reader: every reader takes this slot's lock, and the lock
+                // itself is reclaimed from a dead holder by shmlock.
+                std::sync::atomic::fence(Ordering::Release);
+                ptr::write(ptr::addr_of_mut!((*e).id), id);
                 return id;
             }
         }
     }
-    0 // full
+    // Full. Dropping is the right behaviour — a queue that silently evicted an older
+    // job to make room would be worse — but it must not be a *silent* drop. The
+    // no-ring branch above already says exactly why: returning 0 is all the PHP API
+    // can express and Laravel does not check it, so from the application side a lost
+    // job looks like a job that ran. That reasoning applies here word for word, and
+    // this path had no log at all.
+    //
+    // Throttled rather than once-per-process: a full ring is a condition that recurs
+    // and then clears, and an operator needs to see it each time it comes back, not
+    // only the first time since boot.
+    let now = now_ms() / 1000;
+    let last = FULL_WARNED_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= FULL_WARN_EVERY_SECS
+        && FULL_WARNED_AT
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::error!(
+            queue = %String::from_utf8_lossy(queue),
+            slots,
+            "queue push DISCARDED — every slot is occupied. The job is gone: no \
+             exception, no retry. Raise --queue-slots (or [queue] slots), or find out \
+             why the backlog is not draining."
+        );
+    }
+    0
 }
+
+/// Unix seconds of the last "ring full" report, so a busy app cannot drown the log.
+static FULL_WARNED_AT: AtomicU64 = AtomicU64::new(0);
+const FULL_WARN_EVERY_SECS: u64 = 30;
 
 /// Reserve the oldest ready job for `queue` (available and not live-reserved) for
 /// `visibility` seconds. Increments its attempt count. None if nothing ready.

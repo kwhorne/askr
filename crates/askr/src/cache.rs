@@ -287,16 +287,51 @@ impl<const V: usize> Region<V> {
         // the oldest live entry. Only the last case is a real eviction.
         let evicting = reuse.is_none() && expired_victim.is_none();
         let target = reuse.or(expired_victim).unwrap_or(victim);
-        let e = unsafe { p.add(target) };
-        let _g = Slot::lock(e);
-        // Re-validate under the lock: if a racing writer already put *our* key
-        // somewhere we'd now clobber, last-writer-wins is still correct; we just
-        // write our value. (Closes the evict/target race window.)
-        unsafe { Self::write(e, key, val, h, expires) };
+        {
+            let e = unsafe { p.add(target) };
+            let _g = Slot::lock(e);
+            unsafe { Self::write(e, key, val, h, expires) };
+        }
+        // Converge on one slot per key.
+        //
+        // The probe above holds one slot lock at a time, so two concurrent `set`s of
+        // the same key can choose *different* targets: one finds a slot empty that the
+        // other has since filled, or the two disagree about which live entry is oldest
+        // because `written_at` moved underneath them. The key then exists in two slots
+        // — and `delete` stopped at the first match, so tombstoning one left the other
+        // live and the next lookup found it. For a session key that is a logged-out
+        // user logged back in.
+        //
+        // The comment that used to sit here claimed this was re-validated under the
+        // lock. It wasn't: the write was unconditional. So instead of pretending one
+        // slot is authoritative, this sweeps the chain afterwards and tombstones any
+        // other copy. One ascending pass, one lock at a time, in the same order as the
+        // probe — so it cannot deadlock against a concurrent probe.
+        Self::tombstone_others(p, slots, key, h, target);
         if evicting {
             note_eviction();
         }
         true
+    }
+
+    /// Tombstone every live copy of `key` in the probe chain except the one at `keep`.
+    fn tombstone_others(p: *mut Entry<V>, slots: usize, key: &[u8], h: u64, keep: usize) {
+        for i in 0..PROBE {
+            let idx = (h as usize).wrapping_add(i) % slots;
+            if idx == keep {
+                continue;
+            }
+            let e = unsafe { p.add(idx) };
+            let _g = Slot::lock(e);
+            unsafe {
+                if r_u32(ptr::addr_of!((*e).state)) == 0 {
+                    return; // chain end: nothing further can hold the key
+                }
+                if Self::matches(e, key, h) {
+                    ptr::write(ptr::addr_of_mut!((*e).state), 2);
+                }
+            }
+        }
     }
 
     /// Atomic set-if-absent (for locks). Returns true if the key was written.
@@ -353,22 +388,28 @@ impl<const V: usize> Region<V> {
         let Some((p, slots)) = self.base() else {
             return false;
         };
+        // Every match in the chain, not just the first. Racing `set`s can leave the
+        // key in two slots (see `set`), and returning at the first tombstone left the
+        // second copy live — a deleted session came back on the next lookup. Deleting
+        // has to mean deleted, so this cannot stop early even though the common case
+        // has exactly one match.
+        let mut found = false;
         for i in 0..PROBE {
             let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
             let _g = Slot::lock(e);
             unsafe {
                 if r_u32(ptr::addr_of!((*e).state)) == 0 {
-                    return false;
+                    break; // chain end
                 }
                 if Self::matches(e, key, h) {
                     // Tombstone (2), not empty (0): preserves the probe chain so a
                     // colliding key stored later in the chain stays reachable.
                     ptr::write(ptr::addr_of_mut!((*e).state), 2);
-                    return true;
+                    found = true;
                 }
             }
         }
-        false
+        found
     }
 
     /// Refresh the TTL of an existing, live key without touching its value.
@@ -681,6 +722,53 @@ mod tests {
     static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A key can end up in two slots: the probe in `set` holds one slot lock at a
+    /// time, so two concurrent `set`s of the same key can choose different targets
+    /// (one sees a slot empty that the other has filled, or they disagree about which
+    /// live entry is oldest because `written_at` moved). `delete` stopped at the first
+    /// match, so the second copy stayed live and the next lookup found it — for a
+    /// session key, a logged-out user logged back in.
+    ///
+    /// The race is not reproducible on demand, so the duplicate is planted directly
+    /// and the *consequence* is what gets asserted.
+    #[test]
+    fn a_deleted_key_cannot_come_back_from_a_duplicate_slot() {
+        let _g = guard();
+        init(256, 64);
+
+        let key = b"sess:duplicated";
+        assert!(set(key, b"first", 0));
+        let h = hash_key(key);
+        let (p, slots) = SMALL.base().expect("region is mapped after init");
+
+        // Where did `set` put it?
+        let mut at = None;
+        for i in 0..PROBE {
+            let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
+            let _lock = Slot::lock(e);
+            if unsafe { Region::<VAL_SMALL>::matches(e, key, h) } {
+                at = Some(i);
+                break;
+            }
+        }
+        let i = at.expect("the key just set must be somewhere in its own chain");
+
+        // Plant a second live copy one step further along the same chain — exactly
+        // what the losing side of the race leaves behind.
+        let dup = unsafe { p.add((h as usize).wrapping_add(i + 1) % slots) };
+        {
+            let _lock = Slot::lock(dup);
+            unsafe { Region::<VAL_SMALL>::write(dup, key, b"second", h, 0) };
+        }
+
+        assert!(delete(key), "delete must report that it removed something");
+        assert_eq!(
+            get(key),
+            None,
+            "both copies must be gone — a deleted session that reappears is the bug"
+        );
     }
 
     #[test]

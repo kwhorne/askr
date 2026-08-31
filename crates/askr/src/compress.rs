@@ -38,14 +38,39 @@ pub const MAX_STATIC: u64 = 4 * 1024 * 1024;
 /// Pick the best supported encoding from an `Accept-Encoding` value (prefer br).
 pub fn negotiate(accept_encoding: &str) -> Option<Encoding> {
     let a = accept_encoding.to_ascii_lowercase();
-    // Crude but effective: honour presence, not q-values (br beats gzip).
-    if a.split(',').any(|e| e.trim().starts_with("br")) {
+    // br before gzip when both are acceptable. q-values are not ranked — only
+    // `q=0` is honoured, because that one is not a preference, it is a refusal:
+    // `Accept-Encoding: br;q=0, gzip` asks for gzip and used to get brotli, since
+    // `starts_with("br")` matches `br;q=0` just as happily as `br`.
+    if accepts(&a, "br") {
         Some(Encoding::Br)
-    } else if a.split(',').any(|e| e.trim().starts_with("gzip")) {
+    } else if accepts(&a, "gzip") {
         Some(Encoding::Gzip)
     } else {
         None
     }
+}
+
+/// Is `name` offered by this `Accept-Encoding` and not explicitly refused?
+///
+/// Exact token match, not a prefix: `starts_with` also accepted `brotli`, which is
+/// not an encoding anybody serves.
+fn accepts(accept_encoding: &str, name: &str) -> bool {
+    accept_encoding.split(',').any(|e| {
+        let (token, params) = match e.split_once(';') {
+            Some((t, p)) => (t.trim(), p),
+            None => (e.trim(), ""),
+        };
+        if token != name {
+            return false;
+        }
+        !params.split(';').any(|p| {
+            p.trim()
+                .strip_prefix("q=")
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .is_some_and(|q| q <= 0.0)
+        })
+    })
 }
 
 /// Is a content type worth compressing (text-ish, already-compressed formats no)?
@@ -112,6 +137,26 @@ pub fn maybe(
 
 #[cfg(test)]
 mod tests {
+    /// `q=0` is a refusal, not a weak preference, and `starts_with("br")` matched
+    /// `br;q=0` exactly as happily as `br` — so a client asking for gzip and explicitly
+    /// refusing brotli was sent brotli.
+    #[test]
+    fn a_q0_encoding_is_refused_not_preferred() {
+        use super::{negotiate, Encoding};
+
+        assert_eq!(negotiate("gzip, br"), Some(Encoding::Br));
+        assert_eq!(negotiate("br;q=0, gzip"), Some(Encoding::Gzip));
+        assert_eq!(negotiate("br;q=0.0, gzip"), Some(Encoding::Gzip));
+        assert_eq!(negotiate("br;q=0, gzip;q=0"), None);
+        assert_eq!(negotiate("br;q=0.1, gzip"), Some(Encoding::Br));
+        // Whitespace and parameter order as they arrive from real clients.
+        assert_eq!(negotiate("gzip;q=1.0, br ; q=0"), Some(Encoding::Gzip));
+        // An exact token, not a prefix: "brotli" is not an encoding anyone serves.
+        assert_eq!(negotiate("brotli"), None);
+        assert_eq!(negotiate("identity"), None);
+        assert_eq!(negotiate(""), None);
+    }
+
     use super::*;
 
     #[test]

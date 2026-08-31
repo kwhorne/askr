@@ -391,8 +391,12 @@ pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
-/// Split a stored key (`METHOD \0 host \0 path?query \0 enc \0 device`) into its
-/// method, host and path+query parts.
+/// Split a stored key (`METHOD \0 host \0 path?query \0 enc \0 device \0 scheme`)
+/// into its method, host and path+query parts.
+///
+/// Only the first three fields are read, which is what lets `response_cache_key`
+/// append variant fields — encoding, device class, scheme — without purge and ban
+/// having to know about them. They invalidate every variant of a URL by design.
 fn key_parts(key: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
     let mut it = key.split(|b| *b == 0);
     let method = it.next()?;

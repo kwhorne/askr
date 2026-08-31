@@ -818,7 +818,12 @@ fn main() -> anyhow::Result<()> {
             // no challenges to serve. Refused without --force-https, because a listener
             // that answers every request with a 404 is not what anyone asked for.
             if let Some(addr) = http_redirect.or(config.http_redirect) {
-                if !force_https {
+                // config.force_https, not the CLI flag — the same distinction the ACME
+                // front a few lines up already makes. The redirect address is taken
+                // from either source, so checking only the flag rejected a perfectly
+                // good TOML that set both `http_redirect` and `force_https`, and the
+                // error message it printed even named the key it was ignoring.
+                if !force_https && !config.force_https {
                     anyhow::bail!(
                         "--http-redirect needs --force-https (or [server] force_https), \
                          otherwise the plain-HTTP listener has nothing to redirect to"

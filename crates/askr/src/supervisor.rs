@@ -256,10 +256,17 @@ pub fn status() -> Status {
     }
 }
 
-/// Trigger a graceful rolling reload (used by SIGHUP and the admin API).
+/// Trigger a graceful rolling reload — the admin API, an ACME renewal, and the
+/// cert-mtime watcher.
+///
+/// This used to call `roll_next()` directly, which meant `[reload] canary = true`
+/// guarded a SIGHUP deploy and silently guarded nothing else: a reload from
+/// `POST /api/reload` or a renewed certificate rolled the whole fleet with no
+/// health gate at all. Those are the two reloads that happen with nobody watching,
+/// so they are the ones that needed it most. Both now enter through the same gate
+/// as SIGHUP.
 pub fn trigger_reload() {
-    RELOAD_CURSOR.store(0, Ordering::SeqCst);
-    roll_next();
+    begin_reload();
 }
 
 /// Poll the TLS cert (and key) mtime and trigger a graceful reload when it changes,
@@ -567,7 +574,31 @@ pub(crate) fn supervise(
                         // not normal recycling, which drains and exits 0. Too many in
                         // a short window ⇒ give up instead of respawning forever.
                         let alive = now_secs().saturating_sub(SPAWN_AT[i].load(Ordering::SeqCst));
-                        let failed_exit = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0;
+                        // Only a non-zero *exit* used to count, so a worker that
+                        // segfaulted on boot — the loudest form of the thing this
+                        // guard exists to stop — respawned forever. Worse than not
+                        // counting: it took the `else` branch below and cleared the
+                        // streak, so a fleet mixing fatals and faults never
+                        // accumulated one either.
+                        //
+                        // Every deliberate termination in this file is SIGTERM
+                        // (roll_next, RSS recycling, queue scale-down, kill_all), so
+                        // excluding it is what keeps a reload from looking like a
+                        // crash-loop. SIGSYS is in the list because a seccomp filter
+                        // killing the worker is a boot loop like any other.
+                        let faulted = libc::WIFSIGNALED(status)
+                            && matches!(
+                                libc::WTERMSIG(status),
+                                libc::SIGSEGV
+                                    | libc::SIGBUS
+                                    | libc::SIGILL
+                                    | libc::SIGFPE
+                                    | libc::SIGABRT
+                                    | libc::SIGSYS
+                                    | libc::SIGTRAP
+                            );
+                        let failed_exit =
+                            (libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0) || faulted;
                         if alive < BOOT_FAIL_SECS && failed_exit {
                             let now = now_secs();
                             if now.saturating_sub(FASTFAIL_WINDOW.load(Ordering::SeqCst))
@@ -798,6 +829,25 @@ pub(crate) fn supervise(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    // The queue ring is an anonymous shared mapping — it lives exactly as long as this
+    // process tree. A restart, `askr upgrade` included, comes up with an empty ring.
+    // The response cache has a persist path; pending *jobs* do not, and nothing said
+    // so: the jobs simply never ran, and from the outside the application had lost
+    // somebody's mail. At minimum that should be on the record with a number attached.
+    //
+    // Counted here rather than in the signal handler: every worker is reaped by now, so
+    // the region is quiescent and the count is exact.
+    let (_, pending, _) = crate::squeue::stats();
+    if pending > 0 {
+        tracing::error!(
+            pending,
+            "shutting down with jobs still in the shared-memory queue — they do NOT \
+             survive a restart and are being lost now. Drain the queue before stopping \
+             or upgrading (docs/MAINTENANCE.md), or run the durable L2 backend \
+             (ASKR_QUEUE_DB)."
+        );
+    }
+
     // Persist the response cache now that every worker is reaped: the region is
     // quiescent, so no slot can be captured mid-lock.
     if let Some((path, stamp)) = CACHE_PERSIST.get() {
@@ -1095,6 +1145,14 @@ pub(crate) fn roll_next() {
 /// With canary enabled, roll only the first worker, then health-check it (in the
 /// reaper) before rolling the rest — a bad deploy takes down one worker, not all.
 extern "C" fn on_reload(_sig: libc::c_int) {
+    begin_reload();
+}
+
+/// Begin a rolling reload, through the canary gate when one is configured.
+///
+/// Reached from the SIGHUP handler as well as from ordinary threads, so it stays
+/// async-signal-safe: atomics and `libc::kill`, nothing that allocates or locks.
+fn begin_reload() {
     if CANARY_ENABLED.load(Ordering::SeqCst) {
         CANARY_ERR_BASE.store(error_count(), Ordering::SeqCst);
         // Snapshot the fleet so the canary is compared against the *same* window.

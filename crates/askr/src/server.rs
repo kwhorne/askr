@@ -591,12 +591,8 @@ where
         .to_owned();
 
     // Request Host (lowercased, port stripped) — drives redirects + virtual hosts.
-    let host = crate::cgi::effective_host(req.headers(), req.uri())
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let authority = crate::cgi::effective_host(req.headers(), req.uri()).unwrap_or_default();
+    let host = crate::cgi::host_without_port(&authority).to_ascii_lowercase();
 
     // Rate limiting: refuse before anything expensive happens — a blocked request
     // never costs a PHP cycle, a cache lookup, or a disk stat.
@@ -611,7 +607,7 @@ where
     // when no token is set — loopback peers only. An open PURGE is a cache-wiping
     // DoS.
     if req.method().as_str() == "PURGE" || req.method().as_str() == "BAN" {
-        let resp = invalidate_request(&req, &host, peer);
+        let resp = invalidate_request(&req, &host, peer, config);
         finish(&rt, &resp, t_start, 0);
         return Ok(resp);
     }
@@ -1619,12 +1615,30 @@ fn control_token_ok<B>(req: &Request<B>) -> Option<bool> {
 ///
 /// Both are scoped to the requesting `Host`, so one virtual host can't wipe
 /// another's cache.
-fn invalidate_request<B>(req: &Request<B>, host: &str, peer: SocketAddr) -> Response<ResBody> {
+fn invalidate_request<B>(
+    req: &Request<B>,
+    host: &str,
+    peer: SocketAddr,
+    cfg: &Config,
+) -> Response<ResBody> {
     // Auth: a configured token must match; with no token, only loopback may call.
+    //
+    // "Loopback means a local operator" holds only for a server that is itself the
+    // front door. Behind nginx or Caddy on 127.0.0.1 every request arrives from
+    // loopback, so the fallback authenticated the whole internet — and `BAN /*`
+    // empties the cache. `trusted_proxies` is the operator saying in writing that
+    // loopback is where the proxy sits, so once it is set the fallback stops
+    // applying and a token is required.
     match control_token_ok(req) {
         Some(true) => {}
         Some(false) => return text(StatusCode::FORBIDDEN, "askr: bad or missing bearer token"),
-        None if peer.ip().is_loopback() => {}
+        None if peer.ip().is_loopback() && cfg.trusted_proxies.is_empty() => {}
+        None if peer.ip().is_loopback() => {
+            return text(
+                StatusCode::FORBIDDEN,
+                "askr: trusted_proxies is set, so a loopback peer is the proxy and not                  necessarily a local operator — set ASKR_ADMIN_TOKEN to allow PURGE/BAN",
+            )
+        }
         None => {
             return text(
                 StatusCode::FORBIDDEN,
@@ -1754,7 +1768,11 @@ fn ua_class(ua: &str) -> &'static str {
     }
 }
 
-/// Cache key: `METHOD \0 host \0 path?normalised-query \0 encoding \0 device`.
+/// Cache key: `METHOD \0 host \0 path?normalised-query \0 encoding \0 device \0 scheme`.
+///
+/// Scheme is last on purpose. `rcache::key_parts` reads the first three fields, so
+/// appending keeps `PURGE`/`BAN` working *and* scheme-agnostic: invalidating a URL
+/// drops both variants, which is what anyone purging a URL means.
 ///
 /// `host` is the already-normalised (lowercased, port-stripped) value also used for
 /// virtual-host routing — so `example.com` and `example.com:443` share one entry,
@@ -1788,13 +1806,21 @@ fn response_cache_key<B>(req: &Request<B>, host: &str, cfg: &Config) -> Vec<u8> 
     } else {
         ""
     };
+    // Without the scheme in the key, one entry was shared by http and https. With
+    // `force_https` off — where an http request is not bounced before it reaches the
+    // cache — a page holding absolute URLs (url(), asset(), a canonical tag) could be
+    // rendered once over http and then served to https clients with http links baked
+    // in, or the reverse. Determined the same way the redirect engine determines it,
+    // so the two cannot disagree about what scheme a request arrived on.
+    let scheme = request_scheme(req, cfg.https);
     format!(
-        "{}\0{}\0{}\0{}\0{}",
+        "{}\0{}\0{}\0{}\0{}\0{}",
         req.method().as_str(),
         host.to_ascii_lowercase(),
         pq,
         enc,
-        device
+        device,
+        scheme
     )
     .into_bytes()
     // (host is already lowercase here)
@@ -1832,6 +1858,27 @@ fn maybe_store(
         // Neither the app nor a rule asked for caching.
         (None, None) => return,
     };
+    // The key varies on encoding, and on device class when `vary_user_agent` is on.
+    // It cannot represent anything else, and the app's own `Vary` was dropped by
+    // `storable_header` rather than honoured — so a localised Laravel app answering
+    // `Vary: Accept-Language` had the first visitor's language cached and served to
+    // everyone. Refusing to store those responses costs hit rate on exactly the
+    // responses that were being served wrong.
+    if let Some(v) = header_value(&resp.headers, "vary") {
+        if !vary_is_covered_by_key(v, vary_ua) {
+            return;
+        }
+    }
+    // A body the app compressed itself. `storable_header` drops Content-Encoding,
+    // and `compress::maybe` hands an already-compressed body back unchanged because
+    // re-compressing it comes out larger — so the entry held gzip bytes with nothing
+    // saying so, and every hit sent binary to the browser.
+    if let Some(e) = header_value(&resp.headers, "content-encoding") {
+        let e = e.trim();
+        if !e.is_empty() && !e.eq_ignore_ascii_case("identity") {
+            return;
+        }
+    }
     let mut stored: Vec<(String, String)> = resp
         .headers
         .iter()
@@ -1875,6 +1922,46 @@ fn maybe_store(
         stored.push((hyper::header::VARY.to_string(), vary.join(", ")));
     }
     rcache::store(key, resp.status, &stored, &body, ttl, swr, sie, &tags);
+}
+
+/// Which scheme a request arrived on. Determined the same way the redirect engine
+/// determines it, so the cache key and the http→https redirect cannot disagree.
+fn request_scheme<B>(req: &Request<B>, https: bool) -> &'static str {
+    let secure = https
+        || req
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("https"));
+    if secure {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+/// Can the cache key represent every dimension this `Vary` names?
+///
+/// The key varies on negotiated encoding, and on device class when
+/// `vary_user_agent` is on. Anything else — `Accept-Language`, a custom header, `*` —
+/// it cannot express, so the entry would be served to clients it was not rendered
+/// for.
+fn vary_is_covered_by_key(vary: &str, vary_ua: bool) -> bool {
+    vary.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .all(|t| {
+            t.eq_ignore_ascii_case("accept-encoding")
+                || (vary_ua && t.eq_ignore_ascii_case("user-agent"))
+        })
+}
+
+/// First value of `name` in a PHP response's header list, case-insensitively.
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
 }
 
 fn storable_header(name: &str) -> bool {
@@ -2142,6 +2229,21 @@ fn sse_response(query: Option<&str>, rt: &Runtime) -> Response<ResBody> {
                 .find_map(|kv| kv.strip_prefix("channel=").map(|c| c.to_string()))
         })
         .unwrap_or_else(|| "default".to_string());
+
+    // pusher.rs HMAC-verifies `private-`/`presence-` subscriptions before adding
+    // them to a socket. This bridge has no socket id and no signature to check one
+    // against, so it cannot honour that rule — and until it can, it must not be the
+    // way round it: GET /askr/events?channel=private-orders would otherwise hand any
+    // caller on the internet everything broadcast on a channel the WebSocket path
+    // guards. Same case-sensitive prefixes as pusher.rs, so the two agree on which
+    // names are privileged.
+    if channel.starts_with("private-") || channel.starts_with("presence-") {
+        return text(
+            StatusCode::FORBIDDEN,
+            "askr: private- and presence- channels are only available over the \
+             WebSocket path, which authenticates the subscription",
+        );
+    }
 
     let rx = rt.sse.subscribe(channel);
     Response::builder()
@@ -2450,6 +2552,46 @@ fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An http and an https render of the same URL used to share one cache entry, so
+    /// a page holding absolute URLs could be served to the wrong scheme with the
+    /// wrong links baked in.
+    #[test]
+    fn the_cache_key_separates_http_from_https() {
+        let req = |xfp: Option<&str>| {
+            let mut b = hyper::Request::builder().uri("/");
+            if let Some(v) = xfp {
+                b = b.header("x-forwarded-proto", v);
+            }
+            b.body(()).unwrap()
+        };
+
+        assert_eq!(request_scheme(&req(None), false), "http");
+        assert_eq!(request_scheme(&req(None), true), "https");
+        assert_eq!(request_scheme(&req(Some("https")), false), "https");
+        assert_eq!(request_scheme(&req(Some("http")), false), "http");
+        // A TLS listener is not downgraded by a header claiming otherwise.
+        assert_eq!(request_scheme(&req(Some("http")), true), "https");
+    }
+
+    /// The key cannot express an arbitrary `Vary`, and the app's own header was
+    /// dropped rather than honoured — so `Vary: Accept-Language` meant the first
+    /// visitor's language was cached for everyone. Refusing to store is the fix.
+    #[test]
+    fn a_vary_the_key_cannot_express_is_not_cacheable() {
+        assert!(vary_is_covered_by_key("Accept-Encoding", false));
+        assert!(vary_is_covered_by_key("accept-encoding, ", false));
+        assert!(vary_is_covered_by_key("Accept-Encoding, User-Agent", true));
+
+        assert!(!vary_is_covered_by_key("Accept-Language", false));
+        assert!(!vary_is_covered_by_key(
+            "Accept-Encoding, Accept-Language",
+            false
+        ));
+        assert!(!vary_is_covered_by_key("*", false));
+        // User-Agent is only covered when the key actually splits on device class.
+        assert!(!vary_is_covered_by_key("User-Agent", false));
+    }
 
     #[test]
     fn sanitize_strips_traversal() {
