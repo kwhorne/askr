@@ -5,7 +5,7 @@ embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
 memory-safe hot path, and — in worker mode — boots your app once and serves many
 requests against it, eliminating per-request framework bootstrap.
 
-> Version **1.4.14**. Production target is Linux; development also works on macOS.
+> Version **1.5.0**. Production target is Linux; development also works on macOS.
 
 > 📘 These pages are also published, with navigation and search, at
 > **[elyracode.com/docs/askr](https://elyracode.com/docs/askr)** — product information is
@@ -47,7 +47,7 @@ requests against it, eliminating per-request framework bootstrap.
 Install a self-contained release (Linux x86_64 / arm64) and serve a Laravel app:
 
 ```bash
-VER=v1.4.14; ARCH=$(uname -m)
+VER=v1.5.0; ARCH=$(uname -m)
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
 
@@ -62,36 +62,25 @@ Production setup (systemd, TLS, hardening): [Ubuntu setup](UBUNTU.md). Then
 [Maintenance](MAINTENANCE.md) for the operating side.
 Building from source: [Building](BUILDING.md).
 
-## What works today (1.4.14)
+## Capabilities
 
-- Embedded PHP (non-ZTS) running real Laravel 12, **~9× the per-request/FPM model**
-- Multi-core via one worker **process per core** on a shared listen socket
-- **Worker mode** (Octane-style) with per-request state reset — no bleed
-- **`--paranoid`** state-bleed detector — is your app worker-safe?
-- **CoW template** (`--cow`) — boot once, fork workers for ~ms warm respawn (experimental)
-- **Queue workers + scheduler + sidecars** in the same binary (no Horizon/cron)
-- **Shared cache / sessions / locks / job queue** (`askr_cache_*`, `askr_queue_*` + Laravel drivers) — **fully replaces Redis** on a single box
-- **Broadcasting** — SSE + `askr_broadcast()`, plus a **Pusher-compatible WebSocket** (`--pusher`, drop-in Reverb with auth)
-- **Response cache** with tag invalidation, **ESI** fragment assembly, `PURGE`/`BAN`,
-  `stale-if-error`, per-path `[[cache.rule]]`, request **coalescing**, `askr_defer()`
-  post-response work — and it survives restarts
-- **Fleet-wide rate limiting** before PHP wakes up, and canary deploys that abort
-  and drain themselves on regression
-- **Multipart uploads** (`$_FILES`) + response **compression** (br/gzip)
-- **Record & replay** failing requests (`--record-errors` / `askr replay`)
-- Graceful **recycling** + auto-respawn + crash resilience
-- **TLS** (rustls) + **HTTP/2**; `--tls-self-signed` for dev; **auto-TLS via ACME** (`--acme`)
-- **Hardening** (`--sandbox`, Linux): seccomp no-exec + Landlock write-restriction
-- Zero-downtime **rolling reload** on `SIGHUP`, with optional **canary**
-- Request hardening: body-size limit (413), HEAD, GET/POST
-- Typed **`askr.toml`** config + `config-check`
-- Built-in **admin dashboard + API** (status, reload, live metrics)
-- **In-process metrics** — PHP-vs-I/O split, latency histogram, per-worker RSS
-- `askr doctor` pre-flight checks
+| | |
+| --- | --- |
+| **Runtime** | Embedded PHP 8.5 (non-ZTS, OPcache + JIT), Laravel's full extension set, one worker process per core on a shared listener, worker mode with per-request state reset, `--paranoid` bleed detector, CoW template for ~ms warm respawn |
+| **HTTP** | TLS (rustls) with HTTP/2 and optional HTTP/3, auto-TLS via ACME, virtual hosts, redirects, br/gzip compression, streamed static files and multipart uploads |
+| **Caching** | Response cache with tag invalidation, ESI fragment assembly, `PURGE`/`BAN`, per-path `[[cache.rule]]`, request coalescing, `stale-if-error`, and it survives restarts |
+| **Without Redis** | Shared-memory cache, sessions, atomic locks, counters, job queue and broadcasting, plus a Pusher-compatible WebSocket — with Laravel drivers in [`packages/laravel`](../packages/laravel) |
+| **Operations** | Zero-downtime rolling reload with canary judging, supervised queue workers, scheduler and sidecars, fleet-wide rate limiting, leak-aware recycling, record & replay, admin dashboard, Prometheus metrics, OpenTelemetry traces |
+| **Security** | Signed and verified self-update, seccomp + Landlock sandbox, body-size limits, `unsafe` confined to the PHP FFI boundary |
 
-## Not yet
+Each of these has its own page below, and the same content is published at
+[elyracode.com/docs/askr](https://elyracode.com/docs/askr/).
 
-**HTTP/3** (QUIC) and **OpenTelemetry** trace export. The per-core **io_uring**
-core is **deprioritised**: our
-[benchmarks](BENCHMARKS.md) show PHP execution is ~99.5% of request time, so an
-I/O-syscall optimisation would move ~0.5% — the engine, not I/O, is the ceiling.
+## Where the engine's ceiling is
+
+Per-core **io_uring** is deprioritised, and the reason is measured rather than assumed:
+[our benchmarks](BENCHMARKS.md) put PHP execution at ~99.5 % of request time and I/O at
+~0.5 %, so an I/O-syscall optimisation would move half a percent. The interpreter, not
+the I/O path, is the ceiling — which is why worker mode (removing bootstrap) and the
+response cache (removing the interpreter from the path entirely) are where the work has
+gone. See [IO-URING.md](IO-URING.md) for the full argument.

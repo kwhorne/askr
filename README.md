@@ -7,53 +7,64 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v1.4.14</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v1.5.0</strong> &nbsp;·&nbsp; MIT
 </p>
 
 <p align="center">
-  <a href="https://elyracode.com/askr"><strong>Product</strong></a>
+  <a href="https://elyracode.com/docs/askr/"><strong>Documentation</strong></a>
   &nbsp;·&nbsp;
-  <a href="https://elyracode.com/docs/askr"><strong>Documentation</strong></a>
+  <a href="https://elyracode.com/askr">Product</a>
   &nbsp;·&nbsp;
   <a href="https://github.com/kwhorne/askr/releases">Releases</a>
   &nbsp;·&nbsp;
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-**A standalone, memory-safe PHP application server, in Rust.**
+---
 
-Askr embeds the PHP interpreter in-process (no FastCGI, no FPM), serves it from a
-memory-safe Rust hot path, and — in worker mode — boots your app **once** and
-serves many requests against it, eliminating per-request framework bootstrap. It
-is a complete single binary: TLS, HTTP/2, static files, worker supervision and an
-admin dashboard, with no proxy required in front.
+**A standalone, memory-safe PHP application server, written in Rust.**
 
-It's the server engine behind the [`grove`](https://github.com/wirelabs/grove)
-ecosystem; Grove stays the local dev tool, Askr is the production server.
+Askr embeds the PHP interpreter in-process — no FastCGI, no FPM — and serves it from a
+memory-safe Rust hot path. In worker mode it boots your application **once** and serves
+many requests against it, removing per-request framework bootstrap entirely.
 
-## Headline result
+One binary replaces the usual stack: TLS and HTTP/2, static files, a response cache,
+worker supervision, queue workers, a scheduler, and an admin dashboard. No proxy in
+front, no Redis beside it.
 
-Real **Laravel 12 + Livewire**, served entirely in-process:
+## Performance
 
-| | per-request (the FPM model) | **worker mode (boot once)** |
+Real Laravel + Livewire, served entirely in-process:
+
+| | Per-request (the FPM model) | Worker mode (boot once) |
 | --- | --- | --- |
-| latency / request | ~110 ms | **~9 ms** |
-| throughput (8 workers) | 37 req/s | **347 req/s** |
+| Latency per request | ~110 ms | **~9 ms** |
+| Throughput (8 workers) | 37 req/s | **347 req/s** |
 
-**~9×**, verified correct under load (300/300 `200`, each worker booted exactly
-once, zero state bleed). Raw embedding overhead is ~0.02 ms/request
-(~56k req/s single-core for a trivial script) — the framework bootstrap is the
-cost, and worker mode removes it.
+Roughly **9×**, verified correct under load: 300/300 `200`, each worker booted exactly
+once, no state bleed. Raw embedding overhead is ~0.02 ms per request (~56k req/s
+single-core for a trivial script) — the framework bootstrap is the cost, and worker mode
+removes it.
+
+Reproducible method and comparisons against FrankenPHP, FPM+nginx and RoadRunner:
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Install
 
-Grab a **self-contained** release for Linux (x86_64 or arm64) — the binary,
-embedded PHP, opcache, and examples in one tarball, nothing else to install:
+Self-contained releases for Linux (x86_64 and arm64) carry the binary, the embedded PHP,
+OPcache and the examples in one tarball:
 
 ```bash
-VER=v1.4.14; ARCH=$(uname -m)
-curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
-tar xzf askr-${VER#v}-linux-$ARCH.tar.gz && cd askr-${VER#v}-linux-$ARCH
+VER=v1.5.0; ARCH=$(uname -m)
+BASE=https://github.com/kwhorne/askr/releases/download/$VER
+TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
+
+curl -fsSLO $BASE/$TARBALL
+curl -fsSLO $BASE/$TARBALL.minisig
+curl -fsSL https://raw.githubusercontent.com/kwhorne/askr/$VER/keys/release.pub -o askr.pub
+minisign -V -p askr.pub -m $TARBALL          # verify before unpacking
+
+tar xzf $TARBALL && cd askr-${VER#v}-linux-$ARCH
 
 ./askr-run.sh doctor
 ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
@@ -62,198 +73,68 @@ ASKR_APP_BASE=/var/www/app ./askr-run.sh serve \
   --workers "$(nproc)" --tls-self-signed --admin 127.0.0.1:9000
 ```
 
-> Runtime libs (usually already present): `sudo apt-get install -y libssl3 libxml2 libonig5 libsqlite3-0`.
+Releases are signed with [minisign](https://jedisct1.github.io/minisign/) and carry a
+SLSA build-provenance attestation; `askr upgrade` verifies the signature itself and
+refuses a release it cannot verify. See [SECURITY.md](SECURITY.md).
 
-**New here?** [**docs/INSTALL.md**](docs/INSTALL.md) walks through it step by step —
-Docker, tarball or source — and ends with the mistakes that cost us an afternoon.
+Runtime libraries are usually already present:
+`sudo apt-get install -y libssl3 libxml2 libonig5 libsqlite3-0`.
 
-**Production setup** (systemd, TLS, hardening, recommended settings):
-**[docs/UBUNTU.md](docs/UBUNTU.md)**. Building from source: [docs/BUILDING.md](docs/BUILDING.md).
+Docker, tarball and source installs are covered step by step in
+[docs/INSTALL.md](docs/INSTALL.md); production setup with systemd, TLS and hardening in
+[docs/UBUNTU.md](docs/UBUNTU.md).
+
+## Capabilities
+
+| | |
+| --- | --- |
+| **Runtime** | Embedded PHP 8.5 (non-ZTS, OPcache + JIT), Laravel's full extension set, one worker process per core on a shared listener, worker mode with per-request state reset |
+| **HTTP** | TLS (rustls) with HTTP/2 and optional HTTP/3, auto-TLS via ACME, virtual hosts, redirects, compression, streamed static files and uploads |
+| **Caching** | Response cache with tag invalidation, ESI fragment assembly, `PURGE`/`BAN`, declarative per-path rules, request coalescing, `stale-if-error`, survives restarts |
+| **Without Redis** | Shared-memory cache, sessions, atomic locks, counters, job queue and broadcasting — with Laravel drivers in [`packages/laravel`](packages/laravel) |
+| **Operations** | Zero-downtime rolling reload with canary judging, supervised queue workers and scheduler, fleet-wide rate limiting, leak-aware recycling, admin dashboard and Prometheus metrics |
+| **Security** | Signed and verified self-update, seccomp + Landlock sandbox, `unsafe` confined to the PHP FFI boundary |
+
+Every capability is documented at
+[elyracode.com/docs/askr](https://elyracode.com/docs/askr/).
 
 ## Documentation
 
-- 📘 **Full documentation — [elyracode.com/docs/askr](https://elyracode.com/docs/askr)**
-- 🔎 **Product information — [elyracode.com/askr](https://elyracode.com/askr)**
+**Full documentation: [elyracode.com/docs/askr](https://elyracode.com/docs/askr/)**
 
-The same pages are also in [`docs/`](docs/README.md) in this repository:
+The same pages live in [`docs/`](docs/README.md). The ones most people need first:
 
-- [**Laravel setup**](docs/LARAVEL.md) — **recommended Laravel guide**: `composer require kwhorne/askr-laravel`, `.env`, queue/scheduler/broadcasting, durable L2
-- [Ubuntu setup](docs/UBUNTU.md) — **recommended production install** (systemd, TLS, tuning)
-- [Maintenance](docs/MAINTENANCE.md) — operating it: checks, deploys, caches, certs, log rotation, backups
-- [Architecture](docs/ARCHITECTURE.md) — how it works, and why processes not threads
-- [Building](docs/BUILDING.md) — `libphp` + `askr`, the extension matrix
-- [Configuration](docs/CONFIGURATION.md) — `askr.toml`, env vars
-- [CLI reference](docs/CLI.md) — every command and flag
-- [Hosting multiple domains](docs/HOSTING.md) — virtual hosts, redirects, multi-domain TLS
-- [Stability & compatibility](docs/STABILITY.md) — the 1.0 contract + deprecation policy
-- [Worker mode](docs/WORKER_MODE.md) — boot-once-serve-many, state reset, custom workers
-- [Docker](docs/DOCKER.md) — one container replaces app+nginx+redis+queue+cron (GHCR, multi-arch).
-  `docker compose up` on an app you already have:
-  [`examples/docker/quickstart.yml`](examples/docker/quickstart.yml)
-- [Power features](docs/FEATURES.md) — response cache + tags, coalescing, Pusher WS, defer, autoscaling, record/replay, test runner
-- [Shared cache](docs/CACHE.md) — `askr_cache_*` + Laravel driver (no Redis)
-- [Broadcasting](docs/BROADCAST.md) — live updates via SSE (no Reverb/Pusher)
-- [CoW template](docs/COW.md) — boot once, fork workers for ~ms warm respawn (experimental)
-- [Admin dashboard](docs/ADMIN.md) — status/reload/metrics API and web UI
-- [Auto-TLS (ACME)](docs/AUTOTLS.md) — obtain + renew Let's Encrypt certs (`--acme`)
-- [Hardening / sandbox](docs/SANDBOX.md) — seccomp + Landlock (`--sandbox`)
-- [Benchmarks](docs/BENCHMARKS.md) — vs FrankenPHP, FPM+nginx, RoadRunner (reproducible)
-- [Deployment](docs/DEPLOYMENT.md) — systemd, TLS, zero-downtime reload, scaling
-- [Upgrading](docs/UPGRADING.md) — how to upgrade and roll back, what to adopt per version, and what can bite you
-
-## What works today (1.4.14)
-
-- Embedded **PHP 8.5** (**non-ZTS**, OPcache + JIT built in) running real Laravel 13 — no FastCGI, no FPM
-- **All of Laravel's required extensions** + more (intl, gd, curl, zip, pdo_mysql/pgsql, …) — runs Filament apps
-- **File uploads** stream to temp files (constant memory) with `$request->file()` in worker mode
-- **Response compression** (br/gzip by `Accept-Encoding`), **JSON access log**, and **Prometheus** `/metrics`
-- Multi-core: one worker **process per core** on a shared listen socket
-- **Worker mode** (Octane-style) with per-request state reset — no bleed
-- **Response cache with tag invalidation** (`--response-cache`): cacheable pages
-  served from Rust at static-file speed; `askr_cache_forget_tag()` invalidates
-  across all workers instantly — a Varnish-effect, app-driven, zero infra
-- **ESI fragment assembly**: cache a page *with holes* and fill them per request,
-  so one live widget stops making a whole page uncacheable — each hole with its own
-  TTL, tags and `PURGE`
-- **`PURGE`/`BAN` over HTTP** and declarative per-path **`[[cache.rule]]`** — cache
-  policy for apps you can't edit
-- **`stale-if-error` + saint mode**: keep serving held content when PHP or the
-  database falls over, with the real failure still logged and recorded
-- **The cache survives restarts** — saved on graceful shutdown, restored at boot,
-  so a restart doesn't pay a cold-cache stampede
-- **Rate limiting** (`[[ratelimit]]`) enforced across the whole worker fleet from
-  shared memory, before PHP is woken — no Redis needed for it
-- **Canary deploys that stop themselves**: the new worker is compared against the
-  rest of the fleet, and a failed canary is drained instead of serving a bad build
-- **`askr tune`** — measures your app and prints the config it should have
-- **`askr cache-report`** — watches real traffic and tells you which routes are worth
-  caching, and which only *look* cacheable (it compares the actual response bytes)
-- **Automatic cache tagging** for Laravel: `->middleware('askr.cache:300')` tags a page
-  with the models it read, so invalidation needs no bookkeeping
-- **Request coalescing**: identical cold-cache requests run PHP once (no stampede)
-- **Pusher-compatible WebSocket** (`--pusher`): drop-in Reverb — Echo works with
-  no frontend change (WS `/app/{key}` + trigger `POST /apps/{id}/events`)
-- **`askr_defer()`**: run work after the response is sent (email/webhooks, no queue)
-- **Elastic autoscaling** (CoW, `--workers-min/--workers-max`): warm workers added
-  under load and harvested when idle — practical only because respawn is ~ms
-- **Record & replay** (`--record-errors`): a 5xx is replayable with `askr replay`
-- **Fork-based test runner** (`askr test`): boot once, warm isolated process per file
-- **`--paranoid`** state-bleed detector: tells you if your app is worker-safe
-- **CoW template** (`--cow`): boot once, fork workers — ~ms warm respawn + shared memory
-- **Queue workers + scheduler** supervised in the same binary (no Horizon/cron)
-- **Shared cache** (`askr_cache_*` + Laravel driver): cache, counters, atomic **locks** (`Cache::lock`) and **sessions** (large region) — no Redis
-- **[`askr-laravel`](packages/laravel) package**: drop-in `askr` **session** (shared-memory, no heap leak, ~11–15k req/s flat), **cache** and **queue** drivers via `composer require`
-- **Broadcasting**: live updates to browsers via SSE + `askr_broadcast()` — no Reverb/Pusher
-- Graceful worker **recycling** (`--max-requests`) + auto-respawn + crash resilience
-- **TLS** (rustls, ring) + **HTTP/2** (ALPN); `--tls-self-signed` for dev, or **auto-TLS via ACME/Let's Encrypt** (`--acme`)
-- Zero-downtime **rolling reload** on `SIGHUP` — with optional **canary** (bad deploys hit one worker, not all)
-- Request hardening: body-size limit (`413`), HEAD, GET/POST
-- Typed **`askr.toml`** config + `config-check`
-- Built-in **admin dashboard + API** (status, graceful reload, live metrics)
-- **In-process metrics**: PHP-vs-I/O time split, latency histogram, per-worker RSS
-- `askr doctor` pre-flight checks, and **`askr upgrade`** (verified self-update: sha256 + atomic swap)
-- **Hardening** (`--sandbox`, Linux): seccomp no-exec + Landlock write-restriction
-- Memory-safe: all `unsafe` confined to the PHP FFI boundary
-
-## Roadmap
-
-| Phase | Status |
-| --- | --- |
-| M0 — embedding spike (PHP in-process from Rust) | ✅ |
-| A1 — standalone `askr serve` over HTTP | ✅ |
-| A3 — multi-core (fork per core, shared listener) | ✅ |
-| A4 — worker mode: real Laravel, zero per-request bootstrap | ✅ |
-| A5 — recycling, state reset, TLS+HTTP/2, rolling reload, doctor | ✅ |
-| A2 — request hardening (body limit, HEAD, POST) | ✅ |
-| A6 — typed config + admin dashboard/API | ✅ |
-| **0.2.0** — paranoid, shared cache, SSE broadcast, queue+scheduler, metrics, canary reload, CoW template | ✅ |
-| self-contained Linux releases (x86_64 + arm64) | ✅ |
-| **0.2.1** — static caching/streaming/Range, slowloris timeouts, pinned & cached CI | ✅ |
-| **0.3.0** — response cache + tag invalidation, coalescing, Pusher WS, `askr_defer`, CoW autoscaling, record/replay, fork test runner | ✅ |
-| **0.3.1** — Pusher private/presence auth (HMAC subscription verification) | ✅ |
-| **0.3.2** — io_uring groundwork: `doctor` probe, benchmark harness, design plan | ✅ |
-| **0.4.0** — multipart file uploads (streamed to temp files, `$_FILES` in worker mode) | ✅ |
-| **0.4.1** — response compression (br/gzip), JSON access log, Prometheus `/metrics`, KV cache eviction | ✅ |
-| **0.4.2** — Docker image (GHCR, multi-arch), cgroup-aware worker default | ✅ |
-| **0.5.0** — full extension set (intl/gd/curl/zip/pdo_mysql/pgsql) — runs Filament | ✅ |
-| **0.5.1** — fix: empty static files (Vite CSS-only entry) served with correct Content-Length | ✅ |
-| **0.5.2** — supervised external sidecars (Inertia SSR: `node bootstrap/ssr/ssr.mjs`) | ✅ |
-| **0.6.0** — cache size classes (64 KB values), atomic `add`/`Cache::lock`, sessions — Redis-free | ✅ |
-| **0.6.1** — shared-memory job queue (`askr_queue_*` + AskrQueue driver): delayed jobs, retries | ✅ |
-| **0.7.0** — auto-TLS via ACME/Let's Encrypt (`--acme`, HTTP-01) — single binary, no proxy | ✅ |
-| **0.8.0** — hardening: seccomp no-exec + Landlock filesystem sandbox (`--sandbox`) | ✅ |
-| **0.8.2** — PHP 8.5 + Laravel 13, OPcache/JIT built in | ✅ |
-| Benchmarks: CoW ~1.6× FrankenPHP, ~3× FPM on server overhead (validated) ([details](docs/BENCHMARKS.md)) | ✅ |
-| **0.8.3** — fix: worker mode respawns instead of 502-flooding on OOM under load | ✅ |
-| `askr-laravel` composer package: shared-memory session/cache/queue drivers | ✅ |
-| **0.8.4** — security/robustness: httpoxy filter, PID-aware shm lock, fork-safe admin start, upload temp-file RAII cleanup | ✅ |
-| **0.9.0** — stale-while-revalidate, leak-aware recycling (`--max-rss`), traffic shadowing (`--shadow-to`), compress-cache-once, atomic `askr_cache_touch` | ✅ |
-| **0.9.1** — backlog-driven queue-worker autoscaling (`--queue-max`, Horizon `balance=auto` with no extra daemon) + queue metrics | ✅ |
-| **0.9.2** — optional durable L2 queue backend over SQL Anywhere (`--features sql-backend`, `ASKR_QUEUE_DB`); default build unchanged | ✅ |
-| **0.9.3** — L2 cache + pub/sub backends, L1→L2 write-through, L2 queue autoscaling, Laravel broadcasting driver (`BROADCAST_CONNECTION=askr`) — completes the Redis-free Laravel surface; opt-in | ✅ |
-| **0.9.4** — observability sink: ship per-request logs to ElyraSQL / any MySQL-wire DB (`--features observ`, `ASKR_OBSERV_DSN`); thorough Laravel setup guide | ✅ |
-| **0.9.5** — `-full` tarball + Docker image (`:full`) with the L2 SQL Anywhere backends + observability compiled in — no source build needed | ✅ |
-| **0.9.6** — HTTP/3 (QUIC, `--http3`), OpenTelemetry traces (`--features otel`), finer `response.build` span, metrics-rollup table | ✅ |
-| **0.9.7** — streaming HTTP/3 responses (SSE + large files over QUIC), finer + fast-path traces, 1.0 compatibility contract ([STABILITY.md](docs/STABILITY.md)), honest h3-under-loss benchmark | ✅ |
-| **0.9.8** — robustness pass: shared-memory cache tombstone deletion, eviction race, empty-upload `UPLOAD_ERR_NO_FILE`, worker buffer reclaim, configurable slowloris timeouts | ✅ |
-| **0.9.9** — perf follow-through: per-thread request-field arena (no per-field `CString`), gentler `shmlock` backoff, channel-sharded SSE hub, `askr_cache_oversize_total` metric | ✅ |
-| **0.9.10** — review pass: relaxed shared-memory pointer ordering (Acquire/Release), `0700` upload temp dir, graceful flush window before worker `exit(75)` | ✅ |
-| **0.9.11** — admin bearer-token auth (`ASKR_ADMIN_TOKEN`), dropped unmaintained `rustls-pemfile`, extracted `supervisor.rs` from `main.rs`, concurrent cache stress test | ✅ |
-| **0.9.12** — multi-domain hosting: virtual hosts (`[[site]]`) + redirects (www→apex, `force_https`); streaming PHP output on `flush()`; boot crash-loop guard; TLS cert hot-reload; wider cache probe | ✅ |
-| **1.0.0** — 🎉 stable release: the surface is frozen under SemVer ([STABILITY.md](docs/STABILITY.md)); stress-validated at tens of millions of requests, 100% success | ✅ |
-| **1.0.1** — security: static serving never discloses PHP sources or dotfiles (`.env`); `stale-if-error` + saint mode; smart cache-key normalisation | ✅ |
-| **1.1.0** — Varnish-grade cache: **ESI** fragment assembly, HTTP **`PURGE`/`BAN`**, declarative per-path **`[[cache.rule]]`** — all in-process | ✅ |
-| **1.2.0** — operations: fleet-wide **rate limiting** before PHP, canary judged against the fleet + failed canary drained, **cache survives restarts**, `askr tune` | ✅ |
-| **1.3.0** — foundation: **end-to-end tests in CI** (the server is started and driven over HTTP), advisory scanning, every dependency current, [upgrade guide](docs/UPGRADING.md) | ✅ |
-| **1.4.0** — caching you can trust: **`askr cache-report`** measures what caching would buy *and whether it's safe*, and the **`askr.cache`** middleware tags pages with the models they read | ✅ |
-| **1.4.1** — security patch: PHP diagnostics go to the log, not into the response body ([UPGRADING](docs/UPGRADING.md#to-141)) | ✅ |
-| **1.4.2** — review pass: port 80 redirects while ACME runs, `/healthz`, admin denies by default, 0600 keys, verified tarball checksum | ✅ |
-| **1.4.3** — worker-mode correctness, found by putting a real Laravel + Flux app on Askr: auth no longer leaks between visitors, form posts work, file responses have bodies | ✅ |
-| **1.4.4** — diagnosis and blast radius: accept errors don't kill workers, a worker dying mid-request answers 502 instead of an empty 200, and the "fatal/OOM?" guess is replaced by what actually happened | ✅ |
-| **1.4.5** — **Askr-46 fixed at the root**: the output layer resets between worker requests, `exit()` ends the request not the worker, and an escaping exception costs a 500 instead of a worker | ✅ |
-| **1.4.6** — lessons from a first real deployment: `--config` refuses to silently ignore flags, plus Linux bind-mount ownership, artisan-without-a-PHP-CLI, and running behind nginx | ✅ |
-| **1.4.7** — security/correctness: HTTP/2 requests lost their host, so URLs became `localhost`, vhosts fell through to the default site, and cache keys could collide across domains | ✅ |
-| **1.4.8** — Livewire's JavaScript vanished after the first request per worker, so Alpine never loaded and every `x-show`/`wire:` silently did nothing | ✅ |
-| **1.4.9** — the Laravel package was fatal on Laravel 13: `AskrQueue` didn't implement the contract's new introspection methods | ✅ |
-| **1.4.10** — `[acme]` in a config file (auto-TLS behind a proxy was unexpressible) and real queue counts for `queue:monitor` | ✅ |
-| **1.4.11** — breaking silence: backlog watchdog, `doctor --app`, per-queue status, `scripts/smoke.sh` | ✅ |
-| **1.4.12** — `iconv` compiled in: Fortify's two-factor QR codes 500'd without it | ✅ |
-| **1.4.13** — queue workers without slots discarded every job in silence; now refused at boot | ✅ |
-| **1.4.14** — `doctor --app` reads the running environment, not `.env`; scheduler check no longer cries wolf | ✅ |
-| **Post-1.0** — durable-tier polish, per-site worker pools, and the experiments tracked in the issue tracker (AI/LLM cache, Varnish-grade edge cache, P2P cluster). | 🔭 |
-
-1.0 is a frozen, stress-validated base. The benchmark against FrankenPHP/FPM/RoadRunner
-is done ([BENCHMARKS.md](docs/BENCHMARKS.md)) and, together with HTTP/3-under-loss
-numbers, is what shaped the direction; **io_uring was deprioritised by that data**
-(PHP is ~99.5 % of request time, I/O ~0.5 % — see [docs/IO-URING.md](docs/IO-URING.md)).
-Post-1.0 work continues under the SemVer + deprecation guarantees in
-[STABILITY.md](docs/STABILITY.md).
+- [**Laravel setup**](docs/LARAVEL.md) — the recommended guide: `composer require kwhorne/askr-laravel`, `.env`, queue, scheduler, broadcasting
+- [**Ubuntu setup**](docs/UBUNTU.md) — the recommended production install
+- [Maintenance](docs/MAINTENANCE.md) — deploys, caches, certificates, backups, log rotation
+- [Configuration](docs/CONFIGURATION.md) and [CLI reference](docs/CLI.md)
+- [Upgrading](docs/UPGRADING.md) — what to adopt per version, and what can bite you
+- [Stability & compatibility](docs/STABILITY.md) — the 1.0 contract and deprecation policy
 
 ## Project layout
 
 ```
 crates/
-  askr/          the standalone server binary
-  askr-php/      embeds PHP (embed SAPI) via FFI
-scripts/
-  build-libphp.sh   reproducible libphp build (minimal | laravel)
-examples/
-  laravel-worker.php   worker-mode template for Laravel
-  askr.toml            example configuration
+  askr/            the standalone server binary
+  askr-php/        embeds PHP (embed SAPI) via FFI
+packages/laravel/  the askr-laravel composer package
+scripts/           libphp build, packaging, release tooling
+examples/          worker-mode templates and an example askr.toml
 docs/              full documentation
+keys/release.pub   the release signing key
 ```
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to
-build (you need an embed `libphp` first) and the checks CI runs. Please follow
-the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues privately
-per the [Security Policy](SECURITY.md) — not in public issues.
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers building (an embed
+`libphp` first) and the checks CI runs. Please follow the
+[Code of Conduct](CODE_OF_CONDUCT.md), and report security issues privately per the
+[Security Policy](SECURITY.md) rather than in public issues.
 
 ## Links
 
+- **Documentation:** [elyracode.com/docs/askr](https://elyracode.com/docs/askr/)
 - **Product:** [elyracode.com/askr](https://elyracode.com/askr)
-- **Documentation:** [elyracode.com/docs/askr](https://elyracode.com/docs/askr)
 - **Source & issues:** [github.com/kwhorne/askr](https://github.com/kwhorne/askr)
 - **Container images:** [ghcr.io/kwhorne/askr](https://github.com/kwhorne/askr/pkgs/container/askr)
 - **Laravel package:** [`kwhorne/askr-laravel`](https://packagist.org/packages/kwhorne/askr-laravel)
