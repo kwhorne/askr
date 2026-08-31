@@ -5,6 +5,25 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.5.0 — 2026-08-31
+
+A release about failing safely. Three security fixes where the old behaviour was to warn
+and carry on, a shared-memory correctness pass, a self-update that now verifies who
+produced what it installs, and cache reads that no longer serialise the fleet.
+
+Nothing in the documented surface changed incompatibly; [STABILITY.md](docs/STABILITY.md)
+still holds. Two things are worth adopting deliberately rather than by upgrading:
+`--sandbox-required` and, if you run behind a local reverse proxy, `ASKR_ADMIN_TOKEN`
+(see [Upgrading](docs/UPGRADING.md#to-150)).
+
+### Security
+
+- **`h2` upgraded to 0.4.19** ([RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258),
+  unbounded empty DATA frames). A remote peer could hold an HTTP/2 connection open
+  sending empty DATA frames without bound — a denial of service against the transport
+  Askr serves on by default. Also picked up `chacha20` 0.10.2, replacing a yanked
+  release. `cargo audit` is clean again.
+
 - **The scheduler sidecar no longer dies on an error from `schedule:run`, and says what
   happened.** A `TypeError` has been seen escaping it in production — six times over three
   days, always in the second after a scheduled job ran, then nothing for 22 hours across two

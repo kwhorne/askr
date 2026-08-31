@@ -19,34 +19,46 @@ means exactly the same thing on the newest 1.x.
 ### Release tarball (systemd install)
 
 ```bash
-askr upgrade                 # downloads, verifies sha256, swaps the prefix
+askr upgrade                 # downloads, verifies signature + sha256, swaps the prefix
 sudo systemctl reload askr   # graceful; see below
 ```
 
-`askr upgrade` replaces the whole prefix (binary + bundled `libphp`) atomically and
-keeps the previous version at `<prefix>/../askr.old`. It does **not** restart the
-server unless you pass `--restart`.
+`askr upgrade` replaces the whole prefix (binary + bundled `libphp`) atomically and keeps
+the previous version at `<prefix>/../askr.old`. It does **not** restart the server unless
+you pass `--restart`.
 
-Verify the checksum yourself if you'd rather not trust the updater:
+From 1.5.0 it verifies a [minisign](https://jedisct1.github.io/minisign/) signature
+against a public key compiled into the binary, and **refuses** a release it cannot verify
+— a missing signature included. The `.sha256` is still checked, for what it is: proof the
+download arrived intact, not proof of who produced it.
+
+Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.4.14; ARCH=$(uname -m)
-curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
-curl -fLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.sha256
-sha256sum -c askr-${VER#v}-linux-$ARCH.tar.gz.sha256
+VER=v1.5.0; ARCH=$(uname -m)
+BASE=https://github.com/kwhorne/askr/releases/download/$VER
+TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
+
+curl -fLO $BASE/$TARBALL
+curl -fLO $BASE/$TARBALL.minisig
+curl -fsSL https://raw.githubusercontent.com/kwhorne/askr/$VER/keys/release.pub -o askr.pub
+minisign -V -p askr.pub -m $TARBALL
+
+# And the provenance attestation, which binds it to the workflow and commit that built it
+gh attestation verify $TARBALL --repo kwhorne/askr
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.4.14     # or :1.4 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.5.0     # or :1.5 to follow patches
 ```
 
-Pin the **exact** version in production and bump it deliberately. `:1.4` follows
+Pin the **exact** version in production and bump it deliberately. `:1.5` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.4.14-full`) are the same server built with the optional features
+The `-full` tags (`1.5.0-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -109,6 +121,42 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.5.0
+
+**Nothing is required.** Two things are worth adopting deliberately, because upgrading
+alone will not turn them on:
+
+- **`--sandbox-required` / `[server] sandbox_required`.** The sandbox used to warn and
+  serve unhardened when a kernel feature was missing, which looks identical to success.
+  Required mode refuses to serve instead. It needs `sandbox_write`, and refuses to start
+  without it — seccomp alone does not stop PHP writing a webshell, because Askr
+  interprets PHP in-process and no process creation is involved. See
+  [Sandbox](SANDBOX.md#fail-closed---sandbox-required).
+- **`ASKR_ADMIN_TOKEN`, if you run behind a local reverse proxy.** `PURGE`/`BAN` used to
+  be accepted from any loopback peer with no token — and behind nginx or Caddy on
+  127.0.0.1, *every* request is a loopback peer. Setting `trusted_proxies` now makes the
+  token mandatory for those methods, so if you have `trusted_proxies` configured and no
+  token, cache invalidation will start answering `403`. That is the fix working; set the
+  token.
+
+Three behaviour changes to be aware of, none of them configurable:
+
+- **A response carrying its own `Vary` is no longer cached.** The cache key cannot
+  express an arbitrary `Vary`, and the header used to be dropped rather than honoured —
+  so a localised app answering `Vary: Accept-Language` had one visitor's language served
+  to everyone. Correctness costs hit rate on exactly those responses.
+- **Scheme is part of the cache key.** With `force_https` off, http and https no longer
+  share an entry. Expect a one-time dip in hit rate.
+- **Underscored header names are dropped.** `X_Forwarded_For` no longer becomes
+  `HTTP_X_FORWARDED_FOR` in `$_SERVER`, because it collided with the dashed spelling and
+  bypassed anything filtering it. This is the same default nginx ships. If an app of
+  yours genuinely reads an underscored header, rename it to use dashes.
+
+Releases are now **signed**, and `askr upgrade` refuses one whose signature does not
+verify against the key compiled into the binary. Upgrading *to* 1.5.0 from an older
+build still uses the old checksum-only path — the verification lives in the new binary,
+so it protects the upgrade *after* this one.
 
 ### To 1.4.14
 

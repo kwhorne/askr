@@ -148,7 +148,7 @@ which routes deserve it.
   reachable; inserts reuse tombstones.
 - **TTL** is lazy (checked on read) — expired entries free their slot on the next
   access to it.
-- **Reads are lock-free (1.4.15).** A read samples a per-slot version counter,
+- **Reads are lock-free (1.5.0).** A read samples a per-slot version counter,
   copies, and samples again; a change means a writer overlapped the copy, so the
   read is retried and then — bounded — falls back to taking the lock. Writes still
   take the per-slot spinlock and are serialised as before.
