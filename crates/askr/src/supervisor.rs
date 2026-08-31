@@ -1055,8 +1055,9 @@ pub(crate) fn cow_child_setup(cc: &CowCtx) {
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
     }
     if cc.config.sandbox {
-        crate::sandbox::apply(&crate::sandbox::SandboxConfig {
+        crate::sandbox::apply_or_refuse(&crate::sandbox::SandboxConfig {
             write_paths: cc.config.sandbox_write.clone(),
+            required: cc.config.sandbox_required,
         });
     }
     let php = crate::php::Php::cow_bridge();

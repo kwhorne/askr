@@ -49,6 +49,7 @@ typos fail fast in `config-check`.
 | `http3` | bool | `false` | Serve HTTP/3 (QUIC) on the TLS port (requires TLS; build with `--features http3`). |
 | `sandbox` | bool | `false` | Linux hardening: seccomp no-exec. See [Sandbox](SANDBOX.md). |
 | `sandbox_write` | path[] | `[]` | Landlock: writes allowed only under these paths (enables the FS restriction). |
+| `sandbox_required` | bool | `false` | Refuse to serve if the sandbox doesn't fully apply. Needs `sandbox_write`. |
 
 ### `[worker]`
 

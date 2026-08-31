@@ -434,8 +434,10 @@ fn load_request(req: &Request) {
 }
 
 extern "C" fn wait_trampoline(ctx: *mut c_void) -> i32 {
-    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
-    bridge.wait()
+    crate::ffi::guard("php::wait", 0, || {
+        let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+        bridge.wait()
+    })
 }
 
 extern "C" fn reply_trampoline(
@@ -446,19 +448,21 @@ extern "C" fn reply_trampoline(
     hlen: usize,
     status: i32,
 ) {
-    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
-    let body = if body.is_null() || blen == 0 {
-        Vec::new()
-    } else {
-        unsafe { crate::ffi::bytes(body, blen) }.to_vec()
-    };
-    let headers = if hdrs.is_null() || hlen == 0 {
-        Vec::new()
-    } else {
-        let raw = unsafe { crate::ffi::bytes(hdrs, hlen) };
-        parse_headers(raw)
-    };
-    bridge.reply(body, headers, status.max(0) as u16);
+    crate::ffi::guard("php::reply", (), || {
+        let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+        let body = if body.is_null() || blen == 0 {
+            Vec::new()
+        } else {
+            unsafe { crate::ffi::bytes(body, blen) }.to_vec()
+        };
+        let headers = if hdrs.is_null() || hlen == 0 {
+            Vec::new()
+        } else {
+            let raw = unsafe { crate::ffi::bytes(hdrs, hlen) };
+            parse_headers(raw)
+        };
+        bridge.reply(body, headers, status.max(0) as u16);
+    })
 }
 
 extern "C" fn stream_begin_trampoline(
@@ -467,27 +471,33 @@ extern "C" fn stream_begin_trampoline(
     hlen: usize,
     status: i32,
 ) {
-    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
-    let headers = if hdrs.is_null() || hlen == 0 {
-        Vec::new()
-    } else {
-        parse_headers(unsafe { crate::ffi::bytes(hdrs, hlen) })
-    };
-    bridge.stream_begin(headers, status.max(0) as u16);
+    crate::ffi::guard("php::stream_begin", (), || {
+        let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+        let headers = if hdrs.is_null() || hlen == 0 {
+            Vec::new()
+        } else {
+            parse_headers(unsafe { crate::ffi::bytes(hdrs, hlen) })
+        };
+        bridge.stream_begin(headers, status.max(0) as u16);
+    })
 }
 
 extern "C" fn stream_chunk_trampoline(ctx: *mut c_void, ptr: *const c_char, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
-    let chunk = bytes::Bytes::copy_from_slice(unsafe { crate::ffi::bytes(ptr, len) });
-    bridge.stream_chunk(chunk);
+    crate::ffi::guard("php::stream_chunk", (), || {
+        if ptr.is_null() || len == 0 {
+            return;
+        }
+        let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+        let chunk = bytes::Bytes::copy_from_slice(unsafe { crate::ffi::bytes(ptr, len) });
+        bridge.stream_chunk(chunk);
+    })
 }
 
 extern "C" fn stream_end_trampoline(ctx: *mut c_void) {
-    let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
-    bridge.stream_end();
+    crate::ffi::guard("php::stream_end", (), || {
+        let bridge = unsafe { &mut *(ctx as *mut WorkerBridge) };
+        bridge.stream_end();
+    })
 }
 
 /// Register the streaming-reply callbacks with the shim (global; the shim routes

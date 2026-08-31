@@ -525,9 +525,11 @@ extern "C" fn c_push(
     plen: usize,
     delay: c_long,
 ) -> c_long {
-    let q = unsafe { crate::ffi::bytes(q, qlen) };
-    let payload = unsafe { crate::ffi::bytes(payload, plen) };
-    push(q, payload, delay.max(0) as u64) as c_long
+    crate::ffi::guard("squeue::push", 0, || {
+        let q = unsafe { crate::ffi::bytes(q, qlen) };
+        let payload = unsafe { crate::ffi::bytes(payload, plen) };
+        push(q, payload, delay.max(0) as u64) as c_long
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -540,37 +542,43 @@ extern "C" fn c_pop(
     out_payload: *mut *mut c_char,
     out_len: *mut usize,
 ) -> c_int {
-    let q = unsafe { crate::ffi::bytes(q, qlen) };
-    match pop(q, visibility.max(0) as u64) {
-        Some(r) => {
-            let buf = unsafe { libc::malloc(r.payload.len().max(1)) } as *mut u8;
-            if buf.is_null() {
-                return 0;
+    crate::ffi::guard("squeue::pop", 0, || {
+        let q = unsafe { crate::ffi::bytes(q, qlen) };
+        match pop(q, visibility.max(0) as u64) {
+            Some(r) => {
+                let buf = unsafe { libc::malloc(r.payload.len().max(1)) } as *mut u8;
+                if buf.is_null() {
+                    return 0;
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(r.payload.as_ptr(), buf, r.payload.len());
+                    *out_id = r.id as c_long;
+                    *out_attempts = r.attempts as c_int;
+                    *out_payload = buf as *mut c_char;
+                    *out_len = r.payload.len();
+                }
+                1
             }
-            unsafe {
-                ptr::copy_nonoverlapping(r.payload.as_ptr(), buf, r.payload.len());
-                *out_id = r.id as c_long;
-                *out_attempts = r.attempts as c_int;
-                *out_payload = buf as *mut c_char;
-                *out_len = r.payload.len();
-            }
-            1
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 extern "C" fn c_delete(id: c_long) -> c_int {
-    delete(id.max(0) as u64) as c_int
+    crate::ffi::guard("squeue::delete", 0, || delete(id.max(0) as u64) as c_int)
 }
 
 extern "C" fn c_release(id: c_long, delay: c_long) -> c_int {
-    release(id.max(0) as u64, delay.max(0) as u64) as c_int
+    crate::ffi::guard("squeue::release", 0, || {
+        release(id.max(0) as u64, delay.max(0) as u64) as c_int
+    })
 }
 
 extern "C" fn c_size(q: *const c_char, qlen: usize) -> c_long {
-    let q = unsafe { crate::ffi::bytes(q, qlen) };
-    size(q) as c_long
+    crate::ffi::guard("squeue::size", 0, || {
+        let q = unsafe { crate::ffi::bytes(q, qlen) };
+        size(q) as c_long
+    })
 }
 
 extern "C" fn c_counts(
@@ -581,14 +589,16 @@ extern "C" fn c_counts(
     out_reserved: *mut c_long,
     out_oldest_ms: *mut c_long,
 ) {
-    let q = unsafe { crate::ffi::bytes(q, qlen) };
-    let c = counts(q);
-    unsafe {
-        *out_pending = c.pending as c_long;
-        *out_delayed = c.delayed as c_long;
-        *out_reserved = c.reserved as c_long;
-        *out_oldest_ms = c.oldest_pending_created_ms as c_long;
-    }
+    crate::ffi::guard("squeue::counts", (), || {
+        let q = unsafe { crate::ffi::bytes(q, qlen) };
+        let c = counts(q);
+        unsafe {
+            *out_pending = c.pending as c_long;
+            *out_delayed = c.delayed as c_long;
+            *out_reserved = c.reserved as c_long;
+            *out_oldest_ms = c.oldest_pending_created_ms as c_long;
+        }
+    })
 }
 
 /// Register the queue callbacks with the PHP shim for this process.

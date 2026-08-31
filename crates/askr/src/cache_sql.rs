@@ -271,22 +271,24 @@ extern "C" fn c_get(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> c_int {
-    let key = unsafe { crate::ffi::bytes(key, klen) };
-    match get(key) {
-        Some(v) => {
-            let p = unsafe { libc::malloc(v.len().max(1)) } as *mut u8;
-            if p.is_null() {
-                return 0;
+    crate::ffi::guard("cache_sql::get", 0, || {
+        let key = unsafe { crate::ffi::bytes(key, klen) };
+        match get(key) {
+            Some(v) => {
+                let p = unsafe { libc::malloc(v.len().max(1)) } as *mut u8;
+                if p.is_null() {
+                    return 0;
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(v.as_ptr(), p, v.len());
+                    *out = p as *mut c_char;
+                    *out_len = v.len();
+                }
+                1
             }
-            unsafe {
-                ptr::copy_nonoverlapping(v.as_ptr(), p, v.len());
-                *out = p as *mut c_char;
-                *out_len = v.len();
-            }
-            1
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 extern "C" fn c_set(
@@ -296,9 +298,11 @@ extern "C" fn c_set(
     vlen: usize,
     ttl: c_long,
 ) -> c_int {
-    let key = unsafe { crate::ffi::bytes(key, klen) };
-    let val = unsafe { crate::ffi::bytes(val, vlen) };
-    set(key, val, ttl.max(0) as u64) as c_int
+    crate::ffi::guard("cache_sql::set", 0, || {
+        let key = unsafe { crate::ffi::bytes(key, klen) };
+        let val = unsafe { crate::ffi::bytes(val, vlen) };
+        set(key, val, ttl.max(0) as u64) as c_int
+    })
 }
 
 extern "C" fn c_add(
@@ -308,33 +312,45 @@ extern "C" fn c_add(
     vlen: usize,
     ttl: c_long,
 ) -> c_int {
-    let key = unsafe { crate::ffi::bytes(key, klen) };
-    let val = unsafe { crate::ffi::bytes(val, vlen) };
-    add(key, val, ttl.max(0) as u64) as c_int
+    crate::ffi::guard("cache_sql::add", 0, || {
+        let key = unsafe { crate::ffi::bytes(key, klen) };
+        let val = unsafe { crate::ffi::bytes(val, vlen) };
+        add(key, val, ttl.max(0) as u64) as c_int
+    })
 }
 
 extern "C" fn c_del(key: *const c_char, klen: usize) -> c_int {
-    let key = unsafe { crate::ffi::bytes(key, klen) };
-    delete(key) as c_int
+    crate::ffi::guard("cache_sql::delete", 0, || {
+        let key = unsafe { crate::ffi::bytes(key, klen) };
+        delete(key) as c_int
+    })
 }
 
 extern "C" fn c_incr(key: *const c_char, klen: usize, delta: c_long, ttl: c_long) -> c_long {
-    let key = unsafe { crate::ffi::bytes(key, klen) };
-    increment(key, delta, ttl.max(0) as u64)
+    crate::ffi::guard("cache_sql::increment", 0, || {
+        let key = unsafe { crate::ffi::bytes(key, klen) };
+        increment(key, delta, ttl.max(0) as u64)
+    })
 }
 
 extern "C" fn c_touch(key: *const c_char, klen: usize, ttl: c_long) -> c_int {
-    let key = unsafe { crate::ffi::bytes(key, klen) };
-    touch(key, ttl.max(0) as u64) as c_int
+    crate::ffi::guard("cache_sql::touch", 0, || {
+        let key = unsafe { crate::ffi::bytes(key, klen) };
+        touch(key, ttl.max(0) as u64) as c_int
+    })
 }
 
 extern "C" fn c_flush() {
-    flush();
+    crate::ffi::guard("cache_sql::flush", (), || {
+        flush();
+    })
 }
 
 extern "C" fn c_forget_tag(tag: *const c_char, tlen: usize) {
-    let tag = unsafe { crate::ffi::bytes(tag, tlen) };
-    forget_tag(tag);
+    crate::ffi::guard("cache_sql::forget_tag", (), || {
+        let tag = unsafe { crate::ffi::bytes(tag, tlen) };
+        forget_tag(tag);
+    })
 }
 
 /// Register the L2 cache callbacks with the PHP shim for this process.

@@ -37,8 +37,9 @@ pub fn run_worker(
     // seccomp (all-threads) + Landlock are inherited by every thread we create,
     // so the filter also covers the thread PHP runs on (where an exploit lives).
     if config.sandbox {
-        crate::sandbox::apply(&crate::sandbox::SandboxConfig {
+        crate::sandbox::apply_or_refuse(&crate::sandbox::SandboxConfig {
             write_paths: config.sandbox_write.clone(),
+            required: config.sandbox_required,
         });
     }
 

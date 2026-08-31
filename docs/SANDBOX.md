@@ -42,12 +42,34 @@ Typical allowlist for a Laravel app:
 Landlock degrades gracefully: on kernels without it (or an older ABI) the filter
 is best-effort and never prevents startup.
 
+## Fail closed: `--sandbox-required`
+
+By default the sandbox is **advisory**. A kernel without Landlock, a container without
+the seccomp capability, or any other missing feature logs a warning and the worker
+serves traffic looking exactly like one that hardened successfully. That default is not
+changing — an upgrade that started refusing to boot would be worse than the warning —
+but you can opt out of it:
+
+```bash
+askr serve … --sandbox-write /var/www/app/storage --sandbox-write /tmp --sandbox-required
+```
+
+A worker that cannot fully harden then exits (status 78) instead of serving, and the
+supervisor's crash-loop guard turns a fleet-wide failure into one clear "giving up".
+
+**It requires `--sandbox-write`**, and refuses to start without it. Seccomp alone blocks
+`execve`, which is not how a webshell runs here: Askr *interprets* PHP in-process, so a
+`.php` file written into the docroot needs no process creation at all. Landlock write
+rules are the control for that, so a "required" sandbox without them would be a promise
+the sandbox cannot keep.
+
 ## Config file
 
 ```toml
 [server]
 sandbox = true
 sandbox_write = ["/var/www/app/storage", "/var/www/app/bootstrap/cache", "/tmp"]
+sandbox_required = false   # true = refuse to serve unhardened (needs sandbox_write)
 ```
 
 ## Verified

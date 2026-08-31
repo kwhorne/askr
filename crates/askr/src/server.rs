@@ -102,6 +102,8 @@ pub struct Config {
     pub traffic_log: Option<PathBuf>,
     /// Harden workers (Linux): seccomp no-exec + (with write paths) Landlock.
     pub sandbox: bool,
+    /// Refuse to serve if the sandbox does not fully apply (see `sandbox::shortfall`).
+    pub sandbox_required: bool,
     /// Directories the sandbox may write to (enables the Landlock filesystem
     /// restriction; empty = seccomp only).
     pub sandbox_write: Vec<PathBuf>,

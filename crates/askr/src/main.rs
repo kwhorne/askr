@@ -321,6 +321,13 @@ enum Command {
         #[arg(long)]
         sandbox_write: Vec<PathBuf>,
 
+        /// Refuse to serve if the sandbox does not fully apply, instead of warning and
+        /// serving unhardened. Needs --sandbox-write: seccomp alone does not stop PHP
+        /// writing a webshell, because Askr interprets PHP in-process and no process
+        /// creation is involved.
+        #[arg(long)]
+        sandbox_required: bool,
+
         /// Enable a Pusher-compatible WebSocket endpoint (/app/{key}) and HTTP
         /// trigger (/apps/{id}/events) — a drop-in Reverb for Laravel Echo.
         /// Auto-enables broadcasting.
@@ -503,6 +510,7 @@ fn main() -> anyhow::Result<()> {
             acme_ca_root,
             sandbox,
             sandbox_write,
+            sandbox_required,
             pusher,
             pusher_secret,
             access_log,
@@ -643,7 +651,8 @@ fn main() -> anyhow::Result<()> {
                         .or_else(|| std::env::var("ASKR_PUSHER_SECRET").ok()),
                     access_log,
                     traffic_log,
-                    sandbox: sandbox || !sandbox_write.is_empty(),
+                    sandbox: sandbox || sandbox_required || !sandbox_write.is_empty(),
+                    sandbox_required,
                     sandbox_write,
                     shadow_to,
                     shadow_sample,
@@ -817,6 +826,19 @@ fn main() -> anyhow::Result<()> {
             // Own certificate (or self-signed) plus an explicit plain port: same front,
             // no challenges to serve. Refused without --force-https, because a listener
             // that answers every request with a 404 is not what anyone asked for.
+            // Refuse here rather than at worker boot. `apply_or_refuse` would catch it,
+            // but as a crash-loop across the whole fleet — one clear error before
+            // anything forks is a better way to learn you asked for a sandbox that
+            // cannot be one.
+            if config.sandbox_required && config.sandbox_write.is_empty() {
+                anyhow::bail!(
+                    "--sandbox-required needs at least one --sandbox-write path (or \
+                     [server] sandbox_write): seccomp alone blocks execve, and Askr \
+                     interprets PHP in-process, so nothing stops a written webshell \
+                     without the Landlock filesystem restriction"
+                );
+            }
+
             if let Some(addr) = http_redirect.or(config.http_redirect) {
                 // config.force_https, not the CLI flag — the same distinction the ACME
                 // front a few lines up already makes. The redirect address is taken

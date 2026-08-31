@@ -234,6 +234,10 @@ pub struct ServerSection {
     /// Harden workers on Linux (seccomp no-exec).
     #[serde(default)]
     pub sandbox: bool,
+    /// Refuse to serve unless the sandbox applied. Opt-in: flipping the default would
+    /// turn an upgrade into an outage on any kernel missing a feature.
+    #[serde(default)]
+    pub sandbox_required: bool,
     /// Landlock-writable paths (enables the filesystem restriction).
     #[serde(default)]
     pub sandbox_write: Vec<PathBuf>,
@@ -474,6 +478,7 @@ impl Default for ServerSection {
             tls_handshake_timeout: default_handshake_timeout(),
             header_read_timeout: default_header_read_timeout(),
             sandbox: false,
+            sandbox_required: false,
             sandbox_write: Vec::new(),
         }
     }
@@ -837,7 +842,10 @@ impl FileConfig {
                 pusher_secret: self.pusher.secret,
                 access_log: self.server.access_log,
                 traffic_log: self.server.traffic_log,
-                sandbox: self.server.sandbox || !self.server.sandbox_write.is_empty(),
+                sandbox: self.server.sandbox
+                    || self.server.sandbox_required
+                    || !self.server.sandbox_write.is_empty(),
+                sandbox_required: self.server.sandbox_required,
                 sandbox_write: self.server.sandbox_write,
                 shadow_to: self.server.shadow_to,
                 shadow_sample: self.server.shadow_sample,

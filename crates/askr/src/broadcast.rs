@@ -179,9 +179,11 @@ extern "C" fn c_broadcast(
     payload: *const c_char,
     plen: usize,
 ) -> c_int {
-    let chan = unsafe { crate::ffi::bytes(chan, clen) };
-    let payload = unsafe { crate::ffi::bytes(payload, plen) };
-    publish(chan, payload) as c_int
+    crate::ffi::guard("broadcast::publish", 0, || {
+        let chan = unsafe { crate::ffi::bytes(chan, clen) };
+        let payload = unsafe { crate::ffi::bytes(payload, plen) };
+        publish(chan, payload) as c_int
+    })
 }
 
 /// Register the broadcast callback with the shim for this process.

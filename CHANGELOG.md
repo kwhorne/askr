@@ -78,7 +78,53 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   seqlock: with the two counter samples removed, 584 533 of 2 145 847 reads came back
   half-written. With them, zero.
 
+
+
+- **`--sandbox-required` / `[server] sandbox_required` — fail closed.** The sandbox was
+  advisory: a kernel without Landlock or a container without the seccomp capability logged
+  a warning and the worker served traffic looking exactly like one that hardened. That
+  default stays, because an upgrade that started refusing to boot would be worse than the
+  warning, but it can now be opted out of. A worker that cannot fully harden exits 78, and
+  the crash-loop guard turns a fleet-wide failure into one clear "giving up".
+
+  It requires `sandbox_write`, and refuses to start without it. Seccomp alone blocks
+  `execve`, which is not how a webshell runs here: Askr interprets PHP in-process, so a
+  `.php` written into the docroot needs no process creation at all. A "required" sandbox
+  without Landlock write rules would be a promise the sandbox cannot keep, so that
+  combination is rejected before anything forks rather than discovered per worker.
+
+  The policy is deliberately not Linux-gated — `sandbox::shortfall` decides what a report
+  fails to deliver, and is unit-tested on every platform even though only Linux can apply
+  anything.
+
+
+- **A reload is now held to "every worker was replaced"** by a regression test
+  (`a_reload_replaces_every_worker`), rather than to `rollout: idle`. It records every PID,
+  sends SIGHUP, and polls until no pre-reload PID remains — with sidecars in the fleet,
+  since a queue worker recycling on its own is the event most likely to compete with the
+  roll. A reload that leaves a worker on the old code serves the previous release from a
+  fraction of requests and reports success.
+
 ### Fixed
+
+- **A panic in an `extern "C"` entry point no longer takes the worker with it.** There
+  were 35 of them across `cache`, `cache_sql`, `squeue`, `squeue_sql`, `broadcast`,
+  `broadcast_sql` and the PHP request trampolines, and no `catch_unwind` anywhere in the
+  workspace — so a panic at the boundary aborted the process mid-request, and what it was
+  about was reported nowhere a person looks. Each now runs inside `ffi::guard`, which
+  answers the caller's failure value (a cache miss, a refused push, a 502) and logs the
+  entry point by name.
+
+  Shared-memory state survives it because the things protecting it are RAII and run while
+  unwinding: `Slot` releases the spinlock. `Writing` needed a change to be safe here —
+  its `Drop` marked the slot settled, so catching a panic mid-`write` would have
+  advertised a half-updated slot as stable to the new lock-free readers. It now leaves the
+  counter odd when dropped during a panic, which sends readers to the lock and lets the
+  next writer repair it.
+
+  Not wrapped, deliberately: the two signal handlers in `supervisor.rs` (`catch_unwind` is
+  not async-signal-safe, and they touch nothing but atomics), and `cow_ready_trampoline`,
+  which forks the fleet — a panic there is a startup failure that has to stay loud.
 
 - **A deleted cache key could come back, so a logged-out session could log itself back
   in.** The probe loop in `Cache::set` holds one slot lock at a time, so two concurrent
@@ -326,15 +372,6 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   no longer depends on it, but a published tarball carrying a CI runner's uid is a trap
   for anyone who extracts it by hand as root.
 
-### Added
-
-- **A reload is now held to "every worker was replaced"** by a regression test
-  (`a_reload_replaces_every_worker`), rather than to `rollout: idle`. It records every PID,
-  sends SIGHUP, and polls until no pre-reload PID remains — with sidecars in the fleet,
-  since a queue worker recycling on its own is the event most likely to compete with the
-  roll. A reload that leaves a worker on the old code serves the previous release from a
-  fraction of requests and reports success.
-
 ### Changed
 
 - **The release now fails if Packagist isn't serving the version.** Verification stopped at
@@ -361,6 +398,15 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Known issues
 
+- **The self-update trust chain ends at GitHub.** `askr upgrade` fetches the tarball and
+  its `.sha256` from the same release, so the checksum proves the download arrived
+  intact and nothing more — a compromised release, account or CI token serves a matching
+  pair. The transport is sound (`curl --proto =https --tlsv1.2 -fSL`, no `--insecure`),
+  and this is the trust model most self-updaters ship with, but this one installs a
+  binary that systemd starts as root. Closing it means signed releases with the public
+  key embedded in the binary. That is a key-custody decision rather than a patch, and it
+  has not been made.
+
 - **`squeue` `delete`/`release` are unfenced against an expired lease.** `pop` reserves
   a job by moving `reserved_until` and leaves `id` alone, so once a lease lapses another
   worker takes the same job under the same id. A delayed first worker then calls
@@ -386,29 +432,16 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   having no header. The durable L2 backend (`ASKR_QUEUE_DB`) is the answer available
   today.
 
-- **A panic in an `extern "C"` trampoline aborts the worker.** There are around twenty
-  of them across `cache`, `cache_sql`, `broadcast`, `broadcast_sql` and `squeue`, and no
-  `catch_unwind` anywhere in the workspace, so a panic at the boundary aborts the
-  process. The supervisor respawns it — and since a fault-killed worker now counts
-  toward the crash-loop guard (see Fixed), a panic that reproduces will at least stop
-  the fleet instead of looping forever. The fix is a small `guard(default, f)` wrapper
-  applied to each trampoline: mechanical, twenty call sites, and worth reviewing on its
-  own rather than inside a security pass.
-
-- **The sandbox is fail-open, and does not stop the thing most people expect it to.**
-  `sandbox::apply()` logs `warn!` and continues when seccomp or Landlock cannot be
-  applied, so a worker that failed to harden serves traffic looking exactly like one
-  that succeeded, and nothing in `/api/status` distinguishes them. Landlock is pinned
-  to `ABI::V1`, below what current kernels offer. And `--sandbox` blocks `execve`,
-  which is not how a webshell runs here: Askr *interprets* PHP in-process, so a `.php`
-  file written into the docroot needs no process creation at all — Landlock write rules
-  are the control for that, and they are opt-in.
-
-  What it needs is a `sandbox = "required"` mode that refuses to serve unhardened, the
-  ABI negotiated rather than pinned, and the applied state attested in `/api/status`.
-  That is a feature with a config surface, so it is not being done as part of a
-  security pass.
-
+- **The sandbox's Landlock ABI is still pinned, and its applied state is not
+  attested.** Fail-closed is done (see Added), and the two remaining pieces of that
+  known issue are not. `landlock_restrict` still asks for `ABI::V1`, below what current
+  kernels offer (V2 file re-parenting, V3 truncate, V4 network, V5 ioctl); negotiating
+  the newest supported ABI needs a Linux build in the loop, because landlock is a
+  Linux-only dependency and the C shim needs a Linux `cc` to cross-check — guessing at
+  a crate API in a security path is how you ship a build break. And `/api/status` still
+  reports the sandbox's *intent* from config rather than what the workers achieved,
+  which is what an operator would need to tell a hardened fleet from a partly hardened
+  one.
 - **The response cache refuses what it cannot vary on, rather than varying on it.** A
   response carrying a `Vary` the key cannot express is not cached (see Fixed). Doing it
   properly means a variant list per primary key in `rcache` and a two-phase lookup —
@@ -420,15 +453,6 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   it, but an unset token still means an open reload trigger to anything that can reach
   the socket. Making it mandatory would break every existing deployment that relies on
   loopback isolation, so it stays a decision rather than a default.
-
-- **The self-update trust chain ends at GitHub.** `askr upgrade` fetches the tarball and
-  its `.sha256` from the same release, so the checksum proves the download arrived
-  intact and nothing more — a compromised release, account or CI token serves a matching
-  pair. The transport is sound (`curl --proto =https --tlsv1.2 -fSL`, no `--insecure`),
-  and this is the trust model most self-updaters ship with, but this one installs a
-  binary that systemd starts as root. Closing it means signed releases with the public
-  key embedded in the binary. That is a key-custody decision rather than a patch, and it
-  has not been made.
 
 - **`SIGHUP` may leave a worker on old code** ([Askr-51]) — measured once on a live
   deployment, **not reproduced**: the new test passes 12/12 against the same fleet shape.
