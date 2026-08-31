@@ -26,6 +26,34 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   the next person does not begin by hunting for lost work.
 
 
+### Fixed
+
+- **A stale read offset could have handed heap memory back as a request body.** In
+  worker mode the offset `php://input` reads from was never reset between requests:
+  `askr_req_reset()` freed the body and zeroed its length and never touched the third
+  variable, which was declared thirty lines away beside the SAPI callback that consumed
+  it rather than beside the state it belongs to. A shorter body arriving after a longer
+  one then evaluated `w_body_len - w_body_off_read` in `size_t` — which does not go
+  negative, it underflows to something near `SIZE_MAX` — so `n` became whatever PHP
+  asked for and the `memcpy` read past the end of the allocation. It is a read, so
+  nothing crashes: it returns the process's own heap as the body of a request, and an
+  application will echo it.
+
+  Not exploitable as shipped, and the reason matters. PHP only calls the post reader
+  when `SG(request_info).content_length` is set, and the worker path never sets it — the
+  body reaches the worker script as `$request['body']`, and `examples/laravel-worker.php`
+  builds the Request from that. So the worker branch of `askr_read_post` is unreached
+  today. It was one assignment from live: setting `content_length` is the first thing
+  anyone making `php://input` work natively in worker mode would do.
+
+  Fixed in three places, because the one-line version is the one that comes back. The
+  offset now sits with `w_body` and `w_body_len` where `askr_req_reset()` can see it; it
+  is reset there and in `askr_req_set_body()`, matching what the one-shot path has always
+  done, where `g_req.body_off = 0` sits on the line after `g_req.body_len = body_len`;
+  and both branches now refuse an offset at or past the length rather than trusting the
+  subtraction. No regression test, deliberately stated: the branch cannot be driven from
+  a request, so a test would have to make it reachable first.
+
 ### Added
 
 - **A reload is now held to "every worker was replaced"** by a regression test

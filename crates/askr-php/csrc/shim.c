@@ -109,9 +109,14 @@ static askr_req g_req;             /* single-threaded: the one in-flight request
 static const char *g_cookie = NULL; /* Cookie header for the current request */
 static int g_worker_mode = 0;      /* 1 while inside the persistent worker loop */
 
-/* Worker-request body (declared early: askr_read_post references it). */
+/* Worker-request body (declared early: askr_read_post references it).
+ *
+ * All three live together on purpose. The read offset used to be declared 30 lines
+ * down, beside the SAPI callback that consumes it, and askr_req_reset() reset the
+ * pointer and the length and never saw the third one. */
 static char  *w_body;
 static size_t w_body_len;
+static size_t w_body_off_read;
 
 /* Script mode (artisan queue/scheduler sidecars): output goes straight to
  * stdout instead of being captured, so a long-running command can't grow an
@@ -142,10 +147,19 @@ static void askr_send_header(sapi_header_struct *h, void *server_context) {
     }
 }
 
-static size_t w_body_off_read = 0;
-
+/* Hand PHP the next slice of the request body.
+ *
+ * The `>=` guards are not redundant with the arithmetic below them: both offsets are
+ * size_t, so an offset that has run past the length does not produce a negative
+ * `avail` — it underflows to something near SIZE_MAX, `n` becomes whatever PHP asked
+ * for, and the memcpy walks off the end of the allocation and into whatever the heap
+ * holds next. That is a read, so it does not crash; it returns other people's memory
+ * as the body of a request, which an application will happily echo. */
 static size_t askr_read_post(char *buffer, size_t count_bytes) {
     if (g_worker_mode) {
+        if (!w_body || w_body_off_read >= w_body_len) {
+            return 0;
+        }
         size_t avail = w_body_len - w_body_off_read;
         size_t n = count_bytes < avail ? count_bytes : avail;
         if (n) {
@@ -153,6 +167,9 @@ static size_t askr_read_post(char *buffer, size_t count_bytes) {
             w_body_off_read += n;
         }
         return n;
+    }
+    if (!g_req.body || g_req.body_off >= g_req.body_len) {
+        return 0;
     }
     size_t avail = g_req.body_len - g_req.body_off;
     size_t n = count_bytes < avail ? count_bytes : avail;
@@ -475,7 +492,7 @@ void askr_req_reset(void) {
         free(w_files[i].type);  free(w_files[i].tmp);
     }
     w_nfiles = 0;
-    free(w_body); w_body = NULL; w_body_len = 0;
+    free(w_body); w_body = NULL; w_body_len = 0; w_body_off_read = 0;
 }
 
 void askr_req_add_post(const char *name, const char *value) {
@@ -530,6 +547,7 @@ void askr_req_set_body(const char *ptr, size_t len) {
     w_body = (char *)malloc(len + 1);
     if (w_body) { memcpy(w_body, ptr, len); w_body[len] = '\0'; }
     w_body_len = len;
+    w_body_off_read = 0;
 }
 
 /* Reset SAPI response state between iterations (no RSHUTDOWN). */
