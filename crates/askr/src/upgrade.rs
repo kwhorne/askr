@@ -251,10 +251,18 @@ fn download(url: &str, dest: &Path) -> Result<()> {
 /// upgrade, and this shipped unsigned for a long time. It says so on every upgrade
 /// instead.
 fn release_key() -> Option<PublicKey> {
-    // minisign public keys are base64 starting with the two-byte algorithm tag, which
-    // renders as "RW". Comment lines in the placeholder can never match.
-    RELEASE_PUBKEY
-        .lines()
+    parse_key(RELEASE_PUBKEY)
+}
+
+/// Pull a minisign public key out of a `.pub` file's text.
+///
+/// Split out from [`release_key`] so both outcomes are testable without depending on
+/// what is committed today: a malformed key and a deliberately unconfigured file must
+/// be told apart, and only one of them is a bug.
+fn parse_key(text: &str) -> Option<PublicKey> {
+    // minisign public keys are base64 of a 42-byte structure beginning with the
+    // two-byte algorithm tag, which always renders as "RW". Comment lines cannot match.
+    text.lines()
         .map(str::trim)
         .find(|l| l.starts_with("RW") && l.len() >= 40)
         .and_then(|l| PublicKey::from_base64(l).ok())
@@ -435,28 +443,35 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// The placeholder in `keys/release.pub` must read as "no key", not as a key that
-    /// happens not to verify anything — the difference is whether an upgrade refuses
-    /// every release or explains that it cannot check provenance.
+    /// This repository has a signing key, and losing it would silently return
+    /// `askr upgrade` to checksum-only trust — the failure mode is that nothing fails.
+    /// So the committed key is asserted, not merely tolerated.
     #[test]
-    fn the_unconfigured_key_placeholder_is_recognised_as_absent() {
-        // Whatever is in the file today, `release_key` must not panic on it.
-        let configured = release_key().is_some();
-        if configured {
-            // A real key has been installed: it must parse, and it must not be the
-            // public test vector, which anybody can sign with.
-            assert!(
-                !RELEASE_PUBKEY.contains(VECTOR_PUBKEY),
-                "keys/release.pub is minisign's public test vector — anyone can sign \
-                 releases with the matching secret key, which is also published"
-            );
-        } else {
-            assert!(
-                RELEASE_PUBKEY.contains("NOT YET CONFIGURED"),
-                "no key parsed out of keys/release.pub, and it does not say it is \
-                 unconfigured either — the file is probably malformed"
-            );
-        }
+    fn the_committed_release_key_is_present_and_usable() {
+        assert!(
+            release_key().is_some(),
+            "keys/release.pub holds no usable minisign public key. If that is \
+             deliberate, this test is the thing to change — but note that upgrades \
+             then verify a checksum and nothing about provenance."
+        );
+        assert!(
+            !RELEASE_PUBKEY.contains(VECTOR_PUBKEY),
+            "keys/release.pub is minisign's public test vector — anyone can sign \
+             releases with the matching secret key, which is also published"
+        );
+    }
+
+    /// The two ways there can be no key are not the same thing: a file that says it is
+    /// unconfigured is a decision, and a file with a mangled key is a mistake that
+    /// would otherwise look identical at the call site.
+    #[test]
+    fn an_unconfigured_or_mangled_key_file_yields_no_key() {
+        assert!(parse_key("untrusted comment: NOT YET CONFIGURED\n# nothing here\n").is_none());
+        assert!(parse_key("").is_none());
+        // Right shape, wrong content — must not parse into a key that verifies nothing.
+        assert!(parse_key("RW0000000000000000000000000000000000000000000000000000000").is_none());
+        // And a real one still does.
+        assert!(parse_key(&format!("untrusted comment: x\n{VECTOR_PUBKEY}\n")).is_some());
     }
 
     /// This check decides whether we replace the running binary, so it gets a known

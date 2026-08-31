@@ -16,10 +16,21 @@ signature does not verify against the key embedded in the binary, so the key has
 exist before a build carries it.
 
 ```bash
-minisign -G -W -p keys/release.pub -s askr-release.key
+cargo install rsign2                     # or: brew install minisign
+rsign generate -W -c "askr release signing key" \
+  -p keys/release.pub -s ~/.askr/askr-release.key
 ```
 
-`-W` makes the secret key passwordless, because CI has no terminal to answer a prompt.
+Both flags matter. `-W` makes the secret key passwordless, because CI has no terminal to
+answer a prompt. **`-p` is what saves the public key** — without it `rsign generate`
+prints it once and there is no file, and there is no subcommand to get it back
+afterwards. If that happens, regenerate with `-f`; nothing is lost until a release has
+been signed.
+
+minisign and rsign2 implement the same format and are interoperable, so a key made by
+either works with either. The release workflow uses rsign2 because that is what these
+instructions generate with, and because `rsign sign -W` is non-interactive without
+depending on how a passwordless key gets prompted for.
 
 - **Commit `keys/release.pub`.** It is compiled into the binary (`include_str!` in
   `crates/askr/src/upgrade.rs`), which is the point: changing what an install trusts
@@ -136,7 +147,8 @@ gh release view "v$V" --json assets --jq '.assets | length'      # expect 12
 # release workflow already checks this before publishing; check it again from outside.
 for a in $(gh release view "v$V" --json assets --jq '.assets[].name' | grep '\.tar\.gz$'); do
   gh release download "v$V" -p "$a" -p "$a.minisig" -D /tmp/relsig --clobber
-  minisign -V -p keys/release.pub -m "/tmp/relsig/$a" && echo "$a signed ok"
+  rsign verify -p keys/release.pub -x "/tmp/relsig/$a.minisig" "/tmp/relsig/$a" \
+    && echo "$a signed ok"
 done
 rm -rf /tmp/relsig
 

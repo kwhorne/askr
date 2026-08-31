@@ -56,7 +56,13 @@ Verify a download by hand:
 
 ```bash
 minisign -V -p keys/release.pub -m askr-<version>-linux-<arch>.tar.gz
+# or, without the C tool:
+rsign verify -p keys/release.pub -x askr-<version>-linux-<arch>.tar.gz.minisig \
+  askr-<version>-linux-<arch>.tar.gz
 ```
+
+minisign and [rsign2](https://crates.io/crates/rsign2) implement the same format, so
+either verifies a release regardless of which produced the signature.
 
 Releases also carry a SLSA build-provenance attestation binding the artifact to the
 workflow and commit that produced it:

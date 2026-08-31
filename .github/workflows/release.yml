@@ -77,8 +77,14 @@ jobs:
       # key is embedded in the binary, so this step failing must fail the release
       # rather than publish something that cannot be installed.
       #
-      # The secret key is passwordless (`minisign -G -W`) because there is no terminal
-      # here to answer a prompt; MINISIGN_PASSWORD is passed empty for the same reason.
+      # The secret key is passwordless (`rsign generate -W`) because there is no
+      # terminal here to answer a prompt.
+      # rsign2 rather than the minisign C tool: the formats are the same spec and
+      # interoperable, but this is the tool the key was generated with, `-W` makes
+      # signing non-interactive without relying on how a passwordless key is prompted
+      # for, and it always prehashes — which is what `askr upgrade` requires. The Rust
+      # toolchain is already set up in this job, so installing it costs seconds next to
+      # the PHP build.
       - name: Sign the tarballs
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -86,22 +92,27 @@ jobs:
           set -euo pipefail
           if [ -z "${MINISIGN_SECRET_KEY}" ]; then
             echo "::error::MINISIGN_SECRET_KEY is not set — releases must be signed." \
-                 "Generate a key (see docs/RELEASING.md) and add the repository secret."
+                 "Generate a key (docs/RELEASING.md step 0) and add the repository secret."
             exit 1
           fi
-          sudo apt-get install -y minisign
+          if ! grep -q '^RW' keys/release.pub; then
+            echo "::error::keys/release.pub holds no public key, so a signature could" \
+                 "not be checked against anything. See docs/RELEASING.md step 0."
+            exit 1
+          fi
+          cargo install rsign2 --locked
           umask 077
-          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${RUNNER_TEMP}/minisign.key"
+          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${RUNNER_TEMP}/release.key"
           for f in dist/*.tar.gz; do
-            minisign -S -s "${RUNNER_TEMP}/minisign.key" -m "$f" -c "askr release" \
-                     -t "askr $(basename "$f")"
+            rsign sign -W -s "${RUNNER_TEMP}/release.key" -x "$f.minisig" \
+                       -c "askr release" -t "askr $(basename "$f")" "$f"
           done
-          shred -u "${RUNNER_TEMP}/minisign.key" 2>/dev/null || rm -f "${RUNNER_TEMP}/minisign.key"
-          # Prove the published signatures verify against the key in the repository
-          # *before* anyone can download them. A release signed with the wrong key is
-          # a release nobody can install.
+          rm -f "${RUNNER_TEMP}/release.key"
+          # Prove the signatures verify against the key committed to this repository
+          # *before* anyone can download them. A release signed with a key the binaries
+          # do not trust is a release nobody can install.
           for f in dist/*.tar.gz; do
-            minisign -V -p keys/release.pub -m "$f"
+            rsign verify -p keys/release.pub -x "$f.minisig" "$f"
           done
 
       # Attestation is not a substitute for the signature: it binds the artifact to
