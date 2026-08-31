@@ -90,8 +90,21 @@ pub fn run(opts: Options) -> Result<()> {
     verify_sha256(&tarball, &sumfile)?;
 
     println!("· extracting …");
+    // `--no-same-owner` / `--no-same-permissions` are the whole security of this step.
+    // Extraction runs as root (the install prefix is root-owned, so `askr upgrade`
+    // needs sudo), and GNU tar as root restores the *archive's* uid, gid and mode bits
+    // rather than the extracting user's. The release tarball is built by a CI runner,
+    // so the recorded owner is that runner's uid — commonly 1001. Restored verbatim,
+    // /opt/askr/askr ends up owned by whichever local account happens to hold uid 1001
+    // on this machine, and that account can then rewrite the binary systemd starts as
+    // root. The permissions half is the same hazard by a different route: a mode
+    // recorded as world-writable, or a setuid bit, would be reproduced faithfully.
+    // No chown afterwards: with --no-same-owner tar creates everything as the
+    // effective uid, which is already root.
     let status = Command::new("tar")
-        .arg("xzf")
+        .arg("--no-same-owner")
+        .arg("--no-same-permissions")
+        .arg("-xzf")
         .arg(&tarball)
         .arg("-C")
         .arg(&work)

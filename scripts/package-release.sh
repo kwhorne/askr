@@ -96,7 +96,16 @@ EOF
 
 # Tarball + checksum
 cd "$ROOT/dist"
-tar czf "$NAME.tar.gz" "$NAME"
+# Record root:root instead of the build account. `askr upgrade` extracts with
+# --no-same-owner and so does not depend on this, but a release tarball that carries
+# a CI runner's uid is a trap for anyone who extracts it by hand as root: GNU tar as
+# root restores the recorded owner, and uid 1001 belongs to a real local user on
+# plenty of machines. Costs nothing to not ship that.
+if tar --version 2>/dev/null | grep -qi gnu; then
+    tar --owner=0 --group=0 --numeric-owner -czf "$NAME.tar.gz" "$NAME"
+else
+    tar --uid 0 --gid 0 --uname root --gname root -czf "$NAME.tar.gz" "$NAME"
+fi
 if command -v sha256sum >/dev/null; then
     sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
 elif command -v shasum >/dev/null; then

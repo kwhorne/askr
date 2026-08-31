@@ -54,6 +54,25 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   subtraction. No regression test, deliberately stated: the branch cannot be driven from
   a request, so a test would have to make it reachable first.
 
+- **`askr upgrade` extracted the release tarball with the archive's ownership.**
+  Extraction runs as root — the install prefix is root-owned, so the command needs sudo —
+  and GNU tar as root restores the uid, gid and mode bits recorded in the archive instead
+  of the extracting user's. Releases are packaged by a CI runner, so the recorded owner
+  was that runner's uid, commonly 1001. On any machine where a local account holds uid
+  1001, `/opt/askr/askr` was installed owned by that account, which could then rewrite
+  the binary systemd starts as root — local privilege escalation through the one path
+  whose whole job is to be trusted.
+
+  Extraction now passes `--no-same-owner --no-same-permissions`, so everything is created
+  as root with the umask applied. The permissions half closes the same hole by the other
+  route: a mode recorded world-writable, or carrying a setuid bit, was reproduced
+  faithfully. No `chown` afterwards — with `--no-same-owner` tar has already created
+  everything as the effective uid.
+
+  `scripts/package-release.sh` now records `root:root` in the archive too. The installer
+  no longer depends on it, but a published tarball carrying a CI runner's uid is a trap
+  for anyone who extracts it by hand as root.
+
 ### Added
 
 - **A reload is now held to "every worker was replaced"** by a regression test
@@ -88,6 +107,15 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   calls the cause most likely lag.
 
 ### Known issues
+
+- **The self-update trust chain ends at GitHub.** `askr upgrade` fetches the tarball and
+  its `.sha256` from the same release, so the checksum proves the download arrived
+  intact and nothing more — a compromised release, account or CI token serves a matching
+  pair. The transport is sound (`curl --proto =https --tlsv1.2 -fSL`, no `--insecure`),
+  and this is the trust model most self-updaters ship with, but this one installs a
+  binary that systemd starts as root. Closing it means signed releases with the public
+  key embedded in the binary. That is a key-custody decision rather than a patch, and it
+  has not been made.
 
 - **`SIGHUP` may leave a worker on old code** ([Askr-51]) — measured once on a live
   deployment, **not reproduced**: the new test passes 12/12 against the same fleet shape.
