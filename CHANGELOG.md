@@ -26,6 +26,58 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   the next person does not begin by hunting for lost work.
 
 
+### Added
+
+- **Cache reads no longer take a lock.** `Cache::get` sampled a per-slot spinlock
+  *exclusively*, so every worker reading the same hot key — a session, a shared config
+  blob, anything Laravel touches on each request — queued behind the others. Reads now
+  use a seqlock: sample a per-slot version counter, copy, sample again; a change means a
+  writer overlapped the copy, so retry, and after a bounded number of attempts take the
+  lock. Writes are unchanged and still serialised on the spinlock.
+
+  Measured before touching the lock, because a claimed speedup is not a speedup. Both
+  paths are kept and benchmarked against each other in one process
+  (`cargo test --release -p askr --bins cache_read_scaling -- --ignored --nocapture`),
+  reading one key on a 12-performance-core machine:
+
+  | readers | locked | lock-free |
+  | --- | --- | --- |
+  | 1 | 22.1M/s | 22.9M/s |
+  | 2 | 7.3M/s | 10.2M/s |
+  | 4 | 6.0M/s | 75.0M/s |
+  | 8 | 2.5M/s | 48.5M/s |
+  | 12 | 1.5M/s | 19.1M/s |
+
+  The locked column is the finding: throughput *falls* as readers are added, because a
+  spinlock under contention burns cycles instead of waiting. Peak aggregate read
+  throughput on one key went from ~22M/s to ~75M/s, and the shape changed from
+  collapsing to scaling. The lock-free numbers are noisy above 8 threads on a laptop;
+  the locked collapse is monotonic and reproduces in every value size.
+
+  Three things the work turned up that are worth recording:
+
+  - The benchmark caught a regression it was not looking for. The first version of the
+    read path allocated with `vec![0u8; len]`, which zeroes the buffer before the copy
+    — a 4 KB value read by a single thread came out at 0.8× of the locked path it
+    replaced, purely from the extra pass over the page. Fixed with an uninitialised
+    allocation; single-reader throughput is now 1.0× at every size.
+  - The counter cannot share the `lock` word, because shmlock reclaims a slot from a
+    dead holder by recognising the PID stored there.
+  - `Writing::begin` forces the counter odd rather than incrementing it. A writer killed
+    mid-update leaves it odd forever, and an increment would then make it *even* during
+    the following write — a reader would sample a stable-looking counter in the middle of
+    a copy. Forcing odd on entry and even-and-greater on exit repairs the slot instead.
+    There is a test for exactly that: a slot left mid-write is readable via the lock and
+    back in phase after the next write.
+
+  `get` also no longer tombstones an expired entry it happens to find, on the lock-free
+  path — it takes the lock, re-checks, and then reclaims. Expiry is rare, so this keeps
+  the fast path read-only.
+
+  The torn-read test is the one that matters, and it was verified against a defeated
+  seqlock: with the two counter samples removed, 584 533 of 2 145 847 reads came back
+  half-written. With them, zero.
+
 ### Fixed
 
 - **A deleted cache key could come back, so a logged-out session could log itself back

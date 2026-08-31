@@ -2,8 +2,8 @@
 
 Askr ships a small **shared-memory cache** exposed to PHP. It's a fixed-slot hash
 table living in an anonymous shared mmap the master creates before forking, so
-every worker process sees the same physical table — no IPC, no locks on the hot
-path beyond a per-slot spinlock.
+every worker process sees the same physical table — no IPC, and **reads take no
+lock at all**.
 
 This gives you **cache, atomic counters (rate limiting) and locks in the Askr
 binary** — no Redis for small/mid deployments.
@@ -148,10 +148,33 @@ which routes deserve it.
   reachable; inserts reuse tombstones.
 - **TTL** is lazy (checked on read) — expired entries free their slot on the next
   access to it.
+- **Reads are lock-free (1.4.15).** A read samples a per-slot version counter,
+  copies, and samples again; a change means a writer overlapped the copy, so the
+  read is retried and then — bounded — falls back to taking the lock. Writes still
+  take the per-slot spinlock and are serialised as before.
+
+  This matters because reads used to take that spinlock *exclusively*, so every
+  worker reading one hot key (a session, a shared config blob) queued behind the
+  others. Measured on a 12-performance-core machine, reads of a single key across
+  concurrent readers:
+
+  | readers | locked | lock-free |
+  | --- | --- | --- |
+  | 1 | 22.1M/s | 22.9M/s |
+  | 4 | 6.0M/s | 75.0M/s |
+  | 12 | 1.5M/s | 19.1M/s |
+
+  The locked column is the point: it *falls* as readers are added — a spinlock under
+  contention burns cycles rather than waiting. Reproduce it with
+  `cargo test --release -p askr --bins cache_read_scaling -- --ignored --nocapture`,
+  which measures both paths in one process.
+
 - **Best-effort under crashes:** a per-slot spinlock is stolen if a holder dies
   mid-operation, so a crashed worker can't deadlock the table; a torn write can
   only yield a stale/garbage *value* (never memory unsafety — reads are length
-  clamped), which a cache tolerates.
+  clamped), which a cache tolerates. A writer killed mid-update leaves its slot's
+  version counter odd, which sends readers to the lock until the next write repairs
+  it — correct, just not lock-free for that one slot in the meantime.
 - **Not persistent:** the table lives in RAM and is empty on restart.
 
 For very large values, many GB of data, or cross-host sharing, use a real cache

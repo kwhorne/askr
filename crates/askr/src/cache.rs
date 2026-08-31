@@ -18,7 +18,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const KEY_MAX: usize = 250;
@@ -32,10 +32,30 @@ const VAL_LARGE: usize = 64 * 1024;
 /// bites either way.
 const PROBE: usize = 32;
 
+/// How many times `get` re-reads a slot without its lock before taking the lock.
+///
+/// A retry means a writer touched the slot mid-copy, which clears in nanoseconds, so a
+/// handful is plenty. The point of the bound is the case that never clears: a writer
+/// killed mid-update leaves the counter odd for good, and only a lock holder repairs
+/// it — so the fallback is the recovery path, not a tuning knob.
+const SEQ_ATTEMPTS: usize = 4;
+
 #[repr(C)]
 struct Entry<const V: usize> {
     lock: AtomicU32, // 0 = free, else holder pid (see shmlock)
-    state: u32,      // 0 = empty, 1 = occupied
+    /// Seqlock counter: even = stable, odd = a writer is inside this slot.
+    ///
+    /// `get` reads a slot **without taking its lock**, and this is what makes that
+    /// safe: it samples the counter, copies, and samples again — a change or an odd
+    /// value means a writer overlapped the copy and the read is discarded. So every
+    /// mutation of a slot has to pass through [`Writing`], [`Region::mark_state`] or
+    /// [`Region::mark_expires`]. A bare `ptr::write` into a slot is the one way to
+    /// reintroduce a torn read, and it will not look wrong at the call site.
+    ///
+    /// It cannot share the `lock` word: shmlock reclaims a slot from a dead holder by
+    /// recognising the PID in there, so that field has to keep holding a PID.
+    version: AtomicU64,
+    state: u32, // 0 = empty, 1 = occupied
     hash: u64,
     expires_at: u64, // unix secs; 0 = never
     written_at: u64, // unix millis at last write (oldest-first eviction)
@@ -43,6 +63,20 @@ struct Entry<const V: usize> {
     val_len: u32,
     key: [u8; KEY_MAX],
     val: [u8; V],
+}
+
+/// Outcome of reading one slot without holding its lock.
+enum Peek {
+    /// Empty slot: the probe chain ends here.
+    ChainEnd,
+    /// Occupied by another key, or a tombstone — keep probing.
+    Other,
+    /// Our key, but past its expiry.
+    Expired,
+    /// Our key, and the value was copied while nothing was writing it.
+    Hit(Vec<u8>),
+    /// A writer overlapped the read. Retry, or fall back to the lock.
+    Torn,
 }
 
 /// One cache region of `Entry<V>` slots in shared memory.
@@ -115,11 +149,43 @@ impl<const V: usize> Drop for Slot<V> {
     }
 }
 
+// Volatile, because every one of these reads a field another process may be writing.
+// Under a slot lock that cannot happen and the volatile costs nothing measurable; in
+// `Region::peek`, which reads without the lock, it is what stops the compiler from
+// assuming the memory is unchanging and hoisting a read outside the two counter
+// samples that validate it.
+/// Marks a slot as being written for as long as the guard lives, so a lock-free
+/// reader retries instead of believing a half-updated slot. The caller must already
+/// hold the slot lock — this orders the writes, it does not exclude other writers.
+///
+/// Forcing the counter odd rather than incrementing it is deliberate: a writer killed
+/// mid-update leaves it odd forever, and an increment would then make it *even* during
+/// the next write — a reader could sample a stable-looking counter in the middle of a
+/// copy. Forcing odd on entry and even-and-greater on exit repairs that slot instead.
+struct Writing<const V: usize>(*mut Entry<V>, u64);
+
+impl<const V: usize> Writing<V> {
+    unsafe fn begin(e: *mut Entry<V>) -> Writing<V> {
+        let odd = (*e).version.load(Ordering::Relaxed) | 1;
+        (*e).version.store(odd, Ordering::SeqCst);
+        // Nothing written below may be hoisted above the marker.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        Writing(e, odd + 1)
+    }
+}
+
+impl<const V: usize> Drop for Writing<V> {
+    fn drop(&mut self) {
+        // Release: every write above is visible before the slot reads stable again.
+        unsafe { (*self.0).version.store(self.1, Ordering::Release) };
+    }
+}
+
 unsafe fn r_u32(p: *const u32) -> u32 {
-    ptr::read(p)
+    ptr::read_volatile(p)
 }
 unsafe fn r_u64(p: *const u64) -> u64 {
-    ptr::read(p)
+    ptr::read_volatile(p)
 }
 
 impl<const V: usize> Region<V> {
@@ -192,6 +258,7 @@ impl<const V: usize> Region<V> {
     }
 
     unsafe fn write(e: *mut Entry<V>, key: &[u8], val: &[u8], h: u64, expires: u64) {
+        let _w = Writing::begin(e);
         ptr::write(ptr::addr_of_mut!((*e).state), 1);
         ptr::write(ptr::addr_of_mut!((*e).hash), h);
         ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
@@ -210,9 +277,87 @@ impl<const V: usize> Region<V> {
         );
     }
 
+    /// Change a slot's `state` (1 = occupied, 2 = tombstone, 0 = empty) under the
+    /// seqlock marker. Caller holds the slot lock.
+    unsafe fn mark_state(e: *mut Entry<V>, state: u32) {
+        let _w = Writing::begin(e);
+        ptr::write(ptr::addr_of_mut!((*e).state), state);
+    }
+
+    /// Refresh a slot's expiry under the seqlock marker. Caller holds the slot lock.
+    unsafe fn mark_expires(e: *mut Entry<V>, expires: u64) {
+        let _w = Writing::begin(e);
+        ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
+    }
+
     unsafe fn expired(e: *mut Entry<V>, now: u64) -> bool {
         let exp = r_u64(ptr::addr_of!((*e).expires_at));
         exp != 0 && exp < now
+    }
+
+    /// Read one slot **without taking its lock**.
+    ///
+    /// Copy first, believe second: the seqlock counter is sampled before and after,
+    /// and an odd first sample or a changed second one means a writer overlapped the
+    /// copy, so the bytes are discarded rather than returned.
+    ///
+    /// A torn length cannot read out of bounds — `key_len` is clamped to `KEY_MAX` and
+    /// `val_len` to `V`, the arrays they index — so the worst a lost race can produce
+    /// is garbage that is then thrown away. Reading bytes another process may be
+    /// writing is a data race in the strict sense; the counter is what makes the
+    /// *result* sound, and the volatile reads plus the two fences are what stop the
+    /// compiler from reordering the copy outside the window that validates it.
+    unsafe fn peek(e: *mut Entry<V>, key: &[u8], h: u64, now: u64) -> Peek {
+        let v1 = (*e).version.load(Ordering::Acquire);
+        if v1 & 1 != 0 {
+            return Peek::Torn; // a writer is inside the slot
+        }
+
+        let state = r_u32(ptr::addr_of!((*e).state));
+        let hash = r_u64(ptr::addr_of!((*e).hash));
+        let klen = r_u32(ptr::addr_of!((*e).key_len)) as usize;
+        let expires = r_u64(ptr::addr_of!((*e).expires_at));
+
+        let ours = state == 1
+            && hash == h
+            && klen == key.len()
+            && klen <= KEY_MAX
+            && std::slice::from_raw_parts(ptr::addr_of!((*e).key) as *const u8, klen) == key;
+
+        // A slot holding some other key needs no value copy — but the identity read
+        // above is still unvalidated, so it cannot be acted on until the counter says
+        // the read was clean.
+        if !ours {
+            std::sync::atomic::fence(Ordering::Acquire);
+            if (*e).version.load(Ordering::Relaxed) != v1 {
+                return Peek::Torn;
+            }
+            // Only an EMPTY (0) slot ends the probe chain. A TOMBSTONE (2) is skipped,
+            // so a live key stored past a deleted colliding key stays reachable.
+            return if state == 0 {
+                Peek::ChainEnd
+            } else {
+                Peek::Other
+            };
+        }
+
+        let vlen = (r_u32(ptr::addr_of!((*e).val_len)) as usize).min(V);
+        // Uninitialised, then filled — `vec![0u8; vlen]` zeroes the buffer first, and
+        // the benchmark caught that: a 4 KB value read by one thread came out slower
+        // than the locked path it replaced, purely from the extra pass over the page.
+        let mut val: Vec<u8> = Vec::with_capacity(vlen);
+        ptr::copy_nonoverlapping(ptr::addr_of!((*e).val) as *const u8, val.as_mut_ptr(), vlen);
+        val.set_len(vlen);
+
+        std::sync::atomic::fence(Ordering::Acquire);
+        if (*e).version.load(Ordering::Relaxed) != v1 {
+            return Peek::Torn;
+        }
+        if expires != 0 && expires < now {
+            Peek::Expired
+        } else {
+            Peek::Hit(val)
+        }
     }
 
     fn get(&self, key: &[u8], h: u64) -> Option<Vec<u8>> {
@@ -220,22 +365,54 @@ impl<const V: usize> Region<V> {
         let now = now_secs();
         for i in 0..PROBE {
             let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
-            let _g = Slot::lock(e);
-            unsafe {
-                // Only an EMPTY (0) slot ends the probe chain. A TOMBSTONE (2) is
-                // skipped (matches() requires state==1), so a live key placed past a
-                // deleted colliding key is still found. (Fixes the false-miss where
-                // delete used to punch a 0 hole mid-chain.)
-                if r_u32(ptr::addr_of!((*e).state)) == 0 {
-                    return None;
+
+            let mut peek = Peek::Torn;
+            for _ in 0..SEQ_ATTEMPTS {
+                peek = unsafe { Self::peek(e, key, h, now) };
+                if !matches!(peek, Peek::Torn) {
+                    break;
                 }
-                if Self::matches(e, key, h) {
-                    if Self::expired(e, now) {
-                        ptr::write(ptr::addr_of_mut!((*e).state), 2); // tombstone
+                std::hint::spin_loop();
+            }
+            if matches!(peek, Peek::Torn) {
+                let _g = Slot::lock(e);
+                // Under the lock no writer can be active, so the fields are read
+                // plainly rather than through the counter — which a writer killed
+                // mid-update may have left odd, and which `peek` would then keep
+                // reporting as torn for the life of the region.
+                unsafe {
+                    if r_u32(ptr::addr_of!((*e).state)) == 0 {
                         return None;
                     }
-                    return Some(Self::read_val(e));
+                    peek = if Self::matches(e, key, h) {
+                        if Self::expired(e, now) {
+                            Peek::Expired
+                        } else {
+                            Peek::Hit(Self::read_val(e))
+                        }
+                    } else {
+                        Peek::Other
+                    };
                 }
+            }
+
+            match peek {
+                Peek::ChainEnd => return None,
+                Peek::Other => continue,
+                Peek::Hit(v) => return Some(v),
+                Peek::Expired => {
+                    // Reclaiming needs the lock and the write marker. Expiry is rare,
+                    // so it stays off the fast path — and it is re-checked, because the
+                    // slot may have been rewritten since the lock-free read saw it.
+                    let _g = Slot::lock(e);
+                    unsafe {
+                        if Self::matches(e, key, h) && Self::expired(e, now) {
+                            Self::mark_state(e, 2);
+                        }
+                    }
+                    return None;
+                }
+                Peek::Torn => unreachable!("the lock fallback cannot return Torn"),
             }
         }
         None
@@ -328,7 +505,7 @@ impl<const V: usize> Region<V> {
                     return; // chain end: nothing further can hold the key
                 }
                 if Self::matches(e, key, h) {
-                    ptr::write(ptr::addr_of_mut!((*e).state), 2);
+                    Self::mark_state(e, 2);
                 }
             }
         }
@@ -404,7 +581,7 @@ impl<const V: usize> Region<V> {
                 if Self::matches(e, key, h) {
                     // Tombstone (2), not empty (0): preserves the probe chain so a
                     // colliding key stored later in the chain stays reachable.
-                    ptr::write(ptr::addr_of_mut!((*e).state), 2);
+                    Self::mark_state(e, 2);
                     found = true;
                 }
             }
@@ -428,10 +605,10 @@ impl<const V: usize> Region<V> {
                 }
                 if Self::matches(e, key, h) {
                     if Self::expired(e, now) {
-                        ptr::write(ptr::addr_of_mut!((*e).state), 2); // tombstone
+                        Self::mark_state(e, 2); // tombstone
                         return false;
                     }
-                    ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
+                    Self::mark_expires(e, expires);
                     return true;
                 }
             }
@@ -511,7 +688,7 @@ impl<const V: usize> Region<V> {
         for idx in 0..slots {
             let e = unsafe { p.add(idx) };
             let _g = Slot::lock(e);
-            unsafe { ptr::write(ptr::addr_of_mut!((*e).state), 0) };
+            unsafe { Self::mark_state(e, 0) };
         }
     }
 }
@@ -722,6 +899,223 @@ mod tests {
     static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A lock-free reader must never observe a half-written value.
+    ///
+    /// The writer alternates between two values that are distinguishable in every
+    /// byte *and* in length, so any mixture — a byte of the other value, or a length
+    /// that belongs to neither — is a torn read. Without the seqlock counter this is
+    /// exactly what `get` would hand back once it stopped taking the slot lock.
+    #[test]
+    fn a_lockfree_read_never_sees_a_half_written_value() {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::time::{Duration, Instant};
+
+        let _g = guard();
+        init(1024, 64);
+        let key = b"seq:torn";
+        let a = vec![b'A'; 512];
+        let b = vec![b'B'; 1024];
+        assert!(set(key, &a, 0));
+
+        let stop = AtomicBool::new(false);
+        let torn = AtomicU64::new(0);
+        let reads = AtomicU64::new(0);
+        let start = Instant::now();
+
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    set(key, &a, 0);
+                    set(key, &b, 0);
+                }
+            });
+            for _ in 0..4 {
+                sc.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Some(v) = get(key) {
+                            reads.fetch_add(1, Ordering::Relaxed);
+                            let consistent = match v.len() {
+                                512 => v.iter().all(|&c| c == b'A'),
+                                1024 => v.iter().all(|&c| c == b'B'),
+                                _ => false,
+                            };
+                            if !consistent {
+                                torn.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+            while start.elapsed() < Duration::from_millis(250) {
+                std::thread::yield_now();
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
+
+        let n = reads.load(Ordering::Relaxed);
+        assert!(
+            n > 10_000,
+            "the run must actually exercise the path (got {n})"
+        );
+        assert_eq!(torn.load(Ordering::Relaxed), 0, "of {n} reads");
+    }
+
+    /// A writer killed mid-update leaves the counter odd for good. Reads of that slot
+    /// must fall back to the lock rather than spin or miss, and the next write must
+    /// repair the counter instead of leaving it permanently out of phase — which is
+    /// why `Writing::begin` forces the value odd rather than incrementing it.
+    #[test]
+    fn a_slot_left_mid_write_is_readable_and_then_repaired() {
+        let _g = guard();
+        init(256, 64);
+        let key = b"seq:abandoned";
+        assert!(set(key, b"payload", 0));
+
+        let h = hash_key(key);
+        let (p, slots) = SMALL.base().expect("region is mapped");
+        let mut found = None;
+        for i in 0..PROBE {
+            let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
+            let _lock = Slot::lock(e);
+            if unsafe { Region::<VAL_SMALL>::matches(e, key, h) } {
+                found = Some(e);
+                break;
+            }
+        }
+        let e = found.expect("the key just set must be in its chain");
+
+        // Simulate the corpse: counter left odd, value intact.
+        let before = unsafe { (*e).version.load(Ordering::SeqCst) };
+        assert_eq!(before & 1, 0, "a settled slot reads even");
+        unsafe { (*e).version.store(before | 1, Ordering::SeqCst) };
+
+        assert_eq!(
+            get(key).as_deref(),
+            Some(&b"payload"[..]),
+            "an odd counter must send the read to the lock, not lose the value"
+        );
+
+        // The next write puts the slot back in phase.
+        assert!(set(key, b"replaced", 0));
+        let after = unsafe { (*e).version.load(Ordering::SeqCst) };
+        assert_eq!(
+            after & 1,
+            0,
+            "a completed write must leave the counter even"
+        );
+        assert!(after > before, "and move it forward");
+        assert_eq!(get(key).as_deref(), Some(&b"replaced"[..]));
+    }
+
+    /// The old locked read path, kept for the benchmark below so the two can be
+    /// compared back to back in one process instead of across two builds.
+    fn get_taking_the_lock(key: &[u8]) -> Option<Vec<u8>> {
+        let h = hash_key(key);
+        let (p, slots) = SMALL.base()?;
+        let now = now_secs();
+        for i in 0..PROBE {
+            let e = unsafe { p.add((h as usize).wrapping_add(i) % slots) };
+            let _g = Slot::lock(e);
+            unsafe {
+                if r_u32(ptr::addr_of!((*e).state)) == 0 {
+                    return None;
+                }
+                if Region::<VAL_SMALL>::matches(e, key, h) {
+                    if Region::<VAL_SMALL>::expired(e, now) {
+                        return None;
+                    }
+                    return Some(Region::<VAL_SMALL>::read_val(e));
+                }
+            }
+        }
+        None
+    }
+
+    /// How read throughput on one hot key scales with concurrent readers, lock-free
+    /// against locked, measured in the same process.
+    ///
+    /// A measurement rather than an assertion — timings are not something to fail a
+    /// build on. Run it on demand:
+    ///
+    /// ```text
+    /// cargo test --release -p askr --bins cache_read_scaling -- --ignored --nocapture
+    /// ```
+    ///
+    /// Threads stand in for workers: `shmlock` does not care whether the contenders
+    /// are threads or processes, and the mapping is `MAP_SHARED` either way, so the
+    /// serialisation on one slot's lock is the same mechanism.
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn cache_read_scaling() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
+
+        /// Ops/sec for `threads` readers, timed only while every thread is running.
+        ///
+        /// The barrier is the point: without it the timer starts before the last
+        /// thread is spawned, so late threads run shorter than the divisor assumes and
+        /// high thread counts read as a collapse that is really spawn skew.
+        fn measure(threads: usize, run: Duration, read: &(dyn Fn() + Sync)) -> f64 {
+            let ops = AtomicU64::new(0);
+            let ready = Barrier::new(threads + 1);
+            let go = Barrier::new(threads + 1);
+            let mut elapsed = Duration::ZERO;
+            std::thread::scope(|sc| {
+                for _ in 0..threads {
+                    sc.spawn(|| {
+                        ready.wait();
+                        go.wait();
+                        let start = Instant::now();
+                        let mut n = 0u64;
+                        while start.elapsed() < run {
+                            for _ in 0..64 {
+                                read();
+                            }
+                            n += 64;
+                        }
+                        ops.fetch_add(n, Ordering::Relaxed);
+                    });
+                }
+                ready.wait();
+                let t0 = Instant::now();
+                go.wait();
+                // Threads stop on their own clocks; this is the wall time they shared.
+                std::thread::sleep(run);
+                elapsed = t0.elapsed();
+            });
+            ops.load(Ordering::Relaxed) as f64 / elapsed.as_secs_f64()
+        }
+
+        let _g = guard();
+        init(4096, 64);
+        let key = b"hot:session";
+        const RUN: Duration = Duration::from_millis(400);
+
+        for size in [16usize, 512, 4096] {
+            let val = vec![b'x'; size];
+            assert!(set(key, &val, 0));
+            assert_eq!(get(key).as_deref(), Some(&val[..]));
+            assert_eq!(get_taking_the_lock(key).as_deref(), Some(&val[..]));
+
+            println!("\none hot key, {size} byte value:");
+            println!("  threads        locked      lock-free      speedup");
+            for threads in [1usize, 2, 4, 8, 12] {
+                let locked = measure(threads, RUN, &|| {
+                    assert!(get_taking_the_lock(key).is_some());
+                });
+                let free = measure(threads, RUN, &|| {
+                    assert!(get(key).is_some());
+                });
+                println!(
+                    "  {threads:>7}  {locked:>12.0}  {free:>13.0}  {:>10.1}x",
+                    free / locked
+                );
+            }
+        }
+        println!();
     }
 
     /// A key can end up in two slots: the probe in `set` holds one slot lock at a
