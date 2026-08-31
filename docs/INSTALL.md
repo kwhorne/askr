@@ -113,10 +113,25 @@ Nothing is installed system-wide and no system PHP is touched.
 
 ```bash
 VER=v1.4.14; ARCH=$(uname -m)
-curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
-tar xzf askr-${VER#v}-linux-$ARCH.tar.gz
+BASE=https://github.com/kwhorne/askr/releases/download/$VER
+TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
+curl -fsSLO $BASE/$TARBALL
+curl -fsSLO $BASE/$TARBALL.minisig
+
+# Verify the signature before unpacking. The public key is in the repository
+# (keys/release.pub) and is compiled into the binary, so `askr upgrade` checks this
+# for you later — the first install is the one you have to check yourself.
+curl -fsSL https://raw.githubusercontent.com/kwhorne/askr/$VER/keys/release.pub -o askr.pub
+minisign -V -p askr.pub -m $TARBALL
+
+tar xzf $TARBALL
 cd askr-${VER#v}-linux-$ARCH
 ```
+
+The `.sha256` beside the tarball tells you whether the download arrived intact. It
+travels with the file it describes, so it cannot tell you who produced it — that is what
+the signature is for. If `minisign` isn't available, at least check the checksum, and
+treat the install as unverified.
 
 `x86_64` and `aarch64` are both published. Prefer the `-full` archive if you want the
 optional features (HTTP/3, OpenTelemetry, the SQL storage backend) — the plain build

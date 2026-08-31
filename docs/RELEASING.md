@@ -9,6 +9,33 @@ Everything below assumes a clean tree on `main` with CI green.
 
 ---
 
+## 0. One-time: the release signing key
+
+Do this once, before the first signed release. `askr upgrade` refuses a release whose
+signature does not verify against the key embedded in the binary, so the key has to
+exist before a build carries it.
+
+```bash
+minisign -G -W -p keys/release.pub -s askr-release.key
+```
+
+`-W` makes the secret key passwordless, because CI has no terminal to answer a prompt.
+
+- **Commit `keys/release.pub`.** It is compiled into the binary (`include_str!` in
+  `crates/askr/src/upgrade.rs`), which is the point: changing what an install trusts
+  means changing the source and getting it released.
+- **Put the contents of `askr-release.key` in the repository secret
+  `MINISIGN_SECRET_KEY`**, keep an offline backup, and delete the local copy. It must
+  never enter this repository.
+- **Losing it locks out every future release.** There is no revocation here: a new key
+  means installs built against the old one refuse the new tarballs and have to be
+  reinstalled by hand. Back it up somewhere you would still have after losing this
+  machine.
+
+Until `keys/release.pub` holds a real key, `askr upgrade` verifies the download against
+its own `.sha256` and nothing else — which proves it arrived intact and says nothing
+about who produced it — and prints exactly that on every upgrade.
+
 ## 1. Decide the version
 
 Askr follows [semver under the 1.x freeze](STABILITY.md): new capability arrives as
@@ -103,7 +130,18 @@ done
 Green is a claim; these are facts.
 
 ```bash
-gh release view "v$V" --json assets --jq '.assets | length'      # expect 8
+gh release view "v$V" --json assets --jq '.assets | length'      # expect 12
+
+# Every tarball must carry a signature that verifies against the committed key. The
+# release workflow already checks this before publishing; check it again from outside.
+for a in $(gh release view "v$V" --json assets --jq '.assets[].name' | grep '\.tar\.gz$'); do
+  gh release download "v$V" -p "$a" -p "$a.minisig" -D /tmp/relsig --clobber
+  minisign -V -p keys/release.pub -m "/tmp/relsig/$a" && echo "$a signed ok"
+done
+rm -rf /tmp/relsig
+
+# And the provenance attestation binds it to this workflow and commit.
+gh attestation verify "/tmp/relsig/$a" --repo kwhorne/askr 2>/dev/null || true
 
 MIN=${V%.*}
 for t in "$V" "$MIN" latest "$V-full" "$MIN-full" full; do

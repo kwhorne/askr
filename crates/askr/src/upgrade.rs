@@ -5,16 +5,25 @@
 //! atomically: extract next to it, then `rename` old aside and new into place.
 //! The running server keeps its `mmap`'d libphp until it's restarted.
 //!
-//! Zero extra Rust deps: `curl` fetches (redirects + system TLS, exactly like the
-//! documented install), `sha2` verifies the checksum, system `tar` extracts.
+//! `curl` fetches (redirects + system TLS, exactly like the documented install),
+//! `sha2` verifies the checksum, `minisign-verify` verifies the signature, system
+//! `tar` extracts.
 
 use anyhow::{bail, Context, Result};
+use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const REPO: &str = "kwhorne/askr";
+
+/// The release signing key, embedded at build time.
+///
+/// A file in the repository rather than something fetched at runtime, because that is
+/// the whole point: an attacker who wants to change what `askr upgrade` trusts has to
+/// change the source and get it built and released, not just serve a different file.
+const RELEASE_PUBKEY: &str = include_str!("../../../keys/release.pub");
 
 pub struct Options {
     pub check: bool,
@@ -88,6 +97,31 @@ pub fn run(opts: Options) -> Result<()> {
 
     println!("· verifying sha256 …");
     verify_sha256(&tarball, &sumfile)?;
+
+    // The checksum and the tarball come from the same release, so it proves the
+    // download arrived intact and nothing about who produced it: a compromised
+    // release, account or CI token serves a matching pair. The signature is the part
+    // that answers provenance, and this runs as root — so a bad one is a refusal, not
+    // a warning.
+    match release_key() {
+        Some(key) => {
+            let sigfile = work.join(format!("{name}.tar.gz.minisig"));
+            println!("· verifying signature …");
+            download(&format!("{base}/{name}.tar.gz.minisig"), &sigfile).context(
+                "no signature published for this release (or it could not be fetched) — \
+                 this build requires one, so it will not be installed",
+            )?;
+            verify_signature(&tarball, &sigfile, &key)?;
+            println!("✓ signed by the key this build trusts");
+        }
+        None => {
+            println!(
+                "! NO SIGNING KEY in this build: the download was checked against its own \
+                 checksum and nothing more. That proves it arrived intact, not who made \
+                 it. See docs/RELEASING.md."
+            );
+        }
+    }
 
     println!("· extracting …");
     // `--no-same-owner` / `--no-same-permissions` are the whole security of this step.
@@ -211,6 +245,55 @@ fn download(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The embedded public key, or `None` while no key has been configured.
+///
+/// Absent has to stay possible: a build with no key must not be a build that cannot
+/// upgrade, and this shipped unsigned for a long time. It says so on every upgrade
+/// instead.
+fn release_key() -> Option<PublicKey> {
+    // minisign public keys are base64 starting with the two-byte algorithm tag, which
+    // renders as "RW". Comment lines in the placeholder can never match.
+    RELEASE_PUBKEY
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("RW") && l.len() >= 40)
+        .and_then(|l| PublicKey::from_base64(l).ok())
+}
+
+/// Verify the tarball against its minisign signature, streamed.
+///
+/// Prehashed signatures only. A legacy minisign signature covers the raw bytes, which
+/// would mean holding the whole tarball in memory to check one; modern minisign
+/// produces prehashed by default, so refusing legacy costs nothing and removes a mode
+/// nobody should still be using.
+fn verify_signature(file: &Path, sigfile: &Path, key: &PublicKey) -> Result<()> {
+    let text = std::fs::read_to_string(sigfile).context("reading the signature file")?;
+    let sig =
+        Signature::decode(&text).map_err(|e| anyhow::anyhow!("malformed signature file: {e}"))?;
+    let mut verifier = key.verify_stream(&sig).map_err(|e| {
+        anyhow::anyhow!(
+            "signature rejected before the tarball was even read ({e}) — it was made by \
+             a different key, or in minisign's legacy non-prehashed mode"
+        )
+    })?;
+    let mut f = std::fs::File::open(file)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        verifier.update(&buf[..n]);
+    }
+    verifier.finalize().map_err(|e| {
+        anyhow::anyhow!(
+            "SIGNATURE VERIFICATION FAILED ({e}). This tarball was not signed by the key \
+             this build trusts. Refusing to install it."
+        )
+    })?;
+    Ok(())
+}
+
 fn verify_sha256(file: &Path, sumfile: &Path) -> Result<()> {
     let want = std::fs::read_to_string(sumfile)?;
     let want = want.split_whitespace().next().unwrap_or("").to_lowercase();
@@ -310,6 +393,70 @@ mod tests {
         let d = std::env::temp_dir().join(format!("askr-up-{name}-{n}"));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The published minisign test vector: a prehashed signature over the four bytes
+    /// `test`, from minisign-verify's own test suite. Using a real vector rather than a
+    /// round trip means this test would catch the format being mis-parsed, not just
+    /// our own code agreeing with itself.
+    const VECTOR_PUBKEY: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
+    const VECTOR_SIG: &str = "untrusted comment: signature from minisign secret key
+RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=
+trusted comment: timestamp:1556193335\tfile:test
+y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==";
+
+    /// `askr upgrade` runs as root and replaces the binary systemd starts. A signature
+    /// that verifies has to mean the bytes are the ones that were signed, and a
+    /// tampered tarball has to be a refusal — not a warning, not a fallback to the
+    /// checksum that travels with it.
+    #[test]
+    fn a_tampered_tarball_is_refused_and_an_intact_one_is_not() {
+        let d = tmp("sig");
+        let key = PublicKey::from_base64(VECTOR_PUBKEY).expect("the vector key parses");
+        let sig = d.join("payload.minisig");
+        std::fs::write(&sig, VECTOR_SIG).unwrap();
+
+        let good = d.join("payload");
+        std::fs::write(&good, b"test").unwrap();
+        verify_signature(&good, &sig, &key).expect("the signed bytes must verify");
+
+        // One byte different is the whole point.
+        let bad = d.join("payload.tampered");
+        std::fs::write(&bad, b"Test").unwrap();
+        let err = verify_signature(&bad, &sig, &key)
+            .expect_err("a tampered file must not verify")
+            .to_string();
+        assert!(err.contains("SIGNATURE VERIFICATION FAILED"), "got {err}");
+
+        // A signature file that is not one at all.
+        std::fs::write(&sig, "not a signature").unwrap();
+        assert!(verify_signature(&good, &sig, &key).is_err());
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The placeholder in `keys/release.pub` must read as "no key", not as a key that
+    /// happens not to verify anything — the difference is whether an upgrade refuses
+    /// every release or explains that it cannot check provenance.
+    #[test]
+    fn the_unconfigured_key_placeholder_is_recognised_as_absent() {
+        // Whatever is in the file today, `release_key` must not panic on it.
+        let configured = release_key().is_some();
+        if configured {
+            // A real key has been installed: it must parse, and it must not be the
+            // public test vector, which anybody can sign with.
+            assert!(
+                !RELEASE_PUBKEY.contains(VECTOR_PUBKEY),
+                "keys/release.pub is minisign's public test vector — anyone can sign \
+                 releases with the matching secret key, which is also published"
+            );
+        } else {
+            assert!(
+                RELEASE_PUBKEY.contains("NOT YET CONFIGURED"),
+                "no key parsed out of keys/release.pub, and it does not say it is \
+                 unconfigured either — the file is probably malformed"
+            );
+        }
     }
 
     /// This check decides whether we replace the running binary, so it gets a known

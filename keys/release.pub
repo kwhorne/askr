@@ -1,0 +1,14 @@
+untrusted comment: askr release signing key — NOT YET CONFIGURED
+#
+# Replace this file with a real minisign public key:
+#
+#   minisign -G -W -p keys/release.pub -s askr-release.key
+#
+# `-W` makes the secret key passwordless, which is what CI needs to sign without an
+# interactive prompt. Commit this file; put the *contents* of askr-release.key into the
+# repository secret MINISIGN_SECRET_KEY and keep an offline backup. The secret key must
+# never enter this repository.
+#
+# Until a real key is here, `askr upgrade` verifies the download against its own
+# .sha256 and nothing else — which proves it arrived intact and says nothing about who
+# produced it — and prints that on every upgrade. See docs/RELEASING.md.

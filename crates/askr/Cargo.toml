@@ -65,6 +65,7 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"], optional = true }
 h3 = { version = "0.0.8", optional = true }
 h3-quinn = { version = "0.0.10", optional = true }
+minisign-verify = "0.2.5"
 
 [features]
 # Durable, replicated L2 storage backends over SQL Anywhere (queue first).

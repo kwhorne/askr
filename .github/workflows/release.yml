@@ -11,6 +11,12 @@ on:
 
 permissions:
   contents: write
+  # Build provenance: `id-token` mints the OIDC token the attestation is bound to,
+  # `attestations` writes it. Signing (below) needs neither — it uses a stored key —
+  # so the two are independent halves: minisign answers "did the key holder make
+  # this", provenance answers "was it built by this workflow from this commit".
+  id-token: write
+  attestations: write
 
 jobs:
   linux:
@@ -67,6 +73,45 @@ jobs:
       - name: Package full tarball
         run: SUFFIX=-full ./scripts/package-release.sh
 
+      # Sign every tarball. `askr upgrade` refuses a release with no signature once a
+      # key is embedded in the binary, so this step failing must fail the release
+      # rather than publish something that cannot be installed.
+      #
+      # The secret key is passwordless (`minisign -G -W`) because there is no terminal
+      # here to answer a prompt; MINISIGN_PASSWORD is passed empty for the same reason.
+      - name: Sign the tarballs
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set — releases must be signed." \
+                 "Generate a key (see docs/RELEASING.md) and add the repository secret."
+            exit 1
+          fi
+          sudo apt-get install -y minisign
+          umask 077
+          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${RUNNER_TEMP}/minisign.key"
+          for f in dist/*.tar.gz; do
+            minisign -S -s "${RUNNER_TEMP}/minisign.key" -m "$f" -c "askr release" \
+                     -t "askr $(basename "$f")"
+          done
+          shred -u "${RUNNER_TEMP}/minisign.key" 2>/dev/null || rm -f "${RUNNER_TEMP}/minisign.key"
+          # Prove the published signatures verify against the key in the repository
+          # *before* anyone can download them. A release signed with the wrong key is
+          # a release nobody can install.
+          for f in dist/*.tar.gz; do
+            minisign -V -p keys/release.pub -m "$f"
+          done
+
+      # Attestation is not a substitute for the signature: it binds the artifact to
+      # this workflow and commit, verifiable with `gh attestation verify`, while the
+      # signature is what the binary itself checks with no network and no GitHub.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*.tar.gz
+
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -74,3 +119,4 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/*.minisig

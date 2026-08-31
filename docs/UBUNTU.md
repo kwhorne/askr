@@ -39,6 +39,9 @@ cd /tmp
 VER=v1.4.14
 ARCH=$(uname -m)            # x86_64 or aarch64
 curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz
+curl -fsSLO https://github.com/kwhorne/askr/releases/download/$VER/askr-${VER#v}-linux-$ARCH.tar.gz.minisig
+curl -fsSL https://raw.githubusercontent.com/kwhorne/askr/$VER/keys/release.pub -o askr.pub
+minisign -V -p askr.pub -m askr-${VER#v}-linux-$ARCH.tar.gz   # refuse to continue if this fails
 tar xzf askr-${VER#v}-linux-$ARCH.tar.gz
 sudo cp -r askr-${VER#v}-linux-$ARCH/* /opt/askr/
 sudo chown -R root:root /opt/askr

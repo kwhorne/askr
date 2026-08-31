@@ -45,6 +45,30 @@ Two honest limits:
   not automatically: the audit runs in its own workflow so such a case doesn't turn the
   build-and-test signal red for unrelated commits.
 
+## Release integrity
+
+Release tarballs are signed with [minisign](https://jedisct1.github.io/minisign/). The
+public key lives at `keys/release.pub` in this repository and is compiled into the
+binary, so `askr upgrade` verifies provenance itself — no network service is trusted at
+upgrade time, and a tarball signed by anything else is refused rather than warned about.
+
+Verify a download by hand:
+
+```bash
+minisign -V -p keys/release.pub -m askr-<version>-linux-<arch>.tar.gz
+```
+
+Releases also carry a SLSA build-provenance attestation binding the artifact to the
+workflow and commit that produced it:
+
+```bash
+gh attestation verify askr-<version>-linux-<arch>.tar.gz --repo kwhorne/askr
+```
+
+The `.sha256` beside each tarball detects a truncated or corrupted download. It is not
+an integrity control against a compromised release — it travels with the file it
+describes — so do not use it in place of the signature.
+
 ## Security-sensitive areas
 
 Askr's whole hot path is memory-safe Rust; a few areas warrant extra scrutiny:
