@@ -46,8 +46,9 @@ the request-coalescing inflight table so N concurrent stale hits trigger just on
 recompute). Past `swr` it's a normal miss again. Compression is applied once at
 store time, so hits and stale serves do zero per-request compression.
 
-- Only anonymous `GET`/`HEAD` are cacheable; `Set-Cookie` is stripped on store
-  so a cached page can't pin one session onto every visitor.
+- Only anonymous `GET`/`HEAD` are cacheable — no identifying cookie *and* no
+  `Authorization` header — and `Set-Cookie` is stripped on store so a cached page
+  can't pin one session onto every visitor.
 
 ### Rate limiting before PHP wakes up
 
@@ -367,6 +368,9 @@ Details worth knowing:
 - **A cookie that isn't on the list still defeats caching** — a `laravel_session`
   or auth cookie is never treated as anonymous. Keep the list to cookies you know
   the server ignores.
+- **So does an `Authorization` header.** A bearer-authenticated API request has no
+  cookies and is still one user's request; it is never cached, whatever a rule says
+  about the path — unless the rule sets `force`, which is you saying so in writing.
 - `vary_user_agent` splits the key on a coarse mobile/desktop class *and* sets
   `Vary: User-Agent`, so a shared proxy downstream can't hand mobile HTML to a
   desktop client. Background stale-while-revalidate refreshes forward the original
@@ -395,15 +399,26 @@ askr serve … --pusher          # auto-enables the broadcast ring
   unsubscribe, ping/pong.
 - HTTP trigger `POST /apps/{id}/events` — the Pusher API Laravel's broadcaster
   calls server-side; publishes into the shared broadcast ring so a trigger in any
-  worker reaches subscribers in all of them.
+  worker reaches subscribers in all of them. **Authenticated** (1.5.1): the request
+  must carry Pusher's own signature — `auth_key`, `auth_timestamp`, `body_md5` and an
+  `auth_signature` over the method, path and sorted query — which `pusher-php-server`
+  sends on every call, so Laravel needs nothing extra. A missing, stale (>10 min) or
+  wrong signature is a `401`.
 - `askr_broadcast('channel', $json)` from PHP also reaches Pusher clients.
 
-**Private & presence channels** are verified against the app secret (0.3.1):
+**Private & presence channels** are verified against the app secret (0.3.1), and so
+is the trigger:
 
 ```bash
 askr serve … --pusher --pusher-secret "$PUSHER_APP_SECRET"
 # or $ASKR_PUSHER_SECRET / [pusher] secret in askr.toml
 ```
+
+> **Set the secret before this faces a network.** Without one, `private-`/`presence-`
+> subscriptions are accepted unverified *and* the trigger accepts unsigned requests —
+> which means anyone who can reach the port can publish into every channel, and every
+> subscribed browser receives it as a legitimate server event. Askr logs a warning the
+> first time it accepts an unsigned trigger; that mode is for a laptop, not a server.
 
 A Laravel 12/13 app is scaffolded for **Reverb**, and its `reverb` connection speaks the
 same Pusher protocol — so point its env at Askr and delete the Reverb process:
@@ -484,7 +499,12 @@ replay` reconstructs the exact request against a fresh interpreter and prints th
 status, headers and body — production debugging goes from "try to reproduce" to
 "replay it". Recent failures are listed on the admin dashboard.
 
-> Captures request bodies — treat the directory as sensitive.
+> **Captures request bodies — treat the directory as sensitive.** A 5xx on a login
+> form records that form's body, password included, because the body is what makes a
+> replay a replay. The directory is created `0700` and each file `0600`; `Cookie`,
+> `Authorization` and `Proxy-Authorization` are replaced with `[redacted]` in the
+> envelope, so an auth-dependent failure replays unauthenticated. Rotate or delete
+> recordings once the incident is understood.
 
 ## 7. Fork-based parallel test runner
 

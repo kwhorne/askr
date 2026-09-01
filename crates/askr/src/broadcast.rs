@@ -14,7 +14,7 @@
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
-const CHAN_MAX: usize = 64;
+pub(crate) const CHAN_MAX: usize = 64;
 const PAYLOAD_MAX: usize = 3072;
 const RING_SLOTS: u64 = 1024;
 

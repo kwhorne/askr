@@ -8,7 +8,12 @@
 //! reproduce" to "replay it".
 //!
 //! Because it captures request bodies, recording is opt-in (`--record-errors
-//! <dir>`) and the directory should be treated as sensitive.
+//! <dir>`) and the directory should be treated as sensitive: a 5xx on a login form
+//! writes that form's body — the password — to disk. The directory is created `0700`
+//! and each file `0600`, and credential-bearing headers (`Cookie`, `Authorization`,
+//! `Proxy-Authorization`) are replaced with a marker before the envelope is written.
+//! A replay of an auth-dependent failure therefore runs unauthenticated; that is the
+//! trade, and it is the right one for a file that outlives the incident.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,9 +45,59 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// What a credential is replaced with in a recorded envelope. Kept as a value rather
+/// than dropping the key, so a replay still knows the header was there.
+pub const REDACTED: &str = "[redacted]";
+
+/// `$_SERVER` keys whose values are credentials.
+const REDACT_KEYS: [&str; 3] = [
+    "HTTP_COOKIE",
+    "HTTP_AUTHORIZATION",
+    "HTTP_PROXY_AUTHORIZATION",
+];
+
+/// Replace credentials in the `$_SERVER` map with [`REDACTED`].
+fn redact(server_vars: &[(String, String)]) -> Vec<(String, String)> {
+    server_vars
+        .iter()
+        .map(|(k, v)| {
+            if REDACT_KEYS.iter().any(|r| k.eq_ignore_ascii_case(r)) {
+                (k.clone(), REDACTED.to_string())
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
+/// Create a file readable by this user only, refusing to follow a symlink or reuse a
+/// name. The recorder writes into a directory an operator named; the file must not be
+/// something another user planted there.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(path)?.write_all(bytes)
+}
+
 /// Persist a failing request. Best-effort: any I/O error is logged and ignored.
 pub fn record_failure(dir: &Path, req: &Request, status: u16) {
-    if let Err(e) = std::fs::create_dir_all(dir) {
+    let mkdir = {
+        let mut b = std::fs::DirBuilder::new();
+        b.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            b.mode(0o700);
+        }
+        b.create(dir)
+    };
+    if let Err(e) = mkdir {
         tracing::warn!(error = %e, "record: mkdir failed");
         return;
     }
@@ -56,8 +111,8 @@ pub fn record_failure(dir: &Path, req: &Request, status: u16) {
         method: req.method.clone(),
         query_string: req.query_string.clone(),
         content_type: req.content_type.clone(),
-        cookie: req.cookie.clone(),
-        server_vars: req.server_vars.clone(),
+        cookie: req.cookie.as_ref().map(|_| REDACTED.to_string()),
+        server_vars: redact(&req.server_vars),
         body_len: req.body.len(),
     };
     let json = match serde_json::to_vec_pretty(&env) {
@@ -67,8 +122,10 @@ pub fn record_failure(dir: &Path, req: &Request, status: u16) {
             return;
         }
     };
-    let _ = std::fs::write(dir.join(format!("{id}.bin")), &req.body);
-    if let Err(e) = std::fs::write(dir.join(format!("{id}.json")), json) {
+    // The body is kept as sent — it is what makes a replay a replay — which is why it,
+    // too, is 0600 and why the directory is documented as sensitive.
+    let _ = write_private(&dir.join(format!("{id}.bin")), &req.body);
+    if let Err(e) = write_private(&dir.join(format!("{id}.json")), &json) {
         tracing::warn!(error = %e, "record: write failed");
     } else {
         tracing::info!(id, status, "recorded failing request for replay");
@@ -113,4 +170,81 @@ pub fn list(dir: &Path) -> Vec<(String, u16)> {
     }
     out.sort_by(|a, b| b.0.cmp(&a.0));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 5xx on a login form used to write the session cookie, the bearer token and
+    /// the form body — the password — world-readable under a 022 umask. The body is
+    /// still kept (it is the replay), so the files must be private and the credentials
+    /// in the envelope must not be there at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_recorded_failure_is_private_and_carries_no_credentials() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("askr-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let req = Request {
+            script_filename: "/srv/index.php".into(),
+            method: "POST".into(),
+            query_string: String::new(),
+            content_type: Some("application/x-www-form-urlencoded".into()),
+            cookie: Some("laravel_session=abc".into()),
+            body: b"email=a%40b.c&password=hunter2".to_vec(),
+            server_vars: vec![
+                ("HTTP_COOKIE".into(), "laravel_session=abc".into()),
+                ("HTTP_AUTHORIZATION".into(), "Bearer eyJ".into()),
+                ("HTTP_USER_AGENT".into(), "curl".into()),
+            ],
+            post_fields: Vec::new(),
+            files: Vec::new(),
+        };
+        record_failure(&dir, &req, 500);
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700, "the directory is private");
+
+        let mut jsons: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        assert_eq!(jsons.len(), 1);
+        let json = jsons.pop().unwrap();
+        assert_eq!(mode(&json), 0o600, "the envelope is private");
+        assert_eq!(
+            mode(&json.with_extension("bin")),
+            0o600,
+            "the body is private"
+        );
+
+        let text = std::fs::read_to_string(&json).unwrap();
+        assert!(
+            !text.contains("laravel_session=abc"),
+            "no cookie value: {text}"
+        );
+        assert!(!text.contains("Bearer eyJ"), "no bearer token: {text}");
+        assert!(
+            text.contains(REDACTED),
+            "the marker says a credential was there"
+        );
+        assert!(
+            text.contains("\"HTTP_USER_AGENT\""),
+            "ordinary headers survive"
+        );
+
+        // Replay still reconstructs the request — unauthenticated, by design.
+        let back = load(&json).unwrap();
+        assert_eq!(back.cookie.as_deref(), Some(REDACTED));
+        assert_eq!(
+            back.body, req.body,
+            "the body is what makes a replay a replay"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -5,6 +5,66 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Security
+
+- **The Pusher HTTP trigger accepted unsigned requests from anyone.** `POST
+  /apps/{id}/events` published whatever it was sent into whatever channels it named —
+  `private-` and `presence-` included — with no authentication at all, while the
+  subscription side HMAC-verified exactly those channels. Anyone who could reach the port
+  could forge a server event that every subscribed Echo client would treat as genuine,
+  and could flood the broadcast ring fast enough that legitimate events fell off it.
+
+  The trigger now requires Pusher's own request signature when a secret is configured:
+  `auth_key`, `auth_timestamp`, `auth_version`, `body_md5` and `auth_signature` (an
+  HMAC-SHA256 over the method, path and sorted query), which is what `pusher-php-server`
+  — and therefore Laravel's broadcaster — sends on every call, so a correctly configured
+  app needs no change. `body_md5` pins a signature to its body, the timestamp window is
+  Pusher's ten minutes, and both comparisons are constant-time. Verified against the
+  worked example in Pusher's HTTP API documentation rather than a round trip, so the
+  test catches the string-to-sign being assembled wrong.
+
+  With no secret configured the trigger is still accepted, matching the subscription
+  side's documented development mode — and now logs a warning the first time it does,
+  because on the write side "development mode" means anyone can publish.
+
+  Also fixed alongside: the subscription signature was compared with
+  `eq_ignore_ascii_case`, which returns at the first differing byte. Both checks in
+  `pusher.rs` now go through one constant-time comparison.
+
+### Fixed
+
+- **A bearer-authenticated request was "anonymous" to the response cache.** Anonymity
+  was defined as "no cookie that isn't on the ignore list", so a `GET /api/me` with
+  `Authorization: Bearer …` and no cookies qualified. The app has to opt a response in
+  with `Askr-Cache` — but a `[[cache.rule]]` is the operator opting in on the app's
+  behalf, "cache policy for apps you can't edit", and a rule on `/api/*` cached one
+  user's response and served it to the next. `Authorization` and `Proxy-Authorization`
+  now count as identity, exactly as a session cookie does; Varnish passes them by
+  default for the same reason. A rule's `force` still overrides, as it did for cookies.
+
+- **`--record-errors` wrote credentials and bodies world-readable.** A 5xx on a login
+  form persisted the form body — the password — plus the session cookie and any bearer
+  token, with `std::fs::write` at umask mode, which under 022 is readable by every local
+  user. The directory is now created `0700`, each file `0600` with `O_EXCL|O_NOFOLLOW`
+  (an operator-named directory must not have its files planted by someone else), and
+  `Cookie`, `Authorization` and `Proxy-Authorization` are replaced with `[redacted]` in
+  the envelope before it is written — the key stays, so a replay knows the header was
+  there. The body is kept as sent, because it is what makes a replay a replay; that is
+  why the files are private and why the docs say the directory is sensitive. An
+  auth-dependent failure therefore replays unauthenticated. That is the trade.
+
+- **A WebSocket client could hold 64 MiB per message and unbounded subscriptions.**
+  `FragmentCollector` was left at fastwebsockets' default `max_message_size` — 64 MiB,
+  buffered per connection, for anyone who opened one — and the per-connection
+  subscription set had no bound, so a loop could hold millions of channel names as
+  `String`s for the life of the socket. Messages are capped at 64 KiB (Pusher frames are
+  a few hundred bytes), subscriptions at 256, channel names at Pusher's own 164.
+  The SSE bridge had the same gap on the subscribe side — `CHAN_MAX` bounded what could
+  be *published*, not what a subscriber could ask to hold — and now refuses a name over
+  it. And the `subscription_error` frame interpolated the client's channel name into a
+  JSON string with `format!`; it is built with `serde_json` now, so a quote in the name
+  is a quote and not a broken frame.
+
 ## 1.5.0 — 2026-08-31
 
 A release about failing safely. Three security fixes where the old behaviour was to warn

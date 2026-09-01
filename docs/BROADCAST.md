@@ -58,7 +58,7 @@ askr_broadcast(string $channel, string $payload): bool
 askr_broadcast('orders', json_encode(['id' => 42, 'status' => 'shipped']));
 ```
 
-Channels are arbitrary strings (≤ 64 bytes); payloads are ≤ ~3 KB. A publish from
+Channels are arbitrary strings (≤ 64 bytes, on publish and on subscribe); payloads are ≤ ~3 KB. A publish from
 any worker or sidecar reaches subscribers held by any worker.
 
 ## Subscribing (browser)

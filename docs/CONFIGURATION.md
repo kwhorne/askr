@@ -302,7 +302,7 @@ broadcast ring.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `dir` | path | Record failing (5xx) requests here for `askr replay`. Captures bodies — sensitive. |
+| `dir` | path | Record failing (5xx) requests here for `askr replay`. Captures bodies — sensitive; created `0700`, files `0600`, credentials redacted. |
 
 ### `[reload]`
 

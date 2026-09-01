@@ -673,14 +673,7 @@ where
     // cache despite cookies.
     let rule = cache_rule_for(req.uri().path(), &rt.config.cache_rules);
     let passed = rule.is_some_and(|r| r.is_pass());
-    let anonymous = req
-        .headers()
-        .get_all(hyper::header::COOKIE)
-        .iter()
-        .all(|v| {
-            v.to_str()
-                .is_ok_and(|c| cookies_ignorable(c, &rt.config.cache_ignore_cookies))
-        });
+    let anonymous = !carries_identity(&req, &rt.config.cache_ignore_cookies);
     let cacheable = rcache::enabled()
         && !passed
         && matches!(*req.method(), Method::GET | Method::HEAD)
@@ -899,6 +892,32 @@ where
         // calls server-side). Publish into the ring; the WS tailer fans it out.
         if rt.pusher_enabled && parts.method == Method::POST && pusher::is_trigger(parts.uri.path())
         {
+            // The write side of the Pusher surface. Subscriptions to private-/presence-
+            // channels are HMAC-checked; this used to publish into those same channels
+            // for anyone who could reach the port. With a secret configured the
+            // request must carry Pusher's own signature, which Laravel's broadcaster
+            // sends on every call. Without one it is accepted, as subscriptions are —
+            // and says so, because here "development mode" means anyone can publish.
+            match &config.pusher_secret {
+                Some(secret) => {
+                    if let Err(why) = pusher::verify_trigger(
+                        secret,
+                        parts.uri.path(),
+                        parts.uri.query(),
+                        &body_bytes,
+                        unix_secs(),
+                    ) {
+                        tracing::warn!(%peer, reason = %why, "pusher: trigger refused");
+                        let response = text(
+                            StatusCode::UNAUTHORIZED,
+                            &format!("askr: pusher trigger refused: {why}"),
+                        );
+                        finish(&rt, &response, t_start, 0);
+                        return Ok(response);
+                    }
+                }
+                None => pusher::warn_unauthenticated_trigger_once(),
+            }
             let out = pusher::trigger(&body_bytes);
             let response = Response::builder()
                 .status(StatusCode::OK)
@@ -1426,6 +1445,30 @@ fn cookie_value<B>(req: &Request<B>, name: &str) -> Option<String> {
         .filter_map(|c| c.split_once('='))
         .find(|(k, _)| k.trim() == name)
         .map(|(_, v)| v.trim().to_string())
+}
+
+/// Does this request identify a particular client?
+///
+/// A session cookie is the obvious case, and was the only one checked. A bearer token
+/// is the other: an API request with `Authorization: Bearer …` and no cookies read as
+/// anonymous, so with a `[[cache.rule]]` TTL on `/api/*` — "cache policy for apps you
+/// can't edit" — one user's response was cached and handed to the next. Varnish passes
+/// `Authorization` by default for exactly this reason; so does this now.
+/// `Proxy-Authorization` is included because a client that sends it is authenticating
+/// to *something*, and the safe reading of that is "not shared".
+///
+/// Cookies listed in `[cache] ignore_cookies` (analytics) do not count as identity.
+fn carries_identity<B>(req: &Request<B>, ignore_cookies: &[String]) -> bool {
+    let h = req.headers();
+    if h.contains_key(hyper::header::AUTHORIZATION)
+        || h.contains_key(hyper::header::PROXY_AUTHORIZATION)
+    {
+        return true;
+    }
+    h.get_all(hyper::header::COOKIE).iter().any(|v| {
+        !v.to_str()
+            .is_ok_and(|c| cookies_ignorable(c, ignore_cookies))
+    })
 }
 
 /// The first `[[cache.rule]]` whose glob matches this path, if any.
@@ -2246,6 +2289,12 @@ fn sse_response(query: Option<&str>, rt: &Runtime) -> Response<ResBody> {
              WebSocket path, which authenticates the subscription",
         );
     }
+    // The publish side refuses a channel name over CHAN_MAX; the subscribe side kept
+    // whatever it was given, as a HashMap key held for the life of the connection. A
+    // name nothing can ever publish to is only memory.
+    if channel.len() > crate::broadcast::CHAN_MAX {
+        return text(StatusCode::BAD_REQUEST, "askr: channel name too long");
+    }
 
     let rx = rt.sse.subscribe(channel);
     Response::builder()
@@ -2554,6 +2603,47 @@ fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bearer-authenticated API response is per-user as surely as a session-cookied
+    /// page is. It read as anonymous, so an operator `[[cache.rule]]` on `/api/*`
+    /// served one user's response to the next.
+    #[test]
+    fn a_bearer_token_is_identity_and_analytics_cookies_are_not() {
+        let req = |headers: &[(&str, &str)]| {
+            let mut b = hyper::Request::builder().uri("/api/me");
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            b.body(()).unwrap()
+        };
+        let ignore = vec!["_ga".to_string()];
+
+        assert!(
+            !carries_identity(&req(&[]), &ignore),
+            "no headers: anonymous"
+        );
+        assert!(
+            !carries_identity(&req(&[("cookie", "_ga=GA1.2.3")]), &ignore),
+            "an analytics cookie alone is not identity"
+        );
+        assert!(carries_identity(
+            &req(&[("cookie", "laravel_session=abc")]),
+            &ignore
+        ));
+        assert!(
+            carries_identity(&req(&[("authorization", "Bearer eyJ...")]), &ignore),
+            "the case that was missing"
+        );
+        assert!(carries_identity(
+            &req(&[("proxy-authorization", "Basic x")]),
+            &ignore
+        ));
+        // Analytics cookie plus a token: the token decides.
+        assert!(carries_identity(
+            &req(&[("cookie", "_ga=1"), ("authorization", "Bearer t")]),
+            &ignore
+        ));
+    }
 
     /// An http and an https render of the same URL used to share one cache entry, so
     /// a page holding absolute URLs could be served to the wrong scheme with the
