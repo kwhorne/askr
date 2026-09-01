@@ -91,11 +91,24 @@ pub fn build_request(
         .get(hyper::header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    let cookie = parts
-        .headers
-        .get(hyper::header::COOKIE)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
+    // Every Cookie field, not the first. HTTP/2 lets a client send one `cookie`
+    // field per cookie (RFC 9113 §8.2.3) — Chrome and Firefox do — and hyper hands
+    // them over as separate values; the server is required to join them with "; ".
+    // `.get()` took the first, so over h2 a browser sending `laravel_session` and
+    // `XSRF-TOKEN` as two fields reached PHP with one of them missing: a 419 on the
+    // form, or an anonymous request from a logged-in user, depending on which was
+    // first that time. Every test client in this repository speaks HTTP/1.1, which
+    // is how it stayed.
+    let cookie = {
+        let joined = parts
+            .headers
+            .get_all(hyper::header::COOKIE)
+            .iter()
+            .filter_map(|h| h.to_str().ok())
+            .collect::<Vec<_>>()
+            .join("; ");
+        (!joined.is_empty()).then_some(joined)
+    };
 
     let mut server_vars: Vec<(String, String)> = vec![
         ("REQUEST_METHOD".into(), method.clone()),
@@ -159,7 +172,19 @@ pub fn build_request(
         }
         if let Ok(v) = value.to_str() {
             let upper = key.to_ascii_uppercase().replace('-', "_");
-            server_vars.push((format!("HTTP_{upper}"), v.to_string()));
+            let name = format!("HTTP_{upper}");
+            // A repeated field is one value, joined: "; " for Cookie (RFC 9113
+            // §8.2.3), ", " for everything else (RFC 9110 §5.3). Pushing each
+            // occurrence separately produced duplicate keys, and the PHP array built
+            // from this list kept whichever came last.
+            if let Some(existing) = server_vars.iter_mut().find(|(k, _)| *k == name) {
+                existing
+                    .1
+                    .push_str(if name == "HTTP_COOKIE" { "; " } else { ", " });
+                existing.1.push_str(v);
+            } else {
+                server_vars.push((name, v.to_string()));
+            }
         }
     }
 
@@ -203,6 +228,49 @@ mod tests {
     /// underscored one. nginx ships `underscores_in_headers off` for this reason.
     /// `authority.split(':').next()` turned `[::1]:8080` into `"["`, and that landed
     /// in SERVER_NAME, the virtual-host routing key and the response-cache key.
+    /// HTTP/2 clients may send one `cookie` field per cookie, and browsers do. The
+    /// first-only read meant PHP saw one cookie of two — sessions and CSRF tokens lost
+    /// at random over the protocol browsers actually use.
+    #[test]
+    fn split_cookie_fields_are_joined_the_way_rfc_9113_requires() {
+        let parts = parts_with(&[
+            ("Cookie", "laravel_session=abc"),
+            ("Cookie", "XSRF-TOKEN=def"),
+            ("Accept", "text/html"),
+            ("Accept", "application/json"),
+        ]);
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000);
+        let req = build_request(
+            &parts,
+            Vec::new(),
+            Path::new("/srv"),
+            Path::new("/srv/index.php"),
+            "/index.php",
+            peer,
+            false,
+            80,
+        );
+        assert_eq!(
+            req.cookie.as_deref(),
+            Some("laravel_session=abc; XSRF-TOKEN=def"),
+            "both cookies, joined with a semicolon"
+        );
+        let var = |name: &str| -> Vec<&str> {
+            req.server_vars
+                .iter()
+                .filter(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+                .collect()
+        };
+        assert_eq!(
+            var("HTTP_COOKIE"),
+            vec!["laravel_session=abc; XSRF-TOKEN=def"],
+            "exactly one HTTP_COOKIE, holding both"
+        );
+        // Any other repeated field joins with a comma, per RFC 9110.
+        assert_eq!(var("HTTP_ACCEPT"), vec!["text/html, application/json"]);
+    }
+
     #[test]
     fn strips_the_port_without_shredding_an_ipv6_literal() {
         assert_eq!(host_without_port("example.com:8080"), "example.com");

@@ -33,6 +33,20 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Fixed
 
+- **Over HTTP/2, PHP saw one of the browser's cookies, not all of them.** RFC 9113
+  lets a client send one `cookie` field per cookie, and Chrome and Firefox do exactly
+  that. Hyper hands them over as separate values, and `cgi.rs` read the first
+  (`.get()`) for the request's cookie string while the `$_SERVER` loop pushed each as a
+  separate `HTTP_COOKIE` entry, of which the PHP array kept the last. A browser sending
+  `laravel_session` and `XSRF-TOKEN` as two fields reached Laravel with one of them
+  missing — a 419 on the form, or an anonymous request from a logged-in user, depending
+  on which field came first that time.
+
+  The cookie string is now every `Cookie` field joined with `"; "`, as the RFC requires
+  the server to do, and any other repeated field joins with `", "` per RFC 9110 §5.3.
+  It survived because, as the 1.4.7 entry already noted, every test client in this
+  repository speaks HTTP/1.1; the new test builds the two-field request directly.
+
 - **A bearer-authenticated request was "anonymous" to the response cache.** Anonymity
   was defined as "no cookie that isn't on the ignore list", so a `GET /api/me` with
   `Authorization: Bearer …` and no cookies qualified. The app has to opt a response in
