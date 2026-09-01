@@ -79,6 +79,17 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   JSON string with `format!`; it is built with `serde_json` now, so a quote in the name
   is a quote and not a broken frame.
 
+### Changed
+
+- **Every GitHub Action is pinned to a commit SHA.** Ten actions across five workflows
+  were referenced by major tag — `actions/checkout@v7`, `softprops/action-gh-release@v3`
+  and so on — and a tag can be moved. Since 1.5.0 the release job holds the signing key,
+  so an action whose tag was moved to malicious code would sign whatever it built with
+  the real key; that was the one supply-chain path signing did not cover. Each `uses:`
+  now names a SHA with the version in a trailing comment, and dependabot's
+  `github-actions` ecosystem is enabled so the pins move forward under review rather
+  than rot.
+
 ## 1.5.0 — 2026-08-31
 
 A release about failing safely. Three security fixes where the old behaviour was to warn

@@ -47,3 +47,17 @@ updates:
           - "*"
     commit-message:
       prefix: "ci"
+
+  # GitHub Actions are pinned to commit SHAs, not tags: the release job holds the
+  # signing key, so an action whose tag was moved would sign whatever it produced. A
+  # pin only stays honest if something moves it forward — that is this. Dependabot
+  # reads the `# vN` comment beside each SHA and proposes the new SHA when the tag
+  # advances.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

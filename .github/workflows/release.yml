@@ -32,12 +32,12 @@ jobs:
     steps:
       # For a tag push this is the tag; for manual dispatch it's the branch the
       # workflow was started from (so it always has the packaging script).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.ref }}
 
       # Uses the pinned toolchain from rust-toolchain.toml.
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
       - name: Install build dependencies
         run: |
@@ -119,12 +119,12 @@ jobs:
       # this workflow and commit, verifiable with `gh attestation verify`, while the
       # signature is what the binary itself checks with no network and no GitHub.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: dist/*.tar.gz
 
       - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |

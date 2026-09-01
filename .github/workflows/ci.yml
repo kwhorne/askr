@@ -21,8 +21,8 @@ jobs:
         # page that resolved the queue. Nothing tested any of these versions until then.
         laravel: ['11', '12', '13']
     steps:
-      - uses: actions/checkout@v7
-      - uses: shivammathur/setup-php@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: '8.4'
           coverage: none
@@ -48,23 +48,23 @@ jobs:
     name: docs links
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 scripts/check-docs.py
 
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Reads the pinned toolchain + components from rust-toolchain.toml and
       # caches the cargo registry/target keyed on the toolchain + Cargo.lock.
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
       # The slowest step is compiling PHP; cache the install keyed on the build
       # script (which pins the PHP version). Skip the build on a cache hit.
       - name: Cache libphp
         id: libphp
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: vendor/php-build/install
           key: libphp-minimal-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
@@ -104,11 +104,11 @@ jobs:
   libphp-laravel-profile:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Cache libphp (laravel)
         id: libphp
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: vendor/php-build/install
           key: libphp-laravel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
