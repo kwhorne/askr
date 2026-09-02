@@ -40,7 +40,13 @@ Typical allowlist for a Laravel app:
 ```
 
 Landlock degrades gracefully: on kernels without it (or an older ABI) the filter
-is best-effort and never prevents startup.
+is best-effort and never prevents startup — unless `sandbox_required` says otherwise.
+Askr asks for **ABI V6** (the newest the library knows; V2 added file re-parenting,
+V3 truncate, V4 network, V5 ioctl) and lets the kernel enforce as much of it as it
+has. `/api/status` shows `landlock_abi` as the ABI *requested*; a kernel older than
+that enforces a narrower ruleset and the worker logs a warning saying so. A kernel
+with no Landlock at all is reported as not applied — under best-effort compatibility
+the call succeeds while enforcing nothing, which used to look like success.
 
 ## Fail closed: `--sandbox-required`
 

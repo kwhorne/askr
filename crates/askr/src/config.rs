@@ -322,6 +322,11 @@ pub struct QueueSection {
     /// and the Redis-free AskrQueue driver.
     #[serde(default)]
     pub slots: usize,
+    /// Keep the ring in a named shared-memory object so pending jobs survive a
+    /// restart. The value names the ring; two instances on one host need two names.
+    /// Off by default: the object lives in /dev/shm, which a container caps at 64 MiB.
+    #[serde(default)]
+    pub persist: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -532,6 +537,7 @@ pub struct Resolved {
     pub queue_workers_max: usize,
     pub queue_script: Option<PathBuf>,
     pub queue_slots: usize,
+    pub queue_persist: Option<String>,
     pub scheduler_script: Option<PathBuf>,
     pub sidecars: Vec<String>,
     pub cache_slots: usize,
@@ -892,6 +898,7 @@ impl FileConfig {
             queue_workers_max,
             queue_script: self.queue.script,
             queue_slots: self.queue.slots,
+            queue_persist: self.queue.persist,
             scheduler_script: self.scheduler.script,
             sidecars: self.sidecar.into_iter().map(|s| s.command).collect(),
             cache_slots: self.cache.slots,

@@ -707,13 +707,18 @@ where
     // (the leader) runs PHP; the rest wait for it to populate the cache.
     let mut coalesce_leader = false;
     if let Some(key) = &cache_key {
-        if let Some(c) = rcache::get(key) {
+        if let Some((c, varied)) = resolve_cached(key, req.headers(), rcache::get) {
             // Stale-while-revalidate: serve the stale body now, and trigger one
             // background refresh (coalesced) so PHP runs off the request path.
+            //
+            // Not for a variant. The refresh rebuilds a synthetic request from the
+            // stored URL, and that request does not carry the headers that selected
+            // this variant — it would refresh the *wrong* one. A varied entry is served
+            // stale through its window and refreshed by the next real request instead.
             let state = if c.stale { "STALE" } else { "HIT" };
             #[cfg(feature = "otel")]
             let cache_state = state;
-            if c.stale {
+            if c.stale && !varied {
                 spawn_swr_refresh(&rt, key, &req, peer);
             }
             // ESI: the cached shell holds the tags — assemble the fragments now, so a
@@ -751,7 +756,7 @@ where
         // Saint mode: PHP failed recently — don't queue more work onto a dying
         // backend when the app told us this page may be served on error.
         if saint_active() {
-            if let Some(response) = stale_error_fallback(key) {
+            if let Some(response) = stale_error_fallback(key, req.headers()) {
                 tracing::warn!(
                     path = %req.uri().path(),
                     "saint mode: serving stale-if-error fallback without running PHP"
@@ -791,7 +796,9 @@ where
                         // Leader finished: read once (a HIT if it was cacheable).
                         // An entry alive only on its stale-if-error window is not
                         // servable here — the leader's response wasn't cacheable.
-                        served = rcache::peek(key).filter(|c| !c.error_only);
+                        served = resolve_cached(key, req.headers(), rcache::peek)
+                            .map(|(c, _)| c)
+                            .filter(|c| !c.error_only);
                         break;
                     }
                 }
@@ -995,6 +1002,7 @@ where
                     rt.config.cache_vary_user_agent,
                     rule.as_ref(),
                     &crate::ns::for_docroot(docroot),
+                    &parts.headers,
                 );
             }
             // Fire the shadow mirror off the request path: hash prod's body now,
@@ -1085,7 +1093,10 @@ where
     // place covers both paths, and the coalescing release below still runs.
     if response.status().as_u16() >= 500 {
         saint_mark(rt.config.cache_saint_seconds);
-        if let Some(fallback) = cache_key.as_ref().and_then(|k| stale_error_fallback(k)) {
+        if let Some(fallback) = cache_key
+            .as_ref()
+            .and_then(|k| stale_error_fallback(k, &parts.headers))
+        {
             // Record the *real* failure for `askr replay` first — the substituted
             // response won't trip the status check further down.
             if let (Some(dir), Some(req)) = (&config.record_dir, &record_copy) {
@@ -1626,6 +1637,7 @@ async fn esi_fragment(
                     config.cache_vary_user_agent,
                     cache_rule_for(src.split('?').next().unwrap_or(src), &config.cache_rules),
                     &crate::ns::for_docroot(docroot),
+                    &parts.headers,
                 );
             }
             Some(resp.body)
@@ -1760,8 +1772,8 @@ fn json_response(body: &str) -> Response<ResBody> {
 
 /// Serve a held entry as a **failure fallback** (`stale-if-error`): the origin
 /// returned 5xx or the handler errored, and stale content beats an error page.
-fn stale_error_fallback(key: &[u8]) -> Option<Response<ResBody>> {
-    let c = rcache::stale_on_error(key)?;
+fn stale_error_fallback(key: &[u8], headers: &hyper::HeaderMap) -> Option<Response<ResBody>> {
+    let (c, _) = resolve_cached(key, headers, rcache::stale_on_error)?;
     let mut resp = cached_response(c);
     resp.headers_mut().insert(
         hyper::header::HeaderName::from_static("x-askr-cache"),
@@ -1899,6 +1911,8 @@ fn maybe_store(
     vary_ua: bool,
     rule: Option<&crate::config::CacheRule>,
     namespace: &str,
+    // The request that produced `resp`, for the values of the headers it varies on.
+    request_headers: &hyper::HeaderMap,
 ) {
     if resp.status != 200 {
         return;
@@ -1928,10 +1942,18 @@ fn maybe_store(
     // `Vary: Accept-Language` had the first visitor's language cached and served to
     // everyone. Refusing to store those responses costs hit rate on exactly the
     // responses that were being served wrong.
-    if let Some(v) = header_value(&resp.headers, "vary") {
-        if !vary_is_covered_by_key(v, vary_ua) {
-            return;
-        }
+    // A `Vary` the key already covers needs nothing. `Vary: *` means "never the same
+    // twice" and is refused. Anything else is stored as a *variant*: an index under the
+    // primary key naming the headers, and the response itself under a key that carries
+    // this request's values for them. Until now such a response was simply not cached.
+    let app_vary: Option<String> = header_value(&resp.headers, "vary")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !vary_is_covered_by_key(v, vary_ua));
+    if app_vary
+        .as_deref()
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == "*"))
+    {
+        return;
     }
     // A body the app compressed itself. `storable_header` drops Content-Encoding,
     // and `compress::maybe` hands an already-compressed body back unchanged because
@@ -1982,6 +2004,9 @@ fn maybe_store(
     if vary_ua {
         vary.push("User-Agent");
     }
+    if let Some(names) = &app_vary {
+        vary.extend(names.split(',').map(str::trim).filter(|n| !n.is_empty()));
+    }
     if !vary.is_empty() {
         stored.push((hyper::header::VARY.to_string(), vary.join(", ")));
     }
@@ -2001,7 +2026,19 @@ fn maybe_store(
             k
         })
         .collect();
-    rcache::store(key, resp.status, &stored, &body, ttl, swr, sie, &tags);
+    match &app_vary {
+        None => {
+            rcache::store(key, resp.status, &stored, &body, ttl, swr, sie, &tags);
+        }
+        Some(names) => {
+            // Same lifetimes and tags for the index as for the entry, so it lives as
+            // long as any variant can and `forget_tag` takes it down with them.
+            let index_headers = [(VARY_INDEX_HEADER.to_string(), names.clone())];
+            rcache::store(key, 0, &index_headers, b"", ttl, swr, sie, &tags);
+            let sk = secondary_key(key, names, request_headers);
+            rcache::store(&sk, resp.status, &stored, &body, ttl, swr, sie, &tags);
+        }
+    }
 }
 
 /// Which scheme a request arrived on. Determined the same way the redirect engine
@@ -2018,6 +2055,84 @@ fn request_scheme<B>(req: &Request<B>, https: bool) -> &'static str {
     } else {
         "http"
     }
+}
+
+/// The header a *vary index* entry carries: the names the origin said its response
+/// varies on. An index is stored under the primary key with status 0 and is never
+/// served; it tells a lookup which request headers select the real entry.
+const VARY_INDEX_HEADER: &str = "askr-vary-index";
+
+fn is_vary_index(c: &rcache::Cached) -> bool {
+    c.status == 0 && header_value(&c.headers, VARY_INDEX_HEADER).is_some()
+}
+
+/// The request-side half of a `Vary`: this request's value for every named header,
+/// in sorted-name order, as a key suffix. A header the request lacks contributes an
+/// empty value, so "no Accept-Language" is its own variant rather than a wildcard.
+/// Repeated fields join with ", " — one value, per RFC 9110 §5.3.
+fn vary_suffix(names: &str, headers: &hyper::HeaderMap) -> Vec<u8> {
+    let mut list: Vec<String> = names
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    list.sort();
+    list.dedup();
+    let mut out = Vec::new();
+    for name in &list {
+        out.extend_from_slice(name.as_bytes());
+        out.push(b'=');
+        let joined = headers
+            .get_all(name.as_str())
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.extend_from_slice(joined.as_bytes());
+        out.push(crate::ns::SEP);
+    }
+    out
+}
+
+/// Where the variant of `primary` selected by this request's headers lives.
+///
+/// The primary key keeps its first three fields, so `PURGE`/`BAN` — which match on
+/// method, host and path — drop the index and every variant together.
+fn secondary_key(primary: &[u8], names: &str, headers: &hyper::HeaderMap) -> Vec<u8> {
+    let mut k = primary.to_vec();
+    k.extend_from_slice(b"\0vary\0");
+    k.extend_from_slice(&vary_suffix(names, headers));
+    k
+}
+
+/// Two-level lookup: the entry at `primary`, or — when that is a vary index — the
+/// variant this request's headers select. Returns whether a variant was involved,
+/// because a variant is not refreshed in the background (see the call site).
+///
+/// This is the design the cache refused to do until now. The primary key cannot be
+/// computed from the request alone once the response gets a say in it — the request
+/// does not know which of its headers matter until an earlier response has said so.
+/// The index is that earlier response speaking: it is written when a response with an
+/// uncovered `Vary` is stored, and read here before the request commits to a key.
+///
+/// `fetch` is `rcache::get`, `peek` or `stale_on_error`. With `get`, an index hit
+/// counts as a hit before the variant is looked up, so the hit ratio flatters varied
+/// pages slightly; a metric skew, chosen over a second read on every unvaried hit.
+fn resolve_cached(
+    primary: &[u8],
+    headers: &hyper::HeaderMap,
+    fetch: impl Fn(&[u8]) -> Option<rcache::Cached>,
+) -> Option<(rcache::Cached, bool)> {
+    let first = fetch(primary)?;
+    if !is_vary_index(&first) {
+        return Some((first, false));
+    }
+    let names = header_value(&first.headers, VARY_INDEX_HEADER)?.to_string();
+    let entry = fetch(&secondary_key(primary, &names, headers))?;
+    if is_vary_index(&entry) {
+        return None; // an index must never be served as a response
+    }
+    Some((entry, true))
 }
 
 /// Can the cache key represent every dimension this `Vary` names?
@@ -2191,6 +2306,7 @@ async fn refresh_entry(
             rt.config.cache_vary_user_agent,
             cache_rule_for(&uri_path, &rt.config.cache_rules),
             &crate::ns::for_docroot(docroot),
+            &parts.headers,
         );
     }
     rcache::end(&key);
@@ -2654,6 +2770,106 @@ mod tests {
         assert_eq!(mode, 0o640, "no read for other");
         drop(log);
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// The two-level lookup, over a fake store. The primary key alone cannot say which
+    /// variant a request wants; the index says which headers decide, and the request's
+    /// values for them select the entry.
+    #[test]
+    fn a_vary_index_routes_each_request_to_its_own_variant() {
+        use std::collections::HashMap;
+        let cached = |status: u16, headers: &[(&str, &str)], body: &str| rcache::Cached {
+            status,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: body.as_bytes().to_vec(),
+            stale: false,
+            error_only: false,
+        };
+        let req = |lang: Option<&str>| {
+            let mut b = hyper::Request::builder().uri("/");
+            if let Some(l) = lang {
+                b = b.header("accept-language", l);
+            }
+            b.body(()).unwrap()
+        };
+        let primary = b"GET\0site\0/\0id\0\0http".to_vec();
+
+        let mut store: HashMap<Vec<u8>, rcache::Cached> = HashMap::new();
+        store.insert(
+            primary.clone(),
+            cached(0, &[(VARY_INDEX_HEADER, "Accept-Language")], ""),
+        );
+        for lang in ["nb", "en"] {
+            let sk = secondary_key(&primary, "Accept-Language", req(Some(lang)).headers());
+            store.insert(sk, cached(200, &[("content-type", "text/html")], lang));
+        }
+        let fetch = |k: &[u8]| store.get(k).cloned();
+
+        let (nb, varied) = resolve_cached(&primary, req(Some("nb")).headers(), fetch).unwrap();
+        assert_eq!(nb.body, b"nb");
+        assert!(varied);
+        let (en, _) = resolve_cached(&primary, req(Some("en")).headers(), fetch).unwrap();
+        assert_eq!(en.body, b"en");
+        // A value nobody has rendered yet is a miss, not somebody else's page.
+        assert!(resolve_cached(&primary, req(Some("de")).headers(), fetch).is_none());
+        assert!(resolve_cached(&primary, req(None).headers(), fetch).is_none());
+
+        // An entry stored directly at the primary is returned as before.
+        let plain = b"GET\0site\0/plain\0id\0\0http".to_vec();
+        store.insert(plain.clone(), cached(200, &[], "plain"));
+        let fetch = |k: &[u8]| store.get(k).cloned();
+        let (p, varied) = resolve_cached(&plain, req(None).headers(), fetch).unwrap();
+        assert_eq!(p.body, b"plain");
+        assert!(!varied);
+    }
+
+    /// The suffix is what makes two requests the same variant or not: header names
+    /// are case-insensitive and order-insensitive, repeated fields are one value, and
+    /// a missing header is a variant in its own right.
+    #[test]
+    fn the_variant_suffix_is_canonical() {
+        let h = |pairs: &[(&str, &str)]| {
+            let mut m = hyper::HeaderMap::new();
+            for (k, v) in pairs {
+                m.append(
+                    hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    v.parse().unwrap(),
+                );
+            }
+            m
+        };
+        let a = vary_suffix(
+            "Accept-Language, X-Tenant",
+            &h(&[("accept-language", "nb"), ("x-tenant", "acme")]),
+        );
+        let b = vary_suffix(
+            "x-tenant,ACCEPT-LANGUAGE",
+            &h(&[("x-tenant", "acme"), ("accept-language", "nb")]),
+        );
+        assert_eq!(a, b, "name case and order do not make a new variant");
+        assert_ne!(
+            a,
+            vary_suffix(
+                "Accept-Language, X-Tenant",
+                &h(&[("accept-language", "en"), ("x-tenant", "acme")])
+            )
+        );
+        assert_ne!(
+            a,
+            vary_suffix("Accept-Language, X-Tenant", &h(&[("x-tenant", "acme")])),
+            "missing is its own variant"
+        );
+        assert_eq!(
+            vary_suffix(
+                "Accept-Language",
+                &h(&[("accept-language", "nb"), ("accept-language", "en")])
+            ),
+            vary_suffix("Accept-Language", &h(&[("accept-language", "nb, en")])),
+            "repeated fields are one value"
+        );
     }
 
     /// A bearer-authenticated API response is per-user as surely as a session-cookied

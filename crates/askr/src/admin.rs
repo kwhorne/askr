@@ -45,19 +45,20 @@ pub fn spawn(addr: SocketAddr, info: Info) {
     // The admin plane exposes PIDs/RSS/error records and a reload trigger. It has
     // no transport security of its own, so warn loudly if it's reachable off-box.
     if !addr.ip().is_loopback() {
-        if token.is_some() {
-            tracing::warn!(
-                %addr,
-                "admin plane bound to a non-loopback address (protected by ASKR_ADMIN_TOKEN)"
-            );
-        } else {
-            tracing::warn!(
-                %addr,
-                "admin plane bound to a non-loopback address WITHOUT ASKR_ADMIN_TOKEN — \
-                 /api/reload is unauthenticated and status/metrics/errors are exposed; \
-                 bind to loopback or set ASKR_ADMIN_TOKEN"
-            );
-        }
+        // Startup refuses a non-loopback bind without a token (main.rs), so reaching
+        // here off-box means a token is set. Say so — the bind is still a choice worth
+        // seeing in the log.
+        tracing::warn!(
+            %addr,
+            token = token.is_some(),
+            "admin plane bound to a non-loopback address; protected by ASKR_ADMIN_TOKEN"
+        );
+    } else if token.is_none() {
+        tracing::info!(
+            %addr,
+            "admin plane on loopback without ASKR_ADMIN_TOKEN: open to local processes, \
+             which is the documented model; set a token to require one anyway"
+        );
     }
     let token = Arc::new(token);
     thread::Builder::new()

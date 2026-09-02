@@ -54,11 +54,44 @@ fn request_with_body(
     extra: &[(&str, &str)],
     body: &str,
 ) -> Resp {
+    // 15 s is generous for a real response (cold PHP boot on a slow CI box); a
+    // genuine hang still fails, just not quickly.
+    request_timed(port, method, path, extra, body, Duration::from_secs(15))
+}
+
+/// A request that never panics: a connection refused, a read that times out, or a
+/// reply that goes away mid-read all return `status: 0` rather than unwinding.
+///
+/// This is the fix for the flake behind Askr-53, and the fragility the Askr-51 note
+/// named. Admin `/api/status` is polled *during* a rolling reload, when the master is
+/// briefly busy rolling a worker; the old client set a 15 s read timeout and then
+/// `unwrap()`ed the read, so a poll that caught the plane mid-stall cost 15 seconds
+/// and printed a panic (caught upstream, but real wall-time and real noise). Six
+/// polls in a row is the 90 s run the changelog measured. A caller that wants a stall
+/// to mean "not now, retry" passes a short timeout; one that wants a real answer
+/// passes a long one. Neither panics, so no exchange during a roll can be mistaken
+/// for a product failure.
+fn request_timed(
+    port: u16,
+    method: &str,
+    path: &str,
+    extra: &[(&str, &str)],
+    body: &str,
+    read_timeout: Duration,
+) -> Resp {
+    let dead = || Resp {
+        status: 0,
+        headers: Vec::new(),
+        body: String::new(),
+    };
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let mut sock = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .unwrap_or_else(|e| panic!("connect to {addr}: {e}"));
-    sock.set_read_timeout(Some(Duration::from_secs(15)))
-        .unwrap();
+    let Ok(sock) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) else {
+        return dead();
+    };
+    if sock.set_read_timeout(Some(read_timeout)).is_err() {
+        return dead();
+    }
+    let mut sock = sock;
 
     let host = extra
         .iter()
@@ -76,22 +109,27 @@ fn request_with_body(
     }
     req.push_str("\r\n");
     req.push_str(body);
-    sock.write_all(req.as_bytes()).unwrap();
+    if sock.write_all(req.as_bytes()).is_err() {
+        return dead();
+    }
 
     let mut reader = BufReader::new(sock);
     let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let status: u16 = line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| panic!("bad status line: {line:?}"));
+    // A timeout or a closed connection here is the "went away mid-read" case: status 0.
+    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+        return dead();
+    }
+    let Some(status) = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()) else {
+        return dead();
+    };
 
     let mut headers = Vec::new();
     loop {
         let mut h = String::new();
-        if reader.read_line(&mut h).unwrap() == 0 || h == "\r\n" || h == "\n" {
-            break;
+        match reader.read_line(&mut h) {
+            Ok(0) | Err(_) => break,
+            Ok(_) if h == "\r\n" || h == "\n" => break,
+            Ok(_) => {}
         }
         if let Some((k, v)) = h.split_once(':') {
             headers.push((k.trim().to_string(), v.trim().to_string()));
@@ -312,7 +350,17 @@ impl Server {
     }
 
     fn admin_status(&self) -> String {
-        request(self.admin, "GET", "/api/status", &[]).body
+        // A short read timeout: the admin plane answers in milliseconds, and this is
+        // called during a roll when a 15 s stall-then-retry is exactly the wrong thing.
+        request_timed(
+            self.admin,
+            "GET",
+            "/api/status",
+            &[],
+            "",
+            Duration::from_secs(2),
+        )
+        .body
     }
 
     /// Block until the admin plane accepts connections.
@@ -338,8 +386,21 @@ impl Server {
     }
 
     fn try_worker_pids(&self) -> Option<Vec<i32>> {
-        let admin = self.admin;
-        let body = std::panic::catch_unwind(move || get(admin, "/api/status").body).ok()?;
+        // Short timeout, and `status == 0` means the exchange didn't complete (refused
+        // or stalled mid-roll) — retry, don't wait 15 s and don't panic. The client is
+        // panic-free now, so the `catch_unwind` this used to need is gone.
+        let resp = request_timed(
+            self.admin,
+            "GET",
+            "/api/status",
+            &[],
+            "",
+            Duration::from_secs(2),
+        );
+        if resp.status == 0 {
+            return None;
+        }
+        let body = resp.body;
         let mut out = Vec::new();
         if let Some(rest) = body.split("\"pids\":[").nth(1) {
             if let Some(list) = rest.split(']').next() {
@@ -420,6 +481,79 @@ echo $uri . " " . bin2hex(random_bytes(4));
 "#;
 
 // --- tests ---------------------------------------------------------------
+
+/// A response that varies on a header the key does not cover used to be refused
+/// outright — `Vary: Accept-Language` cost hit rate instead of correctness. It is now
+/// stored as a variant per value, and a request gets its own language back, cached.
+#[test]
+fn a_response_varying_on_accept_language_is_cached_per_language() {
+    let app = r#"<?php
+header('Askr-Cache: 300');
+header('Vary: Accept-Language');
+echo 'lang=' . ($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? 'none') . ' ' . bin2hex(random_bytes(4));
+"#;
+    let s = Server::start(
+        "vary",
+        &[("index.php", app)],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+workers = "2"
+[cache]
+response_slots = 64
+"#,
+    );
+    let in_lang = |lang: &str| request(s.port, "GET", "/", &[("Accept-Language", lang)]);
+
+    let nb1 = in_lang("nb");
+    assert_eq!(nb1.status, 200);
+    assert_eq!(nb1.cache_state(), "MISS", "first Norwegian render runs PHP");
+    assert!(nb1.body.starts_with("lang=nb "), "{}", nb1.body);
+    assert!(
+        nb1.header("vary")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("accept-language")),
+        "the client is told what the response varies on: {:?}",
+        nb1.header("vary")
+    );
+
+    let nb2 = in_lang("nb");
+    assert_eq!(nb2.cache_state(), "HIT", "the same language is a hit");
+    assert_eq!(nb2.body, nb1.body, "the stored Norwegian bytes, verbatim");
+
+    let en1 = in_lang("en");
+    assert_eq!(
+        en1.cache_state(),
+        "MISS",
+        "a language nobody rendered is not the Norwegian page"
+    );
+    assert!(en1.body.starts_with("lang=en "), "{}", en1.body);
+    assert_ne!(en1.body, nb1.body);
+
+    let en2 = in_lang("en");
+    assert_eq!(en2.cache_state(), "HIT");
+    assert_eq!(en2.body, en1.body);
+
+    // Storing English did not evict Norwegian: both variants live under one primary key.
+    let nb3 = in_lang("nb");
+    assert_eq!(nb3.cache_state(), "HIT");
+    assert_eq!(nb3.body, nb1.body);
+
+    // A request with no Accept-Language is its own variant, not a wildcard onto nb/en.
+    // (The harness readiness probe already rendered `/` with no language, so this variant
+    // is warm — which is itself the point: it is a *distinct* stored page.)
+    let none = get(s.port, "/");
+    assert!(
+        none.body.starts_with("lang=none "),
+        "its own page: {}",
+        none.body
+    );
+    assert_ne!(none.body, nb1.body);
+    assert_ne!(none.body, en1.body);
+    let none2 = get(s.port, "/");
+    assert_eq!(none2.cache_state(), "HIT");
+    assert_eq!(none2.body, none.body, "and stable across requests");
+}
 
 #[test]
 fn serves_php_and_caches_responses() {

@@ -566,6 +566,7 @@ fn main() -> anyhow::Result<()> {
                 WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
                 WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
                 QUEUE_CAP.store(r.queue_slots, Ordering::SeqCst);
+                squeue::set_persist_name(r.queue_persist.clone());
                 let sc = Sidecars {
                     queue: r.queue_workers,
                     queue_max: r.queue_workers_max.max(r.queue_workers),
@@ -746,7 +747,7 @@ fn main() -> anyhow::Result<()> {
             // The L2 (SQL Anywhere) queue needs no shared-memory ring; it opens a
             // per-process database connection when the bridge is registered.
             if queue_slots > 0 && !queue::l2_enabled() {
-                squeue::init(queue_slots);
+                squeue::init_configured(queue_slots);
             }
 
             if paranoid {
@@ -831,6 +832,26 @@ fn main() -> anyhow::Result<()> {
             // but as a crash-loop across the whole fleet — one clear error before
             // anything forks is a better way to learn you asked for a sandbox that
             // cannot be one.
+            // The admin plane may run open on loopback — that is the documented model,
+            // and every deployment relying on it keeps working. It may not run open on
+            // a network. Bound off-box with no token, /api/reload is a public reload
+            // trigger and /api/status a public dump of PIDs and memory; this used to be
+            // a startup warning, which is to say it used to be allowed. Refused before
+            // anything binds, with the two ways out named.
+            if let Some(addr) = admin_listen {
+                let token = std::env::var("ASKR_ADMIN_TOKEN")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                if !addr.ip().is_loopback() && token.is_none() {
+                    anyhow::bail!(
+                        "--admin {addr} is not a loopback address and ASKR_ADMIN_TOKEN is not \
+                         set. An open admin plane on a network is a public reload trigger. \
+                         Set ASKR_ADMIN_TOKEN, or bind the admin plane to 127.0.0.1 and reach \
+                         it over SSH."
+                    );
+                }
+            }
+
             if config.sandbox_required && config.sandbox_write.is_empty() {
                 anyhow::bail!(
                     "--sandbox-required needs at least one --sandbox-write path (or \

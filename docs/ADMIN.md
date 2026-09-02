@@ -20,8 +20,10 @@ listen = "127.0.0.1:9000"
 Then open <http://127.0.0.1:9000/>.
 
 > **Bind to localhost** (the examples do) and reach it over an SSH tunnel or a
-> private network. If you bind it to a non-loopback address, Askr logs a warning
-> at startup.
+> private network. Binding to a non-loopback address **requires `ASKR_ADMIN_TOKEN`**
+> — Askr refuses to start without it (1.5.1). An open admin plane on a network is a
+> public reload trigger; on loopback it is reachable only by local processes, which is
+> the documented model and still allowed.
 >
 > **`ASKR_ADMIN_TOKEN`** — set this to require `Authorization: Bearer <token>` on the
 > reload trigger (`POST /api/reload`) and the data endpoints (`/api/status`,

@@ -349,6 +349,7 @@ impl Drop for Slot {
 }
 
 /// A cached response.
+#[derive(Clone)]
 pub struct Cached {
     pub status: u16,
     pub headers: Vec<(String, String)>,

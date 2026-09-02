@@ -54,12 +54,76 @@ const QUEUE_NAME_MAX: usize = 96;
 
 #[repr(C)]
 struct Ring {
+    /// [`MAGIC`] once the header below is complete. Written last, so a mapping that
+    /// died mid-creation is recognised as garbage rather than trusted.
+    magic: AtomicU64,
+    /// Bumped whenever `Job`'s layout changes. A mapping from another version is not
+    /// migrated — it is unlinked and recreated, and the log says so.
+    version: u32,
+    slots: u32,
+    slot_size: u32,
+    payload_max: u32,
+    name_max: u32,
+    _pad0: u32,
     next_id: AtomicU64,
     /// Global, so a lease is never reused by another slot while a stale holder
     /// could still present it.
     next_lease: AtomicU64,
-    _pad: [u64; 6],
+    _pad: [u64; 2],
     // slots follow, laid out contiguously after the header via the mapping.
+}
+
+/// "ASKRQUE1" — the header is complete and this is a queue ring.
+const MAGIC: u64 = 0x4153_4b52_5155_4531;
+/// The `Job`/`Ring` layout this binary understands.
+const LAYOUT_VERSION: u32 = 1;
+
+/// Is the ring a named mapping that outlives this process tree?
+static PERSISTENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Was the ring re-attached from a previous run rather than created fresh?
+pub fn persistent() -> bool {
+    PERSISTENT.load(Ordering::Relaxed)
+}
+
+/// `[queue] persist`, parked here between config resolution and `init`, which runs
+/// later and after the resolved config has been consumed.
+static PERSIST_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_persist_name(name: Option<String>) {
+    if let Ok(mut n) = PERSIST_NAME.lock() {
+        *n = name;
+    }
+}
+
+/// Map the ring the way the configuration asked: named when `[queue] persist` is set,
+/// anonymous otherwise.
+pub fn init_configured(slots: usize) {
+    let name = PERSIST_NAME.lock().ok().and_then(|n| n.clone());
+    match name {
+        Some(n) => init_persistent(slots, &n),
+        None => init(slots),
+    }
+}
+
+/// Unmap and forget the ring so a test can map another. Not for production: the
+/// pointer is read lock-free everywhere, and nothing waits for readers here.
+#[cfg(test)]
+pub(crate) fn reset_for_tests() {
+    let p = NEXT_ID.swap(ptr::null_mut(), Ordering::SeqCst);
+    let slots = QUEUE_SLOTS.swap(0, Ordering::SeqCst);
+    QUEUE_PTR.store(ptr::null_mut(), Ordering::SeqCst);
+    PERSISTENT.store(false, Ordering::Relaxed);
+    if !p.is_null() {
+        unsafe { libc::munmap(p as *mut libc::c_void, ring_bytes(slots.max(16))) };
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn unlink_for_tests(name: &str) {
+    if let Ok(c) = std::ffi::CString::new(shm_name(name)) {
+        unsafe { libc::shm_unlink(c.as_ptr()) };
+    }
 }
 
 static QUEUE_PTR: AtomicPtr<Job> = AtomicPtr::new(ptr::null_mut());
@@ -80,14 +144,13 @@ fn hash_q(q: &[u8]) -> u64 {
 }
 
 /// Map the queue table with `slots` job slots. Call in the master before fork.
+/// Map an anonymous ring: shared across the process tree, gone on restart.
 pub fn init(slots: usize) {
     if !QUEUE_PTR.load(Ordering::SeqCst).is_null() {
         return;
     }
     let slots = slots.max(16);
-    // A small header (Ring) for the shared id counter + the job slots.
-    let header = std::mem::size_of::<Ring>();
-    let size = header + slots * std::mem::size_of::<Job>();
+    let size = ring_bytes(slots);
     // SAFETY: anonymous shared mapping; zeroed pages are valid (all slots free,
     // next_id = 0).
     let p = unsafe {
@@ -104,11 +167,257 @@ pub fn init(slots: usize) {
         tracing::warn!("queue: mmap failed; disabled");
         return;
     }
-    let jobs = unsafe { (p as *mut u8).add(header) } as *mut Job;
+    // SAFETY: fresh zeroed mapping of `size` bytes.
+    unsafe { write_header(p as *mut Ring, slots) };
+    publish(p, slots);
+    tracing::info!(slots, mib = size / 1024 / 1024, "job queue mapped");
+}
+
+/// Map a **named** ring that outlives this process tree, so pending jobs survive a
+/// restart — `askr upgrade` included.
+///
+/// The known issue this closes said real persistence meant a named mapping with a
+/// `{magic, version, geometry}` header, and that adding the header alone would freeze
+/// a layout whose migration had not been designed. The migration design is: there is
+/// none. A mapping whose header does not match this binary — different version,
+/// different slot count, different slot size — is unlinked and recreated, and the log
+/// names what did not match. Jobs in a mismatched ring are lost exactly as they were
+/// lost on every restart before; the difference is that a matching ring keeps them.
+///
+/// Opt-in, because the mapping lives in `/dev/shm`, and a container's default
+/// `/dev/shm` is 64 MiB — smaller than a ring of a few thousand 33 KB slots. Where it
+/// cannot be created, this falls back to the anonymous ring and says so; the queue
+/// keeps working either way.
+///
+/// `name` is the operator's; the object is `/askr.q.<hash>` so it fits every
+/// platform's limit on POSIX shm names.
+pub fn init_persistent(slots: usize, name: &str) {
+    if !QUEUE_PTR.load(Ordering::SeqCst).is_null() {
+        return;
+    }
+    let slots = slots.max(16);
+    let size = ring_bytes(slots);
+    let object = shm_name(name);
+    match map_named(&object, size, slots, true) {
+        Ok((p, survived)) => {
+            PERSISTENT.store(true, Ordering::Relaxed);
+            publish(p, slots);
+            if survived > 0 {
+                tracing::info!(
+                    slots,
+                    mib = size / 1024 / 1024,
+                    object,
+                    jobs = survived,
+                    "job queue re-attached: jobs survived the restart"
+                );
+            } else {
+                tracing::info!(
+                    slots,
+                    mib = size / 1024 / 1024,
+                    object,
+                    "job queue created (persistent)"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                object,
+                "queue: could not map a persistent ring — falling back to an anonymous \
+                 one. Jobs will NOT survive a restart. In a container, raise --shm-size."
+            );
+            init(slots);
+        }
+    }
+}
+
+fn ring_bytes(slots: usize) -> usize {
+    std::mem::size_of::<Ring>() + slots * std::mem::size_of::<Job>()
+}
+
+/// `/askr.q.` plus sixteen hex digits: 24 bytes, under macOS's 31-byte limit.
+fn shm_name(name: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    format!("/askr.q.{:016x}", h.finish())
+}
+
+fn publish(p: *mut libc::c_void, slots: usize) {
+    let jobs = unsafe { (p as *mut u8).add(std::mem::size_of::<Ring>()) } as *mut Job;
     NEXT_ID.store(p as *mut Ring, Ordering::SeqCst);
     QUEUE_SLOTS.store(slots, Ordering::SeqCst);
     QUEUE_PTR.store(jobs, Ordering::SeqCst);
-    tracing::info!(slots, mib = size / 1024 / 1024, "job queue mapped");
+}
+
+/// Fill in a fresh ring's header. `magic` goes last, after a fence, so a creator that
+/// dies between the geometry fields and the marker leaves a ring nobody trusts.
+///
+/// # Safety
+/// `ring` points at a writable mapping of at least `ring_bytes(slots)` zeroed bytes.
+unsafe fn write_header(ring: *mut Ring, slots: usize) {
+    ptr::write(ptr::addr_of_mut!((*ring).version), LAYOUT_VERSION);
+    ptr::write(ptr::addr_of_mut!((*ring).slots), slots as u32);
+    ptr::write(
+        ptr::addr_of_mut!((*ring).slot_size),
+        std::mem::size_of::<Job>() as u32,
+    );
+    ptr::write(ptr::addr_of_mut!((*ring).payload_max), PAYLOAD_MAX as u32);
+    ptr::write(ptr::addr_of_mut!((*ring).name_max), QUEUE_NAME_MAX as u32);
+    std::sync::atomic::fence(Ordering::Release);
+    (*ring).magic.store(MAGIC, Ordering::Release);
+}
+
+/// What an existing header would have to say to be ours.
+///
+/// # Safety
+/// `ring` points at a readable mapping at least `size_of::<Ring>()` long.
+unsafe fn header_mismatch(ring: *const Ring, slots: usize) -> Option<String> {
+    let magic = (*ring).magic.load(Ordering::Acquire);
+    if magic != MAGIC {
+        return Some(format!(
+            "magic {magic:#x} (expected {MAGIC:#x}) — not a ring, or one that died mid-creation"
+        ));
+    }
+    let checks = [
+        (
+            "version",
+            ptr::read(ptr::addr_of!((*ring).version)),
+            LAYOUT_VERSION,
+        ),
+        (
+            "slots",
+            ptr::read(ptr::addr_of!((*ring).slots)),
+            slots as u32,
+        ),
+        (
+            "slot_size",
+            ptr::read(ptr::addr_of!((*ring).slot_size)),
+            std::mem::size_of::<Job>() as u32,
+        ),
+        (
+            "payload_max",
+            ptr::read(ptr::addr_of!((*ring).payload_max)),
+            PAYLOAD_MAX as u32,
+        ),
+        (
+            "name_max",
+            ptr::read(ptr::addr_of!((*ring).name_max)),
+            QUEUE_NAME_MAX as u32,
+        ),
+    ];
+    checks
+        .iter()
+        .find(|(_, got, want)| got != want)
+        .map(|(what, got, want)| format!("{what} {got} (expected {want})"))
+}
+
+/// Open or create the named object, validate or (re)create its header, and map it.
+/// Returns the mapping and how many jobs were found in it. `retry` allows one
+/// unlink-and-recreate when an existing object does not match.
+fn map_named(
+    object: &str,
+    size: usize,
+    slots: usize,
+    retry: bool,
+) -> Result<(*mut libc::c_void, usize), String> {
+    let cname = std::ffi::CString::new(object).map_err(|e| e.to_string())?;
+    // O_EXCL to learn whether *we* created the object, rather than measuring its size:
+    // a POSIX shm object's `fstat` size is reliable on Linux but not on macOS (it can
+    // report zero after ftruncate, and ftruncate may run only once), so "did it already
+    // exist" is the portable question. EEXIST → open it plainly and read the header.
+    // SAFETY: plain libc calls with a valid NUL-terminated name.
+    let mut fresh = true;
+    let mut fd = unsafe {
+        libc::shm_open(
+            cname.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            fresh = false;
+            fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
+        }
+        if fd < 0 {
+            return Err(format!("shm_open: {err}"));
+        }
+    }
+    if fresh {
+        // A newly created object has size 0; size it once, now.
+        if unsafe { libc::ftruncate(fd, size as libc::off_t) } != 0 {
+            let e = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+                libc::shm_unlink(cname.as_ptr());
+            }
+            return Err(format!("ftruncate to {size} bytes: {e}"));
+        }
+    }
+    let p = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    unsafe { libc::close(fd) }; // the mapping keeps the object alive
+    if p == libc::MAP_FAILED {
+        // A pre-existing object too small to map at `size` fails here; recreate it.
+        if !fresh {
+            return recreate(
+                object,
+                size,
+                slots,
+                retry,
+                "existing object too small".into(),
+            );
+        }
+        return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+    }
+    let ring = p as *mut Ring;
+    if fresh {
+        unsafe { write_header(ring, slots) };
+        return Ok((p, 0));
+    }
+    if let Some(why) = unsafe { header_mismatch(ring, slots) } {
+        unsafe { libc::munmap(p, size) };
+        return recreate(object, size, slots, retry, why);
+    }
+    // Ours. Count what survived, for the log.
+    let jobs = unsafe { (p as *mut u8).add(std::mem::size_of::<Ring>()) } as *mut Job;
+    let survived = (0..slots)
+        .filter(|&i| unsafe { r_u64(ptr::addr_of!((*jobs.add(i)).id)) } != 0)
+        .count();
+    Ok((p, survived))
+}
+
+fn recreate(
+    object: &str,
+    size: usize,
+    slots: usize,
+    retry: bool,
+    why: String,
+) -> Result<(*mut libc::c_void, usize), String> {
+    if !retry {
+        return Err(format!(
+            "existing ring does not match and recreation failed: {why}"
+        ));
+    }
+    tracing::warn!(
+        object,
+        mismatch = %why,
+        "queue: an existing persistent ring does not match this binary; recreating it. \
+         Any jobs it held are lost — as they were on every restart before persistence."
+    );
+    let cname = std::ffi::CString::new(object).map_err(|e| e.to_string())?;
+    unsafe { libc::shm_unlink(cname.as_ptr()) };
+    map_named(object, size, slots, false)
 }
 
 pub fn enabled() -> bool {
@@ -818,6 +1127,55 @@ mod tests {
         assert!(delete(second.id));
         assert!(pop(b"lease", 60).is_none(), "and it is gone");
         assert!(!delete(second.id), "a lease is single-use");
+    }
+
+    /// The known issue this closes: the ring was an anonymous mapping and a restart
+    /// emptied it. A named ring is re-attached with its jobs — when its header says it
+    /// is ours — and recreated, loudly, when it does not.
+    #[test]
+    fn a_persistent_ring_survives_a_remap_and_a_mismatch_is_recreated() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::ns::set("");
+        let name = format!("askr-test-{}", std::process::id());
+        unlink_for_tests(&name);
+
+        // First life: create, push, "die".
+        reset_for_tests();
+        init_persistent(32, &name);
+        assert!(persistent(), "a fresh named ring is persistent");
+        assert!(push(b"durable", b"survive me", 0) > 0);
+        assert_eq!(size(b"durable"), 1);
+        reset_for_tests();
+
+        // Second life, same geometry: the job is still there.
+        init_persistent(32, &name);
+        assert!(persistent());
+        assert_eq!(size(b"durable"), 1, "the job survived the remap");
+        let got = pop(b"durable", 30).expect("and can be popped");
+        assert_eq!(got.payload, b"survive me");
+        assert!(delete(got.id));
+        reset_for_tests();
+
+        // Third life, different slot count: the header no longer matches, so the ring
+        // is recreated rather than misread — and the geometry the new header records is
+        // the new one.
+        init_persistent(64, &name);
+        assert!(persistent());
+        assert_eq!(size(b"durable"), 0, "a recreated ring is empty");
+        assert!(push(b"durable", b"new life", 0) > 0);
+        reset_for_tests();
+        init_persistent(64, &name);
+        assert_eq!(
+            size(b"durable"),
+            1,
+            "and it persists again under the new geometry"
+        );
+
+        // Leave the process on an anonymous ring for the other tests, and clean up.
+        reset_for_tests();
+        unlink_for_tests(&name);
+        init(64);
+        assert!(!persistent());
     }
 
     /// Two applications, one ring. A could pop B's jobs — and run B's job classes

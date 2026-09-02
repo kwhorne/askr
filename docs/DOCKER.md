@@ -189,6 +189,20 @@ the CPU limit (`cpu.max`) rather than the host's core count, so `cpus: 2` forks 
 workers, not 64. You can still pin it explicitly with `--workers N`, which is
 recommended in production for predictability.
 
+### Shared memory size
+
+`[queue] persist` keeps the job ring in `/dev/shm`, and Docker's default `/dev/shm` is
+**64 MiB**. A ring is roughly 33 KB per slot, so 2 000 slots need ~66 MiB and will not
+fit. Raise it, or persistence falls back to an anonymous ring (with a warning) and jobs
+are lost on restart exactly as before:
+
+```bash
+docker run --shm-size=256m …
+# compose:  shm_size: 256m
+```
+
+Without `persist`, the ring is anonymous shared memory and this limit does not apply.
+
 ### Read-only filesystem
 
 Run `read_only: true` and give Askr exactly what it needs to write:

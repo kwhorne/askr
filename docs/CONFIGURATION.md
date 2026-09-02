@@ -131,6 +131,7 @@ Run queue workers in the same binary, supervised alongside the web workers.
 | `workers_max` | int | Autoscaling ceiling. When `> workers`, the pool scales on backlog (Horizon `balance=auto`, no extra daemon). Defaults to `workers`. |
 | `script` | path | Queue runner script (e.g. `examples/askr-queue.php`). |
 | `slots` | int | Shared-memory job queue slots (`0` = off; 32 KB each) — `askr_queue_*` + the `AskrQueue` driver. See [Cache](CACHE.md). |
+| `persist` | string | Name a shared-memory object for the ring so pending jobs **survive a restart** (1.5.1). Off by default: the object lives in `/dev/shm`, which containers cap at 64 MiB — see [Docker](DOCKER.md#shared-memory-size). A ring whose layout no longer matches the binary is recreated, empty, with a log line saying why. |
 
 **`slots` is required when `workers` is set**, and Askr refuses to start without it. The
 ring is only mapped when slots are configured; without it every push returns 0, Laravel does

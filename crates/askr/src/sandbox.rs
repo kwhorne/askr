@@ -36,8 +36,14 @@ pub struct SandboxConfig {
 pub struct Report {
     /// The seccomp filter is installed on every thread.
     pub seccomp: bool,
-    /// The Landlock ABI actually in force, if the filesystem was restricted.
+    /// The Landlock ABI the restriction was built for, if the filesystem is
+    /// restricted at all. `None` when the kernel enforced nothing — which, under
+    /// best-effort compatibility, `restrict_self` reports as success.
     pub landlock_abi: Option<u8>,
+    /// The kernel enforced some but not all of the requested access rights: an
+    /// older Landlock than [`LANDLOCK_ABI`] asks for. Still a restriction, just a
+    /// narrower one, and worth knowing about.
+    pub landlock_partial: bool,
 }
 
 /// What `report` fails to deliver against `cfg` — `None` when the sandbox is whole.
@@ -118,15 +124,27 @@ pub fn apply(cfg: &SandboxConfig) -> Report {
     // so we only restrict the filesystem when the operator lists writable dirs.
     if !cfg.write_paths.is_empty() {
         match landlock_restrict(cfg) {
-            Ok(status) => {
+            Ok(Enforced::Fully) => {
                 report.landlock_abi = Some(LANDLOCK_ABI);
                 tracing::info!(
-                    status,
                     abi = LANDLOCK_ABI,
                     writable = cfg.write_paths.len(),
                     "landlock: filesystem restricted"
                 )
             }
+            Ok(Enforced::Partially) => {
+                report.landlock_abi = Some(LANDLOCK_ABI);
+                report.landlock_partial = true;
+                tracing::warn!(
+                    requested_abi = LANDLOCK_ABI,
+                    writable = cfg.write_paths.len(),
+                    "landlock: filesystem restricted, but the kernel is older than the \
+                     requested ABI and enforced only part of it"
+                )
+            }
+            // Best-effort compatibility turns "this kernel has no Landlock" into a
+            // successful call that restricts nothing. That is not applied.
+            Ok(Enforced::Not) => tracing::warn!("landlock: kernel has no Landlock; not applied"),
             Err(e) => tracing::warn!(error = %e, "landlock: not applied"),
         }
     }
@@ -146,26 +164,41 @@ pub fn apply(_cfg: &SandboxConfig) -> Report {
     Report::default()
 }
 
-/// The Landlock ABI this build asks for. See the note in `landlock_restrict`.
+/// The Landlock ABI this build asks for: the newest the crate knows.
+///
+/// Not probed from the kernel at runtime, and deliberately so — the crate keeps that
+/// probe private, because asking for `from_all(<whatever this kernel has>)` would make
+/// the restriction differ between machines. Asking for a fixed, newest ABI with
+/// best-effort compatibility does the opposite: the same request everywhere, enforced
+/// as fully as each kernel can, and the gap reported. V6 adds nothing to filesystem
+/// rights over V5 (ioctl), V4 (network), V3 (truncate), V2 (re-parenting) — all of
+/// which were missing while this was pinned to V1.
 #[cfg(target_os = "linux")]
-const LANDLOCK_ABI: u8 = 1;
+const LANDLOCK_ABI: u8 = 6;
+
+/// How much of the requested ruleset the kernel took.
+#[cfg(target_os = "linux")]
+enum Enforced {
+    Fully,
+    Partially,
+    Not,
+}
 
 /// Restrict the filesystem: read+execute everywhere (so PHP, its extensions and
 /// the app keep working), but write only under `write_paths`.
 #[cfg(target_os = "linux")]
-fn landlock_restrict(cfg: &SandboxConfig) -> anyhow::Result<String> {
+fn landlock_restrict(cfg: &SandboxConfig) -> anyhow::Result<Enforced> {
     use landlock::{
-        Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
+        Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+        RulesetCreatedAttr, RulesetStatus, ABI,
     };
 
-    let abi = ABI::V1;
-    // Still pinned. Negotiating the newest ABI the running kernel supports is the
-    // remaining half of this (V2 adds file re-parenting, V3 truncate, V4 network,
-    // V5 ioctl), and it is not done here because this file cannot be compiled on the
-    // machine it was written on — landlock is a Linux-only dependency, and the C shim
-    // needs a Linux cc to cross-check. Guessing at a crate API in a security path is
-    // how you ship a build break; it wants a Linux build in the loop.
+    let abi = ABI::V6;
+    // Explicit, not defaulted: the caller reads `RulesetStatus` to tell "enforced"
+    // from "the kernel has no Landlock and the call succeeded anyway", and that only
+    // means something if best-effort is what was asked for.
     let mut ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))?
         .create()?;
 
@@ -183,7 +216,11 @@ fn landlock_restrict(cfg: &SandboxConfig) -> anyhow::Result<String> {
     }
 
     let status = ruleset.restrict_self()?;
-    Ok(format!("{:?}", status.ruleset))
+    Ok(match status.ruleset {
+        RulesetStatus::FullyEnforced => Enforced::Fully,
+        RulesetStatus::PartiallyEnforced => Enforced::Partially,
+        RulesetStatus::NotEnforced => Enforced::Not,
+    })
 }
 
 /// Block process creation and debugging syscalls (return EPERM so PHP's exec()
@@ -242,11 +279,25 @@ mod tests {
                 &full,
                 &Report {
                     seccomp: true,
-                    landlock_abi: Some(1)
+                    landlock_abi: Some(6),
+                    landlock_partial: false,
                 }
             ),
             None,
             "both halves applied is the only whole sandbox"
+        );
+        // An older kernel enforcing part of the requested ruleset is still a
+        // filesystem restriction — narrower, reported, not a shortfall.
+        assert_eq!(
+            shortfall(
+                &full,
+                &Report {
+                    seccomp: true,
+                    landlock_abi: Some(6),
+                    landlock_partial: true,
+                }
+            ),
+            None
         );
 
         // Seccomp alone is the case the old code reported as a success.
@@ -255,6 +306,7 @@ mod tests {
             &Report {
                 seccomp: true,
                 landlock_abi: None,
+                landlock_partial: false,
             },
         )
         .expect("landlock missing must be a shortfall");
@@ -265,6 +317,7 @@ mod tests {
             &Report {
                 seccomp: false,
                 landlock_abi: Some(1),
+                landlock_partial: false,
             },
         )
         .expect("seccomp missing must be a shortfall");
@@ -281,6 +334,7 @@ mod tests {
             &Report {
                 seccomp: true,
                 landlock_abi: None,
+                landlock_partial: false,
             },
         )
         .expect("a required sandbox with no write paths is not a sandbox");

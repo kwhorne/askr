@@ -845,13 +845,21 @@ pub(crate) fn supervise(
     // the region is quiescent and the count is exact.
     let (_, pending, _) = crate::squeue::stats();
     if pending > 0 {
-        tracing::error!(
-            pending,
-            "shutting down with jobs still in the shared-memory queue — they do NOT \
-             survive a restart and are being lost now. Drain the queue before stopping \
-             or upgrading (docs/MAINTENANCE.md), or run the durable L2 backend \
-             (ASKR_QUEUE_DB)."
-        );
+        if crate::squeue::persistent() {
+            tracing::info!(
+                pending,
+                "shutting down with jobs in the persistent queue ring; they will be \
+                 served after the restart"
+            );
+        } else {
+            tracing::error!(
+                pending,
+                "shutting down with jobs still in the shared-memory queue — they do NOT \
+                 survive a restart and are being lost now. Drain the queue before stopping \
+                 or upgrading (docs/MAINTENANCE.md), set [queue] persist, or run the \
+                 durable L2 backend (ASKR_QUEUE_DB)."
+            );
+        }
     }
 
     // Persist the response cache now that every worker is reaped: the region is

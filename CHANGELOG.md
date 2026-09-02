@@ -33,6 +33,31 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Fixed
 
+- **The e2e suite is deterministic again, and Askr-53 is closed.** The tri-modal 5 / 15
+  / 90-second timing and the one-run-in-twenty red both came from a single test,
+  `a_reload_replaces_every_worker`, and a single cause: the shared test client set a
+  15-second read timeout and then `unwrap()`ed the read. Admin `/api/status` is polled
+  *during* a rolling reload, when the master is briefly busy rolling a worker; a poll that
+  caught the plane mid-stall waited the full 15 seconds and then panicked — caught
+  upstream, but real wall time and real log noise — and six of those in a row is the
+  90.15-second run that recurred to the hundredth. The client is panic-free now: a
+  refused, timed-out, or truncated exchange returns status 0 instead of unwinding, and
+  admin polling uses a 2-second timeout, so a stall during a roll costs one second and
+  retries. Measured after the change: twelve runs, all green, 4.6-25.4 s, **no 90-second
+  mode and zero panics** — against thirty-two before at 5 / 15 / 90 with one uncaptured
+  red. The product was never the problem; the harness was.
+
+- **`SIGHUP` may leave a worker on old code (Askr-51) is closed as cannot-reproduce.** It
+  was seen once on a live deployment and never again, and its diagnosis was withdrawn.
+  The reason it stayed open was not the product but the test: the regression test
+  `a_reload_replaces_every_worker` shared the client that panicked under admin polling
+  during a roll — "a harness that crashes under the conditions it exists to observe" — so
+  a green run and a client-noise run were hard to tell apart. With the client fixed
+  above, that test is trustworthy: it replaces every worker or it fails cleanly, and it
+  passes 12/12 and 6/6 across today's runs with no panics. There is nothing left to fix
+  and a reliable guard against regression, so the issue is closed. If the production
+  symptom recurs, it will now show as a clean red, and the issue reopens.
+
 - **Over HTTP/2, PHP saw one of the browser's cookies, not all of them.** RFC 9113
   lets a client send one `cookie` field per cookie, and Chrome and Firefox do exactly
   that. Hyper hands them over as separate values, and `cgi.rs` read the first
@@ -154,7 +179,75 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   unhardened — the condition that, without `sandbox_required`, used to log a warning and
   otherwise look identical to success from every vantage point an operator has.
 
+- **Landlock asks for ABI V6 and reports what the kernel actually enforced.** The
+  ruleset was pinned to V1 — below file re-parenting (V2), truncate (V3), network (V4)
+  and ioctl (V5) — and the "negotiate the newest" fix was written down as needing a
+  Linux build in the loop. It got one: OrbStack, the repository mounted at its host
+  path so the build script's absolute include paths resolve, `cargo check` on real
+  Linux. Reading the crate on the way turned up why the kernel probe is private: asking
+  for `from_all(<whatever this kernel has>)` would make the restriction differ between
+  machines. So the request is fixed and newest, with best-effort compatibility, and
+  `RulesetStatus` decides what happened.
+
+  That last part fixed a bug that was already there. Under best-effort compatibility —
+  which is the crate's default, so the old code had it without asking — `restrict_self`
+  *succeeds* on a kernel that has no Landlock, having enforced nothing. The old code
+  counted any `Ok` as applied. A kernel with no Landlock now reads as not applied, a
+  kernel older than the requested ABI reads as applied-but-partial with a warning, and
+  `sandbox_required` refuses the first while accepting the second.
+
+- **The response cache varies on what the origin says it varies on.** A response carrying
+  a `Vary` the key could not express — `Accept-Language` from a localised app being the
+  common case — was refused rather than cached, which was correct and cost every hit on
+  exactly those pages. The known issue said the fix was a two-phase lookup, because the
+  primary key cannot be computed from the request alone once the response gets a say in
+  it. That is what this is.
+
+  When such a response is stored, two things are written: an *index* under the primary
+  key — status 0, never served — naming the headers, and the response itself under a key
+  that carries this request's values for them. A lookup that finds an index re-reads with
+  the request's own values, so a Norwegian visitor gets the Norwegian page from cache and
+  an English visitor's first request is a miss, not the Norwegian page. A request without
+  the header is its own variant, not a wildcard. `Vary: *` is still refused. The client
+  now also sees the origin's `Vary` merged with Askr's own. `PURGE`/`BAN` match on
+  method, host and path, so they drop the index and every variant together.
+
+  One deliberate gap: a variant is not refreshed in the background. Stale-while-revalidate
+  rebuilds a synthetic request from the stored URL, and that request does not carry the
+  headers that selected the variant — it would refresh the wrong one. A varied entry is
+  served stale through its window and refreshed by the next real request. Verified end to
+  end: a real server, a PHP script emitting `Vary: Accept-Language`, and two languages
+  that stay apart across five requests.
+
+- **Pending jobs can survive a restart.** The queue ring was an anonymous shared mapping —
+  shared across the process tree, gone on `exec`, so every restart including `askr
+  upgrade` dropped whatever was queued. The known issue said real persistence meant a
+  named mapping with a `{magic, version, geometry}` header, and that adding the header
+  alone would freeze a layout whose migration had not been designed. The migration design
+  is that there is none: `[queue] persist = "<name>"` maps the ring as a POSIX shared
+  memory object with that header, and on startup a header that does not match this binary
+  — version, slot count, slot size, payload or name limits — is unlinked and recreated,
+  with a log line naming the mismatch. Jobs in a mismatched ring are lost exactly as they
+  were on every restart before; jobs in a matching one are there when the server comes
+  back, and the shutdown line that used to be an error is an `info` saying so.
+
+  Opt-in, because the object lives in `/dev/shm` and a container's default is 64 MiB —
+  smaller than a ring of two thousand slots. Where it cannot be created the queue falls
+  back to an anonymous ring and says so; it keeps working either way. The magic is
+  written last, after a fence, so a creator that dies between the geometry and the marker
+  leaves a ring nobody trusts. Tested through a full cycle: create, push, unmap, re-attach
+  with the job intact, then re-attach with a different geometry and get a fresh ring.
+
 ### Changed
+
+- **A non-loopback admin bind now requires `ASKR_ADMIN_TOKEN`.** The token stays
+  optional on loopback — that is the documented model and every deployment relying on
+  it keeps working — but binding the admin plane to a network address with no token was
+  a startup *warning*, which is to say it was allowed, and it made `/api/reload` a public
+  reload trigger and `/api/status` a public dump of PIDs and memory. It is refused at
+  startup now, before anything binds, with both ways out named: set the token, or bind
+  to 127.0.0.1 and reach it over SSH. If you run `--admin 0.0.0.0:9000` without a token
+  today, this release will not start until you do one of those.
 
 - **Every GitHub Action is pinned to a commit SHA.** Ten actions across five workflows
   were referenced by major tag — `actions/checkout@v7`, `softprops/action-gh-release@v3`
@@ -164,534 +257,6 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   now names a SHA with the version in a trailing comment, and dependabot's
   `github-actions` ecosystem is enabled so the pins move forward under review rather
   than rot.
-
-## 1.5.0 — 2026-08-31
-
-A release about failing safely. Three security fixes where the old behaviour was to warn
-and carry on, a shared-memory correctness pass, a self-update that now verifies who
-produced what it installs, and cache reads that no longer serialise the fleet.
-
-Nothing in the documented surface changed incompatibly; [STABILITY.md](docs/STABILITY.md)
-still holds. Two things are worth adopting deliberately rather than by upgrading:
-`--sandbox-required` and, if you run behind a local reverse proxy, `ASKR_ADMIN_TOKEN`
-(see [Upgrading](docs/UPGRADING.md#to-150)).
-
-### Security
-
-- **`h2` upgraded to 0.4.19** ([RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258),
-  unbounded empty DATA frames). A remote peer could hold an HTTP/2 connection open
-  sending empty DATA frames without bound — a denial of service against the transport
-  Askr serves on by default. Also picked up `chacha20` 0.10.2, replacing a yanked
-  release. `cargo audit` is clean again.
-
-- **The scheduler sidecar no longer dies on an error from `schedule:run`, and says what
-  happened.** A `TypeError` has been seen escaping it in production — six times over three
-  days, always in the second after a scheduled job ran, then nothing for 22 hours across two
-  restarts and an upgrade. The events had already run: the failure is on the return path,
-  not the work, so nothing was lost.
-
-  The cause is **not known**, and the investigation is worth reading before anyone starts
-  again: every command in the application declares `: int`, no `handle()` has an early
-  return, there is no `bindMethod` anywhere in the tree, the framework version is identical
-  to local, and it does not reproduce. `Kernel::call()` is declared `: int`, so the
-  TypeError is thrown inside Laravel as it returns and the offending value never reaches the
-  caller — which is why this logs the exception rather than the return value. That is all
-  that can be observed from outside.
-
-  Catching earns its place regardless of the mystery: uncaught, this ended the process, the
-  supervisor respawned it, and the scheduler missed the boundary it had been sleeping for. A
-  cosmetic error should not cost a tick. The message now carries class, file, line, and the
-  sentence that would have saved the most time — that scheduled events had already run, so
-  the next person does not begin by hunting for lost work.
-
-
-### Added
-
-- **Cache reads no longer take a lock.** `Cache::get` sampled a per-slot spinlock
-  *exclusively*, so every worker reading the same hot key — a session, a shared config
-  blob, anything Laravel touches on each request — queued behind the others. Reads now
-  use a seqlock: sample a per-slot version counter, copy, sample again; a change means a
-  writer overlapped the copy, so retry, and after a bounded number of attempts take the
-  lock. Writes are unchanged and still serialised on the spinlock.
-
-  Measured before touching the lock, because a claimed speedup is not a speedup. Both
-  paths are kept and benchmarked against each other in one process
-  (`cargo test --release -p askr --bins cache_read_scaling -- --ignored --nocapture`),
-  reading one key on a 12-performance-core machine:
-
-  | readers | locked | lock-free |
-  | --- | --- | --- |
-  | 1 | 22.1M/s | 22.9M/s |
-  | 2 | 7.3M/s | 10.2M/s |
-  | 4 | 6.0M/s | 75.0M/s |
-  | 8 | 2.5M/s | 48.5M/s |
-  | 12 | 1.5M/s | 19.1M/s |
-
-  The locked column is the finding: throughput *falls* as readers are added, because a
-  spinlock under contention burns cycles instead of waiting. Peak aggregate read
-  throughput on one key went from ~22M/s to ~75M/s, and the shape changed from
-  collapsing to scaling. The lock-free numbers are noisy above 8 threads on a laptop;
-  the locked collapse is monotonic and reproduces in every value size.
-
-  Three things the work turned up that are worth recording:
-
-  - The benchmark caught a regression it was not looking for. The first version of the
-    read path allocated with `vec![0u8; len]`, which zeroes the buffer before the copy
-    — a 4 KB value read by a single thread came out at 0.8× of the locked path it
-    replaced, purely from the extra pass over the page. Fixed with an uninitialised
-    allocation; single-reader throughput is now 1.0× at every size.
-  - The counter cannot share the `lock` word, because shmlock reclaims a slot from a
-    dead holder by recognising the PID stored there.
-  - `Writing::begin` forces the counter odd rather than incrementing it. A writer killed
-    mid-update leaves it odd forever, and an increment would then make it *even* during
-    the following write — a reader would sample a stable-looking counter in the middle of
-    a copy. Forcing odd on entry and even-and-greater on exit repairs the slot instead.
-    There is a test for exactly that: a slot left mid-write is readable via the lock and
-    back in phase after the next write.
-
-  `get` also no longer tombstones an expired entry it happens to find, on the lock-free
-  path — it takes the lock, re-checks, and then reclaims. Expiry is rare, so this keeps
-  the fast path read-only.
-
-  The torn-read test is the one that matters, and it was verified against a defeated
-  seqlock: with the two counter samples removed, 584 533 of 2 145 847 reads came back
-  half-written. With them, zero.
-
-
-
-- **Releases are signed, and `askr upgrade` refuses one that is not.** The trust chain
-  used to end at GitHub: the tarball and its `.sha256` came from the same release, so the
-  checksum proved the download arrived intact and nothing about who produced it — a
-  compromised release, account or CI token serves a matching pair. For a command that
-  runs as root and replaces the binary systemd starts, that was the whole of it.
-
-  The release workflow now signs every tarball with minisign and publishes the
-  `.minisig` beside it; `upgrade` verifies it against a public key compiled into the
-  binary (`keys/release.pub`, `include_str!`'d), streamed so a tarball is never held in
-  memory to check. A bad signature, a signature from another key, or no signature at all
-  is a refusal, not a warning. Prehashed signatures only — modern minisign produces those
-  by default, and refusing legacy mode removes a variant nobody should still be using.
-
-  Releases also carry a SLSA build-provenance attestation (`actions/attest-build-provenance`),
-  which answers a different question: minisign says the key holder made this, provenance
-  says this workflow built it from this commit. `gh attestation verify` checks the second;
-  the binary checks the first, with no network and no GitHub involved.
-
-  **The key is generated by whoever holds it, deliberately not automated.**
-  `rsign generate -W -c "askr release signing key" -p keys/release.pub -s
-  ~/.askr/askr-release.key` — public half committed, secret half in the repository secret
-  `MINISIGN_SECRET_KEY`. A key generated anywhere it could be observed is compromised the
-  moment it exists. `docs/RELEASING.md` step 0 has the procedure, including the two parts
-  worth reading twice: `-p` is what saves the public key at all (without it rsign prints
-  it once and there is no way to get it back), and losing the secret key locks out every
-  future release, because installs built against the old key refuse the new tarballs.
-
-  Signing uses rsign2 rather than the minisign C tool. They implement the same format and
-  are interoperable — either verifies a release either produced — but rsign2 is what the
-  key was generated with, `rsign sign -W` is non-interactive without depending on how a
-  passwordless key gets prompted for, and it always prehashes, which is what the verifier
-  requires.
-
-  A build with no key committed still upgrades, and says on every run that it checked a
-  checksum and not a provenance — an unconfigured build must not be a build that cannot
-  upgrade. This one is configured: `keys/release.pub` holds key `5AD94F1DEEDF89FD`, and a
-  test asserts it parses, because losing it would quietly return upgrades to
-  checksum-only trust and nothing would fail.
-
-  The verification path is tested against minisign's published prehashed test vector
-  rather than a round trip, so a mis-parsed format is caught and not just our own code
-  agreeing with itself. A second test fails if `keys/release.pub` ever contains that
-  vector's *public* key, whose secret half is also published and would look like a
-  working signing setup.
-
-  `docs/INSTALL.md` and `docs/UBUNTU.md` now verify the signature before unpacking, which
-  is the one install `upgrade` cannot check for you. `SECURITY.md` documents both checks.
-
-- **`--sandbox-required` / `[server] sandbox_required` — fail closed.** The sandbox was
-  advisory: a kernel without Landlock or a container without the seccomp capability logged
-  a warning and the worker served traffic looking exactly like one that hardened. That
-  default stays, because an upgrade that started refusing to boot would be worse than the
-  warning, but it can now be opted out of. A worker that cannot fully harden exits 78, and
-  the crash-loop guard turns a fleet-wide failure into one clear "giving up".
-
-  It requires `sandbox_write`, and refuses to start without it. Seccomp alone blocks
-  `execve`, which is not how a webshell runs here: Askr interprets PHP in-process, so a
-  `.php` written into the docroot needs no process creation at all. A "required" sandbox
-  without Landlock write rules would be a promise the sandbox cannot keep, so that
-  combination is rejected before anything forks rather than discovered per worker.
-
-  The policy is deliberately not Linux-gated — `sandbox::shortfall` decides what a report
-  fails to deliver, and is unit-tested on every platform even though only Linux can apply
-  anything.
-
-
-- **A reload is now held to "every worker was replaced"** by a regression test
-  (`a_reload_replaces_every_worker`), rather than to `rollout: idle`. It records every PID,
-  sends SIGHUP, and polls until no pre-reload PID remains — with sidecars in the fleet,
-  since a queue worker recycling on its own is the event most likely to compete with the
-  roll. A reload that leaves a worker on the old code serves the previous release from a
-  fraction of requests and reports success.
-
-### Fixed
-
-- **A panic in an `extern "C"` entry point no longer takes the worker with it.** There
-  were 35 of them across `cache`, `cache_sql`, `squeue`, `squeue_sql`, `broadcast`,
-  `broadcast_sql` and the PHP request trampolines, and no `catch_unwind` anywhere in the
-  workspace — so a panic at the boundary aborted the process mid-request, and what it was
-  about was reported nowhere a person looks. Each now runs inside `ffi::guard`, which
-  answers the caller's failure value (a cache miss, a refused push, a 502) and logs the
-  entry point by name.
-
-  Shared-memory state survives it because the things protecting it are RAII and run while
-  unwinding: `Slot` releases the spinlock. `Writing` needed a change to be safe here —
-  its `Drop` marked the slot settled, so catching a panic mid-`write` would have
-  advertised a half-updated slot as stable to the new lock-free readers. It now leaves the
-  counter odd when dropped during a panic, which sends readers to the lock and lets the
-  next writer repair it.
-
-  Not wrapped, deliberately: the two signal handlers in `supervisor.rs` (`catch_unwind` is
-  not async-signal-safe, and they touch nothing but atomics), and `cow_ready_trampoline`,
-  which forks the fleet — a panic there is a startup failure that has to stay loud.
-
-- **A deleted cache key could come back, so a logged-out session could log itself back
-  in.** The probe loop in `Cache::set` holds one slot lock at a time, so two concurrent
-  `set`s of the same key can pick different targets — one finds a slot empty that the
-  other has since filled, or the two disagree about which live entry is oldest because
-  `written_at` moved underneath them. The key then exists in two slots, and `delete`
-  returned at the first match: it tombstoned one copy and left the other live, so the
-  next lookup found it. For a session key that is a user who logged out and is logged
-  in again.
-
-  The comment sitting at the end of `set` claimed the target was re-validated under the
-  lock. It was not — the write was unconditional, and the comment described the fix
-  that was missing. `delete` now tombstones every match in the chain, and `set` sweeps
-  the chain afterwards so duplicates converge to one entry instead of accumulating. The
-  sweep takes slot locks in the same ascending order as the probe, so it cannot deadlock
-  against one.
-
-  The race is not reproducible on demand, so the regression test plants the duplicate
-  directly and asserts the consequence: after `delete`, `get` must return nothing. It
-  fails against the old `delete`.
-
-- **A full queue ring dropped jobs in silence.** The no-ring branch of `squeue::push`
-  carries the argument for why that is unacceptable — returning 0 is all the PHP API can
-  express, Laravel does not check it, so from the application side a lost job looks like
-  a job that ran — and then the full-ring branch a few lines down was a bare `0` with no
-  log at all. It now reports the queue name and slot count, throttled to once every 30 s
-  because a full ring recurs and clears and an operator needs to see each occurrence,
-  not just the first since boot.
-
-- **A crash mid-`push` leaked a queue slot permanently.** `id` was the *first* field
-  written, and `id != 0` is what makes a slot occupied — so a process that died anywhere
-  in the writes that followed left a slot claimed by a job that does not exist: `pop`
-  could hand out the previous occupant's payload under the new id, and nothing ever
-  frees it. One slot lost per crash until the ring is full of them. `id` is now written
-  last as the commit marker, which is the discipline `broadcast::publish` already
-  follows with its `seq`; a crash mid-push now leaves `id == 0` and the slot simply
-  still free.
-
-- **A recycled PID could wedge a shared-memory region for good.** `shmlock` steals a
-  slot lock only from a holder the kernel confirms is dead, which is the right rule and
-  rests on `kill(pid, 0)` answering a question it does not answer: it says whether *a*
-  process has that number, not whether it is the one that took the lock. A holder can
-  die while `pid_max` wraps — minutes on a fork-heavy box — and the number be reused by
-  something long-lived, after which every waiter sees a live holder that will never
-  release. Unbounded wait, no log.
-
-  A holder whose PID has not changed for ten seconds is now stolen from as well, with an
-  error naming it. That is the same steal the module was written to remove, four orders
-  of magnitude further out: the old scheme stole after 100–200 µs, shorter than a
-  scheduler slice, which is why it corrupted state. A ≤64 KB copy that has not finished
-  in ten seconds is not preempted. Tracked in the waiter's own stack, so no extra word
-  in the slot and the same behaviour on Linux and macOS.
-
-- **`[server] force_https` in TOML was ignored when validating `http_redirect`.** The
-  address was read from the flag *or* the config, and then the guard checked only the
-  CLI flag — so a perfectly good TOML setting both keys was refused at startup, by an
-  error message that named the config key it was ignoring. The ACME front a few lines
-  above already makes this exact distinction, with a comment explaining why.
-
-- **`Host: [::1]:8080` became `"["`.** The port was stripped with
-  `authority.split(':').next()`, which truncates an IPv6 literal at its first colon.
-  That string became `SERVER_NAME`, the virtual-host routing key, and a field of the
-  response-cache key. One helper now does it correctly for all three call sites — and
-  for the new admin `Host` check, which had grown a fourth copy of the same logic. Only
-  a client addressing the server by IPv6 literal reached it, which is why it survived:
-  every test client in this repo uses a name or an IPv4 address.
-
-- **The rate limiter discarded its refill remainder.** `last_ms` jumped to `now`
-  whether or not the integer division produced anything, so a client arriving faster
-  than one token's worth of milliseconds refilled zero on every call and stayed blocked
-  however long it had actually been waiting. `limit < window` makes that ordinary — 10
-  per 60 s is 6 s per token, so any polling faster than every 6 ms starved. `last_ms`
-  now advances only by the time the refill accounts for. Low severity, and a real
-  regression test: `consume` takes `now`, so the test drives 7 000 fabricated
-  milliseconds instead of sleeping for six seconds.
-
-- **`Accept-Encoding: br;q=0` was served brotli.** `q=0` is not a weak preference, it
-  is a refusal, and `starts_with("br")` matched `br;q=0` exactly as happily as `br`.
-  Tokens are now matched exactly — `starts_with` also accepted `brotli`, which nobody
-  serves — and a `q=0` token is treated as not offered. Ranking is unchanged: br before
-  gzip, other q-values still ignored.
-
-- **Shutting down with jobs still in the queue is now on the record.** The ring is an
-  anonymous shared mapping: it lives as long as the process tree and has no persist
-  path, so a restart — `askr upgrade` included — comes up empty and the jobs that were
-  in it never run. Nothing in the application sees an error, which is how this reads as
-  "Laravel lost the mail". The master now logs an error naming the number of jobs being
-  lost, counted after every worker is reaped so the region is quiescent and the count is
-  exact. `docs/MAINTENANCE.md` gains a drain procedure and `docs/UPGRADING.md` gains it
-  as a step in the upgrade sequence.
-
-- **`PURGE`/`BAN` were open to the internet behind a local reverse proxy.** With no
-  `ASKR_ADMIN_TOKEN` set, cache invalidation was accepted from loopback peers — which
-  is a sound rule for a server that is its own front door and no rule at all behind
-  nginx or Caddy on 127.0.0.1, where *every* request arrives from loopback. Anyone
-  could then send `BAN` with `X-Ban-Url: /*` and empty the cache on demand.
-  `trusted_proxies` is the operator stating in writing that loopback is where the
-  proxy sits, so once it is set the loopback fallback no longer applies and a token is
-  required.
-
-- **The SSE bridge subscribed to `private-` and `presence-` channels without
-  authenticating them.** `pusher.rs` HMAC-verifies a subscription to those prefixes
-  before adding it to a socket; `GET /askr/events?channel=private-orders` did no such
-  thing and streamed everything published on the channel to whoever asked. Two
-  transports for one channel namespace, one of them enforcing the rule.
-
-  The SSE path has no socket id and no signature to verify one against, so it cannot
-  honour the same check — it now refuses those prefixes with `403` instead. Public
-  channels are unaffected. Signed SSE subscriptions would be the feature; declining to
-  be the hole in the meantime is the fix.
-
-- **The admin plane accepted DNS-rebound reads and cross-site reloads.** Neither
-  needed the token to be unset to work, which is why both checks now apply whether or
-  not one is configured.
-
-  `Host` was never looked at. A page on an attacker's domain re-resolves its own
-  hostname to 127.0.0.1; the browser then treats `http://evil.test:9000/api/status` as
-  same-origin and hands the response — PIDs, RSS, error records — to the attacker's
-  script. Nothing in that request looks cross-site, because to the browser it isn't:
-  the only thing that gives it away is `Host: evil.test` naming a listener that is not
-  called that. A loopback-bound plane now requires a `Host` that names it, with
-  `ASKR_ADMIN_HOSTS` for a proxy that forwards its own.
-
-  And `POST /api/reload` is a CORS "simple request" — no custom headers, so no
-  preflight, so CORS never got a say and any web page could roll the fleet. Requests a
-  browser reports as cross-site (`Sec-Fetch-Site`, or an `Origin` that disagrees with
-  `Host`) are refused. `curl` and deploy scripts send neither header and keep working:
-  this refuses what identifies itself as cross-site rather than demanding proof of not
-  being a browser.
-
-- **The admin reload and an ACME renewal bypassed the canary gate.** `[reload] canary`
-  was honoured by the SIGHUP handler and by nothing else: `trigger_reload()` — the
-  admin API, a renewed certificate, the cert-mtime watcher — called `roll_next()`
-  directly and rolled the whole fleet with no health check. Those are exactly the
-  reloads that happen with nobody watching, so they are the ones that needed the gate
-  most. Both paths now enter through it.
-
-- **The response cache ignored the application's `Vary`, and kept no scheme in the
-  key.** Three defects with one cause: the key can express negotiated encoding and
-  device class, and everything else the response said about its own variance was
-  dropped.
-
-  `Vary: Accept-Language` from a localised Laravel app meant the first visitor's
-  language was cached and served to everyone. Such responses are now not cached at
-  all. That costs hit rate on exactly the responses that were being served wrong, and
-  honouring `Vary` properly needs a two-level lookup in `rcache` — a variant list per
-  primary key — which is a design change, not a patch. Recorded under known issues.
-
-  Scheme is now part of the key. Without it one entry was shared by http and https, so
-  with `force_https` off a page holding absolute URLs (`url()`, `asset()`, a canonical
-  tag) could be rendered over http and then served to https clients with http links
-  baked in. It is appended last, because `rcache::key_parts` reads the first three
-  fields — `PURGE` and `BAN` keep working and stay scheme-agnostic, which is what
-  anyone purging a URL means.
-
-  And a response the app had gzipped itself was cached as garbage: `storable_header`
-  drops `Content-Encoding`, and `compress::maybe` returns an already-compressed body
-  unchanged because re-compressing it comes out larger — so the entry held gzip bytes
-  with nothing declaring them, and every hit sent binary to the browser. Those are
-  refused too.
-
-- **Upload temp files could be streamed into a directory another local user owned.**
-  `$TMPDIR/askr-uploads` is a fixed, world-known path, and on a shared host somebody
-  else can create it first. Every result that would have revealed it was discarded:
-  with `recursive(true)` an existing directory is not an error, `set_permissions()` on
-  a directory owned by another user fails with EPERM, and both were `let _ =`. Uploads
-  — whatever people type into forms — then landed somewhere readable by its owner, who
-  could also substitute an entry with a symlink between our create and PHP's read.
-
-  The directory is verified now rather than assumed: `lstat`, owned by this process,
-  no access for anybody else, and a chmod that is checked instead of trusted. When the
-  shared path isn't ours the server uses a private `askr-uploads-<uid>-<pid>` beside it
-  and says so, because an image that pre-creates `/tmp/askr-uploads` as root and then
-  drops to www-data is a legitimate setup and should not take uploads down. Files are
-  created `O_CREAT|O_EXCL|O_NOFOLLOW` at 0600.
-
-- **`X_Forwarded_For` and `X-Forwarded-For` became the same `$_SERVER` key.** Header
-  names were upper-cased with dashes replaced by underscores, so both spellings
-  collapsed to `HTTP_X_FORWARDED_FOR` and which one PHP saw depended on header
-  iteration order. Anything filtering the dashed spelling — a WAF, a proxy that
-  rewrites the header, Laravel's `TrustProxies` reading `$_SERVER` — was bypassed by
-  sending the underscored one. An underscore in a header name is now dropped rather
-  than merged, which is the same default nginx ships as `underscores_in_headers off`.
-
-- **The crash-loop guard did not count a worker killed by a signal.** It tested
-  `WIFEXITED && WEXITSTATUS != 0`, so a worker that segfaulted on boot — the loudest
-  form of the thing the guard exists to stop — respawned forever. Worse than not
-  counting: it took the healthy branch and *cleared* the streak, so a fleet mixing
-  fatals and faults never accumulated one either. Fault signals now count
-  (`SIGSEGV`/`BUS`/`ILL`/`FPE`/`ABRT`/`SYS`/`TRAP`); `SIGTERM` deliberately does not,
-  because every intentional termination in `supervisor.rs` uses it and a rolling reload
-  must not look like a crash-loop. `SIGSYS` is in the list because a seccomp filter
-  killing the worker is a boot loop like any other.
-
-- **ACME wrote the key and the certificate in place, one after the other.** A worker
-  spawning or reloading in between read a new key against the old certificate and
-  failed to start; the window was the length of two file writes. Both are staged and
-  renamed now, key first and certificate last — the cert-mtime watcher keys on the
-  certificate, so by the time anything notices a change the matching key is already
-  there. The key's temp file carries 0600 from creation rather than being tightened
-  afterwards.
-
-- **A stale read offset could have handed heap memory back as a request body.** In
-  worker mode the offset `php://input` reads from was never reset between requests:
-  `askr_req_reset()` freed the body and zeroed its length and never touched the third
-  variable, which was declared thirty lines away beside the SAPI callback that consumed
-  it rather than beside the state it belongs to. A shorter body arriving after a longer
-  one then evaluated `w_body_len - w_body_off_read` in `size_t` — which does not go
-  negative, it underflows to something near `SIZE_MAX` — so `n` became whatever PHP
-  asked for and the `memcpy` read past the end of the allocation. It is a read, so
-  nothing crashes: it returns the process's own heap as the body of a request, and an
-  application will echo it.
-
-  Not exploitable as shipped, and the reason matters. PHP only calls the post reader
-  when `SG(request_info).content_length` is set, and the worker path never sets it — the
-  body reaches the worker script as `$request['body']`, and `examples/laravel-worker.php`
-  builds the Request from that. So the worker branch of `askr_read_post` is unreached
-  today. It was one assignment from live: setting `content_length` is the first thing
-  anyone making `php://input` work natively in worker mode would do.
-
-  Fixed in three places, because the one-line version is the one that comes back. The
-  offset now sits with `w_body` and `w_body_len` where `askr_req_reset()` can see it; it
-  is reset there and in `askr_req_set_body()`, matching what the one-shot path has always
-  done, where `g_req.body_off = 0` sits on the line after `g_req.body_len = body_len`;
-  and both branches now refuse an offset at or past the length rather than trusting the
-  subtraction. No regression test, deliberately stated: the branch cannot be driven from
-  a request, so a test would have to make it reachable first.
-
-- **`askr upgrade` extracted the release tarball with the archive's ownership.**
-  Extraction runs as root — the install prefix is root-owned, so the command needs sudo —
-  and GNU tar as root restores the uid, gid and mode bits recorded in the archive instead
-  of the extracting user's. Releases are packaged by a CI runner, so the recorded owner
-  was that runner's uid, commonly 1001. On any machine where a local account holds uid
-  1001, `/opt/askr/askr` was installed owned by that account, which could then rewrite
-  the binary systemd starts as root — local privilege escalation through the one path
-  whose whole job is to be trusted.
-
-  Extraction now passes `--no-same-owner --no-same-permissions`, so everything is created
-  as root with the umask applied. The permissions half closes the same hole by the other
-  route: a mode recorded world-writable, or carrying a setuid bit, was reproduced
-  faithfully. No `chown` afterwards — with `--no-same-owner` tar has already created
-  everything as the effective uid.
-
-  `scripts/package-release.sh` now records `root:root` in the archive too. The installer
-  no longer depends on it, but a published tarball carrying a CI runner's uid is a trap
-  for anyone who extracts it by hand as root.
-
-### Changed
-
-- **The release now fails if Packagist isn't serving the version.** Verification stopped at
-  "the tag exists in the split repo", which is not the same as installable — Packagist is
-  what a user's `composer require` actually talks to. It now polls the public
-  `repo.packagist.org` endpoint for up to five minutes and fails with an actionable message.
-
-  No credentials, deliberately. A check that depends on a secret is a check that silently
-  skips when the secret is missing, and that is exactly how the split reported green while
-  publishing nothing for four months. The `Notify Packagist` step still skips without
-  `PACKAGIST_TOKEN` — it is an optimisation — but the *verification* no longer can.
-
-  `scripts/publish-laravel-package.sh` reports the same thing, and adds the one piece of
-  context that decides whether anyone is affected: whether the tag points at the same commit
-  as earlier tags, in which case the package is byte-identical and anyone on a `^1.x`
-  constraint already has the code — an older version *number*, not older code.
-
-  Worth recording a wrong turn. The first version of that note asserted a mechanism: that a
-  tag pushed onto an existing commit fires no webhook, so Packagist is never told. It reads
-  well and it is contradicted by the evidence — `v1.4.10` through `v1.4.13` all point at that
-  same commit and all reached Packagist. Stating it would have sent the next person down a
-  path I had already ruled out without noticing. The note now says what is observable and
-  calls the cause most likely lag.
-
-### Known issues
-
-- **Shared-memory regions do not survive `exec`.** Every region is `MAP_ANON|MAP_SHARED`
-  created before fork, so it is shared across the process tree and gone on restart. For
-  the response cache and the rate limiter that is correct — the cache has a persist path
-  anyway. For pending jobs it is data loss, logged at shutdown with a count and documented
-  with a drain procedure, but still loss. Real persistence means a named mapping
-  (`shm_open`) with a `{magic, version, geometry}` header so a re-attached region can be
-  validated or rejected. Adding the header alone was considered and skipped: an unused
-  version field freezes a layout whose migration has not been designed, which is a worse
-  position than having no header. The durable L2 backend (`ASKR_QUEUE_DB`) is the answer
-  available today.
-
-- **The sandbox's Landlock ABI is still pinned to V1.** Fail-closed and attestation are
-  done (see Added and Fixed); this is the last piece. `landlock_restrict` asks for
-  `ABI::V1`, below what current kernels offer (V2 file re-parenting, V3 truncate, V4
-  network, V5 ioctl). Negotiating the newest supported ABI needs a Linux build in the
-  loop — landlock is a Linux-only dependency and the C shim needs a Linux `cc` to
-  cross-check — and guessing at a crate API in a security path is how you ship a build
-  break. `/api/status` reports the ABI actually in force, so when this lands it will be
-  visible that it did.
-
-- **The response cache refuses what it cannot vary on, rather than varying on it.** A
-  response carrying a `Vary` the key cannot express is not cached. Doing it properly means
-  a variant list per primary key in `rcache` and a two-phase lookup — the primary key
-  cannot be computed from the request alone once the response gets a say in it. Until
-  then, `Vary: Accept-Language` costs hit rate instead of correctness.
-
-- **`ASKR_ADMIN_TOKEN` is still opt-in.** The plane warns at startup when it is bound
-  off-box without one, and the `Host` and cross-site checks apply with or without it, but
-  an unset token still means an open reload trigger to anything that can reach the
-  socket. Making it mandatory would break every existing deployment that relies on
-  loopback isolation, so it stays a decision rather than a default.
-
-- **`SIGHUP` may leave a worker on old code** ([Askr-51]) — measured once on a live
-  deployment, **not reproduced**: the regression test passes 12/12 against the same fleet
-  shape. The reasoned diagnosis in that issue is withdrawn, and the mixed content
-  observed alongside it is unexplained rather than explained. The deployment that saw it
-  recreates its containers on every deploy until it is understood, at the cost of logging
-  everyone out.
-
-  Worth recording how close that came to being reported as confirmed: 3 of 10 runs failed
-  while writing the test, and the panic was in the **test client**, which dies on a
-  connection that goes away mid-read — polling admin during a roll is exactly when that
-  happens. A harness that crashes under the conditions it exists to observe reports a
-  product failure that isn't one. It makes the reload less trustworthy than it should
-  be; the two `doctor --app` faults found in the same pass were fixed in 1.4.14, and this
-  one stays open because nobody can say what happened.
-
-- **The e2e suite is not deterministic** ([Askr-53]), and it was measured again today.
-  Thirty-two full runs on one machine, same code: 31 green, 1 red, with the failing test
-  not captured. Run times are not noise around a mean — they are **tri-modal**:
-
-  ```
-  ~5 s   × 11      ~15 s  × 14      80–90 s  × 7
-  ```
-
-  Three of the slow runs finished in **90.15 s to the hundredth**, which is not what
-  randomness looks like; it is a constant. The e2e client sets a 15-second read timeout
-  (`tests/e2e.rs`, `set_read_timeout`), and 90 s is six of those in a row, 15 s is one,
-  80 s is five and change. So the working hypothesis is that some test's reads stall
-  and the harness waits them out — a slow *pass* that is really the client absorbing a
-  failure — and the most likely place is admin polling during a rolling reload, which is
-  the exact condition Askr-51 already found the client fragile under. Two things would
-  turn this from a hypothesis into a diagnosis: per-test wall times (`--test-threads=1`
-  with timestamps), and a client read timeout short enough that a stall fails the test
-  instead of slowing it. Recorded here with the numbers because the changelog for 1.4.13
-  was right about the habit this teaches: at one in twenty, red pipelines get a re-run and
-  a shrug — and today it also got the re-run.
 
 ## 1.5.0 — 2026-08-31
 

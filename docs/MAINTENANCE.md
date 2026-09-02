@@ -325,7 +325,10 @@ sudo systemctl restart askr
 ```
 
 Askr logs an error at shutdown naming the number of jobs still in the ring, so a restart
-that lost work is at least on the record afterwards. If you cannot drain — or cannot
+that lost work is at least on the record afterwards. **Or set `[queue] persist =
+"<name>"`** (1.5.1): the ring then lives in a named shared-memory object and its jobs
+survive the restart — the shutdown line becomes an `info` saying so. In a container that
+needs `--shm-size` raised; see [Docker](DOCKER.md#shared-memory-size). If you cannot drain — or cannot
 accept the risk on an unattended restart — run the durable L2 backend instead
 (`ASKR_QUEUE_DB`, feature `sql-backend`), which survives a restart by design.
 

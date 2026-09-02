@@ -25,7 +25,7 @@ pub unsafe fn bytes<'a>(ptr: *const std::os::raw::c_char, len: usize) -> &'a [u8
     if ptr.is_null() || len == 0 {
         return &[];
     }
-    unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }
+    unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }
 }
 
 /// Run an FFI entry point's body, answering `fallback` if it panics.
