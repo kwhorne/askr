@@ -60,11 +60,17 @@ fn open_access_log(path: Option<&Path>) -> Option<Mutex<Box<dyn std::io::Write +
     if path.as_os_str() == "-" {
         return Some(Mutex::new(Box::new(std::io::stdout())));
     }
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    // 0640 on creation: the log holds client IPs, paths and user agents, and under a
+    // 022 umask a plain create() made it readable by every local user. An existing
+    // file keeps whatever mode the operator gave it.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o640);
+    }
+    match opts.open(path) {
         Ok(f) => Some(Mutex::new(Box::new(f))),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "access log: open failed; disabled");
@@ -988,6 +994,7 @@ where
                     &accept_encoding,
                     rt.config.cache_vary_user_agent,
                     rule.as_ref(),
+                    &crate::ns::for_docroot(docroot),
                 );
             }
             // Fire the shadow mirror off the request path: hash prod's body now,
@@ -1578,6 +1585,16 @@ async fn esi_fragment(
         .body(())
         .ok()?;
 
+    // A fragment is a request, and it counts as one. Fetched directly, fragments
+    // went round `ratelimit_check`: a page with 32 includes cost one token and ran PHP
+    // 33 times. Checked in the same place the top level checks — before the cache —
+    // so a `[[ratelimit]]` rule on `/_esi/*` means what it says. A refused fragment is
+    // left empty like any other fragment that failed.
+    if ratelimit_check(&req, peer, &rt.config).is_some() {
+        tracing::debug!(src = %src, "esi: fragment refused by rate limit, left empty");
+        return None;
+    }
+
     let key = rcache::enabled().then(|| response_cache_key(&req, host, &rt.config));
     if let Some(k) = &key {
         if let Some(c) = rcache::get(k) {
@@ -1608,6 +1625,7 @@ async fn esi_fragment(
                     "",
                     config.cache_vary_user_agent,
                     cache_rule_for(src.split('?').next().unwrap_or(src), &config.cache_rules),
+                    &crate::ns::for_docroot(docroot),
                 );
             }
             Some(resp.body)
@@ -1880,6 +1898,7 @@ fn maybe_store(
     accept_encoding: &str,
     vary_ua: bool,
     rule: Option<&crate::config::CacheRule>,
+    namespace: &str,
 ) {
     if resp.status != 200 {
         return;
@@ -1966,6 +1985,22 @@ fn maybe_store(
     if !vary.is_empty() {
         stored.push((hyper::header::VARY.to_string(), vary.join(", ")));
     }
+    // Tags are the application's own names (`posts`, `user:7`), so two applications
+    // in one instance would collide on them and `askr_cache_forget_tag('posts')` from
+    // one would invalidate the other's pages. Stored under the application's
+    // namespace, to match what `c_forget_tag` looks up.
+    let tags: Vec<Vec<u8>> = tags
+        .into_iter()
+        .map(|t| {
+            let mut k = Vec::with_capacity(namespace.len() + 1 + t.len());
+            if !namespace.is_empty() {
+                k.extend_from_slice(namespace.as_bytes());
+                k.push(crate::ns::SEP);
+            }
+            k.extend_from_slice(&t);
+            k
+        })
+        .collect();
     rcache::store(key, resp.status, &stored, &body, ttl, swr, sie, &tags);
 }
 
@@ -2155,6 +2190,7 @@ async fn refresh_entry(
             &accept_encoding,
             rt.config.cache_vary_user_agent,
             cache_rule_for(&uri_path, &rt.config.cache_rules),
+            &crate::ns::for_docroot(docroot),
         );
     }
     rcache::end(&key);
@@ -2603,6 +2639,22 @@ fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The access log holds client IPs, paths and user agents. A plain `create()`
+    /// under a 022 umask handed it to every local user.
+    #[cfg(unix)]
+    #[test]
+    fn the_access_log_is_created_group_readable_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join(format!("askr-access-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let log = open_access_log(Some(&p));
+        assert!(log.is_some(), "the log must open");
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "no read for other");
+        drop(log);
+        let _ = std::fs::remove_file(&p);
+    }
 
     /// A bearer-authenticated API response is per-user as surely as a session-cookied
     /// page is. It read as anonymous, so an operator `[[cache.rule]]` on `/api/*`

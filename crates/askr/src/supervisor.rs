@@ -441,6 +441,10 @@ pub(crate) fn supervise(
                     libc::signal(libc::SIGTERM, libc::SIG_DFL);
                 }
                 MY_SLOT.store(i, Ordering::SeqCst);
+                // Sidecars serve the application at the configured docroot; web
+                // workers re-set this per request, so the default only has to be
+                // right for the boot and for processes that never see a request.
+                crate::ns::set(&crate::ns::for_docroot(&config.docroot));
                 let code = match kind {
                     Kind::Web => {
                         let inherited = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
@@ -517,6 +521,8 @@ pub(crate) fn supervise(
                 "per-request"
             },
             record_dir: config.record_dir.clone(),
+            sandbox: config.sandbox,
+            sandbox_required: config.sandbox_required,
         };
         crate::admin::spawn(addr, info);
     }
@@ -902,6 +908,7 @@ pub(crate) fn run_cow(
     crate::broadcast::register_bridge();
 
     let recycle_after = config.max_requests;
+    crate::ns::set(&crate::ns::for_docroot(&config.docroot));
     let ctx = Box::into_raw(Box::new(CowCtx {
         config,
         listener_fd,

@@ -175,6 +175,12 @@ which routes deserve it.
   clamped), which a cache tolerates. A writer killed mid-update leaves its slot's
   version counter odd, which sends readers to the lock until the next write repairs
   it — correct, just not lock-free for that one slot in the meantime.
+- **Namespaced per application (1.5.1).** Keys are prefixed with a namespace derived
+  from the docroot before they reach the table, so two applications hosted in one
+  instance (`[[site]]`) cannot read each other's keys — or sessions, which are keys —
+  and `askr_cache_flush()` empties only the caller's application. Two domains serving
+  one docroot share, as one application should. The prefix is 17 bytes, so the
+  effective maximum key length is 233. See [Hosting](HOSTING.md#what-sites-share-and-what-they-dont).
 - **Not persistent:** the table lives in RAM and is empty on restart.
 
 For very large values, many GB of data, or cross-host sharing, use a real cache

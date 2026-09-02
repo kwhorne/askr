@@ -36,6 +36,9 @@ pub struct Envelope {
     pub cookie: Option<String>,
     pub server_vars: Vec<(String, String)>,
     pub body_len: usize,
+    /// Added in 1.5.1; recordings from before load with the raw view.
+    #[serde(default)]
+    pub namespace: String,
 }
 
 fn now_secs() -> u64 {
@@ -114,6 +117,7 @@ pub fn record_failure(dir: &Path, req: &Request, status: u16) {
         cookie: req.cookie.as_ref().map(|_| REDACTED.to_string()),
         server_vars: redact(&req.server_vars),
         body_len: req.body.len(),
+        namespace: req.namespace.clone(),
     };
     let json = match serde_json::to_vec_pretty(&env) {
         Ok(j) => j,
@@ -149,6 +153,7 @@ pub fn load(json_path: &Path) -> anyhow::Result<Request> {
         server_vars: env.server_vars,
         post_fields: Vec::new(),
         files: Vec::new(),
+        namespace: env.namespace,
     })
 }
 
@@ -202,6 +207,7 @@ mod tests {
             ],
             post_fields: Vec::new(),
             files: Vec::new(),
+            namespace: String::new(),
         };
         record_failure(&dir, &req, 500);
 

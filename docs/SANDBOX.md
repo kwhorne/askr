@@ -63,6 +63,20 @@ supervisor's crash-loop guard turns a fleet-wide failure into one clear "giving 
 rules are the control for that, so a "required" sandbox without them would be a promise
 the sandbox cannot keep.
 
+## Attestation: what the workers actually got
+
+`/api/status` reports the sandbox twice, side by side:
+
+```json
+"sandbox": {"configured": true, "required": true, "workers": 8, "seccomp": 8, "landlock": 8, "landlock_abi": 1}
+```
+
+`configured` and `required` are what you asked for. `workers`, `seccomp` and `landlock`
+are counted by the workers themselves as they apply it. A fleet where `workers` is 8 and
+`landlock` is 6 is serving two workers unhardened — which, without `sandbox_required`,
+is exactly the condition that used to log a warning and otherwise look identical to
+success. Alert on `seccomp < workers` or `landlock < workers`.
+
 ## Config file
 
 ```toml

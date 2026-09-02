@@ -21,6 +21,7 @@ mod ffi;
 #[cfg(feature = "http3")]
 mod http3;
 mod metrics;
+mod ns;
 #[cfg(feature = "observ")]
 mod observ_sql;
 mod oracle;

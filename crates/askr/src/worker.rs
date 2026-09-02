@@ -33,6 +33,9 @@ pub fn run_worker(
     config: Config,
     ini: Option<String>,
 ) -> anyhow::Result<()> {
+    // The application boots before the first request arrives, and a boot that warms
+    // the cache must land in the same namespace the requests will read from.
+    crate::ns::set(&crate::ns::for_docroot(&config.docroot));
     // Harden the worker (Linux) FIRST, before spawning the PHP/tokio threads —
     // seccomp (all-threads) + Landlock are inherited by every thread we create,
     // so the filter also covers the thread PHP runs on (where an exploit lives).

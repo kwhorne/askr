@@ -29,6 +29,10 @@ pub struct Info {
     pub server_listen: SocketAddr,
     pub mode: &'static str,
     pub record_dir: Option<std::path::PathBuf>,
+    /// The sandbox as *configured*. What the workers achieved comes from the metrics
+    /// region at request time; the status document reports both, side by side.
+    pub sandbox: bool,
+    pub sandbox_required: bool,
 }
 
 /// Start the admin server on its own thread. Never blocks the caller.
@@ -315,8 +319,29 @@ fn status_json(info: &Info) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
+    // Intent beside achievement. `configured`/`required` are what the operator asked
+    // for; `workers`/`seccomp`/`landlock` are counted by the workers that applied it.
+    // A fleet where `workers` exceeds `seccomp` or `landlock` is serving partly
+    // unhardened, and that used to be invisible from here.
+    let sandbox = {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (w, sc, ll, abi) = match crate::metrics::Metrics::get() {
+            Some(m) => (
+                m.sandbox_workers.load(Relaxed),
+                m.sandbox_seccomp.load(Relaxed),
+                m.sandbox_landlock.load(Relaxed),
+                m.sandbox_landlock_abi.load(Relaxed),
+            ),
+            None => (0, 0, 0, 0),
+        };
+        format!(
+            r#"{{"configured":{c},"required":{r},"workers":{w},"seccomp":{sc},"landlock":{ll},"landlock_abi":{abi}}}"#,
+            c = info.sandbox,
+            r = info.sandbox_required,
+        )
+    };
     format!(
-        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"queues":[{queues}],"rollout":"{ro}","workers":[{workers}],"pids":[{pids}]}}"#,
+        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"queues":[{queues}],"rollout":"{ro}","sandbox":{sandbox},"workers":[{workers}],"pids":[{pids}]}}"#,
         ver = env!("CARGO_PKG_VERSION"),
         listen = info.server_listen,
         mode = info.mode,
@@ -871,6 +896,8 @@ mod tests {
             server_listen: "127.0.0.1:8000".parse().unwrap(),
             mode: "per-request",
             record_dir: None,
+            sandbox: true,
+            sandbox_required: false,
         };
         for (name, body) in [
             ("status", status_json(&info)),

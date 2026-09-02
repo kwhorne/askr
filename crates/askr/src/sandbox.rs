@@ -75,6 +75,7 @@ pub fn shortfall(cfg: &SandboxConfig, report: &Report) -> Option<String> {
 /// an endless respawn.
 pub fn apply_or_refuse(cfg: &SandboxConfig) -> Report {
     let report = apply(cfg);
+    attest(&report);
     if cfg.required {
         if let Some(missing) = shortfall(cfg, &report) {
             tracing::error!(
@@ -91,6 +92,21 @@ pub fn apply_or_refuse(cfg: &SandboxConfig) -> Report {
         );
     }
     report
+}
+
+/// Record what this worker achieved in the shared metrics region, for `/api/status`.
+fn attest(report: &Report) {
+    use std::sync::atomic::Ordering;
+    if let Some(m) = crate::metrics::Metrics::get() {
+        m.sandbox_workers.fetch_add(1, Ordering::Relaxed);
+        if report.seccomp {
+            m.sandbox_seccomp.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(abi) = report.landlock_abi {
+            m.sandbox_landlock.fetch_add(1, Ordering::Relaxed);
+            m.sandbox_landlock_abi.store(abi as u64, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Apply the sandbox to the current process (all threads). Best-effort: failures

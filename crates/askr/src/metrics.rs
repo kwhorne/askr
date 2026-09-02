@@ -88,6 +88,15 @@ pub struct Metrics {
     /// PID of the elected metrics-rollup writer (0 = none). One process snapshots
     /// the shared metrics to the observability `metrics` table; the rest defer.
     pub metrics_leader: AtomicU32,
+    /// What the sandbox *achieved*, counted by the workers that applied it, so the
+    /// admin plane can tell a hardened fleet from a partly hardened one instead of
+    /// repeating the configuration back. `sandbox_workers` is how many ran
+    /// `sandbox::apply`; the other two are how many of those got each half.
+    pub sandbox_workers: AtomicU64,
+    pub sandbox_seccomp: AtomicU64,
+    pub sandbox_landlock: AtomicU64,
+    /// The Landlock ABI in force (0 = none / not applied).
+    pub sandbox_landlock_abi: AtomicU64,
 }
 
 static METRICS_PTR: AtomicPtr<Metrics> = AtomicPtr::new(ptr::null_mut());

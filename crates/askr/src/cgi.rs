@@ -198,6 +198,7 @@ pub fn build_request(
         server_vars,
         post_fields: Vec::new(),
         files: Vec::new(),
+        namespace: crate::ns::for_docroot(docroot),
     }
 }
 

@@ -234,6 +234,10 @@ pub struct Request {
     pub post_fields: Vec<(String, String)>,
     /// Uploaded files streamed to temp paths (worker mode) — the `$_FILES` seam.
     pub files: Vec<UploadedFile>,
+    /// The application's shared-memory namespace (derived from its docroot), set as
+    /// the request is handed to PHP so `askr_cache_*`/`askr_queue_*` from this
+    /// request stay within this application. Empty means the raw, un-namespaced view.
+    pub namespace: String,
 }
 
 /// One uploaded file: streamed to `tmp_path` by the server; the worker builds a
@@ -541,6 +545,7 @@ mod tests {
             content_type: Some("application/json".into()),
             cookie: None,
             body: br#"{"hi":1}"#.to_vec(),
+            namespace: String::new(),
             server_vars: vec![
                 ("REQUEST_METHOD".into(), "POST".into()),
                 ("REQUEST_URI".into(), "/api?a=1&b=2".into()),

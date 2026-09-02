@@ -234,6 +234,32 @@ edge; serving directly, they're the application's job.
 - Multi-site is a **per-request-mode** feature for full dynamic dispatch; worker mode
   serves one booted app (statics per-site). Per-site worker pools are future work.
 - Redirects and `force_https` run for **all** requests, before routing.
-- The response cache keys on the `Host`, so cached responses never leak across
-  domains.
 - Host matching is case-insensitive and ignores the port.
+
+### What sites share, and what they don't
+
+Everything in shared memory is one region per *instance*. Since 1.5.1 it is
+partitioned by **application** — a namespace derived from the site's docroot — so two
+sites with different docroots are two applications and cannot see each other's data,
+while two domains serving one docroot are one application and share, as they should.
+
+| | Isolated per application | Shared across the instance |
+| --- | --- | --- |
+| Response cache entries | ✓ keyed on `Host` | |
+| Response cache **tags** (`askr_cache_forget_tag`) | ✓ | |
+| KV cache, sessions, locks, counters (`askr_cache_*`) | ✓ | |
+| `askr_cache_flush()` | ✓ flushes only the caller's application | response cache is flushed whole |
+| Job queue (`askr_queue_*`) | ✓ names, pops and acks | |
+| Broadcasting (SSE, Pusher) | | ✓ one secret per instance, so one application |
+| Rate limiting, metrics, admin plane | | ✓ operational, per instance |
+
+Two consequences worth knowing:
+
+- **Queue and scheduler sidecars belong to the application at the top-level `root`.**
+  A second application's jobs land in its own namespace and nothing pops them — which
+  is correct (they would otherwise run inside the wrong codebase) and also means
+  that application has no workers. Untrusted or unrelated applications want their own
+  instance.
+- **Broadcasting is not partitioned.** Channel names are instance-wide, and the Pusher
+  secret is one per instance. Treat realtime as belonging to one application per
+  instance.

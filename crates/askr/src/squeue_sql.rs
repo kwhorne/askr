@@ -107,7 +107,7 @@ fn do_pop(conn: &Connection, queue: &[u8], visibility: u64) -> rusqlite::Result<
         params![String::from_utf8_lossy(queue), visibility as i64],
         |r| {
             Ok(Reserved {
-                id: r.get::<_, i64>(0)? as u64,
+                id: lease_token(r.get::<_, i64>(0)?, r.get::<_, i64>(2)?),
                 payload: r.get::<_, Vec<u8>>(1)?,
                 attempts: r.get::<_, i64>(2)? as u32,
             })
@@ -117,19 +117,38 @@ fn do_pop(conn: &Connection, queue: &[u8], visibility: u64) -> rusqlite::Result<
 }
 
 /// Ack a job (delete on success). Returns whether a row was removed.
-fn do_delete(conn: &Connection, id: u64) -> rusqlite::Result<bool> {
-    let n = conn.execute("DELETE FROM askr_jobs WHERE id = ?1", params![id as i64])?;
-    Ok(n > 0)
+/// The token a worker holds a job under: the row id in the high bits, the attempt
+/// number that claimed it in the low 16.
+///
+/// `pop` returned the bare row id, and a worker whose lease had lapsed could still
+/// `delete` or `release` the job a second worker had since claimed — same class of
+/// bug as the shared-memory ring's. Every claim bumps `attempts`, so a token carries
+/// the claim it belongs to, and `delete`/`release` require the row to still be on
+/// that attempt. No schema change: the fence rides in the value the driver already
+/// stores and hands back. Sixteen bits leaves 2^47 row ids, and a job on its
+/// 65 536th attempt has problems this cannot help with.
+fn lease_token(id: i64, attempts: i64) -> u64 {
+    ((id as u64) << 16) | (attempts as u64 & 0xFFFF)
+}
+fn lease_parts(token: u64) -> (i64, i64) {
+    ((token >> 16) as i64, (token & 0xFFFF) as i64)
 }
 
-/// Release (nack): re-arm the job `delay` seconds in the future. `attempts` is
-/// left unchanged (it was incremented at claim, matching Laravel).
-fn do_release(conn: &Connection, id: u64, delay: u64) -> rusqlite::Result<bool> {
+fn do_delete(conn: &Connection, token: u64) -> rusqlite::Result<bool> {
+    let (id, attempt) = lease_parts(token);
+    let n = conn.execute(
+        "DELETE FROM askr_jobs WHERE id = ?1 AND (attempts & 65535) = ?2",
+        params![id, attempt],
+    )?;
+    Ok(n > 0)
+}
+fn do_release(conn: &Connection, token: u64, delay: u64) -> rusqlite::Result<bool> {
+    let (id, attempt) = lease_parts(token);
     let n = conn.execute(
         "UPDATE askr_jobs
-         SET reserved_until = NULL, available_at = unixepoch() + ?2
-         WHERE id = ?1",
-        params![id as i64, delay as i64],
+         SET reserved_until = NULL, available_at = unixepoch() + ?3
+         WHERE id = ?1 AND (attempts & 65535) = ?2",
+        params![id, attempt, delay as i64],
     )?;
     Ok(n > 0)
 }
@@ -446,7 +465,7 @@ mod tests {
         assert!(id > 0);
 
         let r = do_pop(&c, b"default", 30).unwrap().expect("a ready job");
-        assert_eq!(r.id as i64, id);
+        assert_eq!(lease_parts(r.id).0, id, "the token names the row");
         assert_eq!(r.payload, b"email A");
         assert_eq!(r.attempts, 1, "attempts incremented at claim");
 
@@ -487,7 +506,16 @@ mod tests {
         )
         .unwrap();
         let second = do_pop(&c, b"q", 30).unwrap().unwrap();
-        assert_eq!(second.id, first.id);
+        assert_eq!(
+            lease_parts(second.id).0,
+            lease_parts(first.id).0,
+            "same row"
+        );
+        assert_ne!(second.id, first.id, "but a new claim is a new lease");
+        assert!(
+            !do_delete(&c, first.id).unwrap(),
+            "the lapsed worker's token no longer acks it"
+        );
         assert_eq!(second.attempts, 2, "redelivery consumes another attempt");
     }
 
@@ -523,7 +551,8 @@ mod tests {
         assert!(do_release(&c, r.id, 0).unwrap());
         assert_eq!(do_size(&c, b"q").unwrap(), 1);
         let again = do_pop(&c, b"q", 30).unwrap().unwrap();
-        assert_eq!(again.id as i64, id);
+        assert_eq!(lease_parts(again.id).0, id, "same row after release");
+        assert_ne!(again.id, r.id, "released and re-claimed is a new lease");
         assert_eq!(again.attempts, 2);
     }
 }

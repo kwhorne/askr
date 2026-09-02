@@ -648,7 +648,10 @@ impl<const V: usize> Region<V> {
                     } else {
                         0
                     };
-                    let next = cur + delta;
+                    // Saturating, not wrapping: `delta` comes from PHP. In a release build
+                    // `i64::MAX + 1` wrapped to a negative counter, and a rate limit keyed
+                    // on it reopened.
+                    let next = cur.saturating_add(delta);
                     let exp = if live {
                         r_u64(ptr::addr_of!((*e).expires_at))
                     } else {
@@ -677,7 +680,10 @@ impl<const V: usize> Region<V> {
                         .ok()
                         .and_then(|s| s.trim().parse().ok())
                         .unwrap_or(0);
-                    let next = cur + delta;
+                    // Saturating, not wrapping: `delta` comes from PHP. In a release build
+                    // `i64::MAX + 1` wrapped to a negative counter, and a rate limit keyed
+                    // on it reopened.
+                    let next = cur.saturating_add(delta);
                     let exp = r_u64(ptr::addr_of!((*e).expires_at));
                     Self::write(e, key, next.to_string().as_bytes(), h, exp);
                     return next;
@@ -699,6 +705,29 @@ impl<const V: usize> Region<V> {
             unsafe { Self::mark_state(e, 0) };
         }
     }
+
+    /// Tombstone every live entry whose key starts with `prefix`. Tombstones, not
+    /// empties, for the same reason `delete` uses them: other applications' keys
+    /// further along a probe chain must stay reachable.
+    fn flush_prefix(&self, prefix: &[u8]) {
+        let Some((p, slots)) = self.base() else {
+            return;
+        };
+        for idx in 0..slots {
+            let e = unsafe { p.add(idx) };
+            let _g = Slot::lock(e);
+            unsafe {
+                if r_u32(ptr::addr_of!((*e).state)) != 1 {
+                    continue;
+                }
+                let klen = (r_u32(ptr::addr_of!((*e).key_len)) as usize).min(KEY_MAX);
+                let k = std::slice::from_raw_parts(ptr::addr_of!((*e).key) as *const u8, klen);
+                if k.starts_with(prefix) {
+                    Self::mark_state(e, 2);
+                }
+            }
+        }
+    }
 }
 
 // --- public API (routes across the two size classes) ----------------------
@@ -717,27 +746,33 @@ pub fn enabled() -> bool {
 }
 
 /// Get a value (checks small then large). None on miss/expired/disabled.
+///
+/// Every function in this layer applies the current [`crate::ns`] namespace to the
+/// key first. The regions below it see only the prefixed bytes, and two applications
+/// in one instance see only their own keys.
 pub fn get(key: &[u8]) -> Option<Vec<u8>> {
+    let key = crate::ns::key(key);
     if key.len() > KEY_MAX {
         return None;
     }
-    let h = hash_key(key);
-    SMALL.get(key, h).or_else(|| LARGE.get(key, h))
+    let h = hash_key(&key);
+    SMALL.get(&key, h).or_else(|| LARGE.get(&key, h))
 }
 
 /// Set a value, routing by size. Clears the key from the other region so a
 /// resize (small↔large) can't leave a stale copy. False if too large / disabled.
 pub fn set(key: &[u8], val: &[u8], ttl: u64) -> bool {
+    let key = crate::ns::key(key);
     if key.len() > KEY_MAX {
         return false;
     }
-    let h = hash_key(key);
+    let h = hash_key(&key);
     if val.len() <= VAL_SMALL {
-        LARGE.delete(key, h);
-        SMALL.set(key, val, h, ttl)
+        LARGE.delete(&key, h);
+        SMALL.set(&key, val, h, ttl)
     } else if val.len() <= VAL_LARGE {
-        SMALL.delete(key, h);
-        LARGE.set(key, val, h, ttl)
+        SMALL.delete(&key, h);
+        LARGE.set(&key, val, h, ttl)
     } else {
         note_oversize(val.len()); // exceeds the largest slot — dropped, not silent
         false
@@ -746,22 +781,24 @@ pub fn set(key: &[u8], val: &[u8], ttl: u64) -> bool {
 
 /// Atomic set-if-absent (backs `Cache::lock()`). Values are small (owner tokens).
 pub fn add(key: &[u8], val: &[u8], ttl: u64) -> bool {
+    let key = crate::ns::key(key);
     if key.len() > KEY_MAX || val.len() > VAL_SMALL {
         return false;
     }
-    let h = hash_key(key);
+    let h = hash_key(&key);
     // A key present in either region blocks the add.
-    if LARGE.get(key, h).is_some() {
+    if LARGE.get(&key, h).is_some() {
         return false;
     }
-    SMALL.add(key, val, h, ttl)
+    SMALL.add(&key, val, h, ttl)
 }
 
 /// Delete a key from both regions. True if it existed anywhere.
 pub fn delete(key: &[u8]) -> bool {
-    let h = hash_key(key);
-    let s = SMALL.delete(key, h);
-    let l = LARGE.delete(key, h);
+    let key = crate::ns::key(key);
+    let h = hash_key(&key);
+    let s = SMALL.delete(&key, h);
+    let l = LARGE.delete(&key, h);
     s || l
 }
 
@@ -769,26 +806,38 @@ pub fn delete(key: &[u8]) -> bool {
 /// closes the get-then-set race a naive cache `touch()` would have (a concurrent
 /// writer's value can't be clobbered because the value is never rewritten).
 pub fn touch(key: &[u8], ttl: u64) -> bool {
+    let key = crate::ns::key(key);
     if key.len() > KEY_MAX {
         return false;
     }
-    let h = hash_key(key);
-    SMALL.touch(key, h, ttl) || LARGE.touch(key, h, ttl)
+    let h = hash_key(&key);
+    SMALL.touch(&key, h, ttl) || LARGE.touch(&key, h, ttl)
 }
 
 /// Atomically add `delta` to a numeric key (counters / rate limiting).
 pub fn increment(key: &[u8], delta: i64, ttl: u64) -> i64 {
+    let key = crate::ns::key(key);
     if key.len() > KEY_MAX {
         return 0;
     }
-    let h = hash_key(key);
-    SMALL.increment(key, h, delta, ttl)
+    let h = hash_key(&key);
+    SMALL.increment(&key, h, delta, ttl)
 }
 
-/// Empty both regions.
+/// Empty the current namespace — or, with none set, both regions entirely.
+///
+/// `askr_cache_flush()` used to zero the whole table. In an instance hosting several
+/// applications that let any one of them log every other's users out. It now sweeps
+/// the slots whose key carries this application's prefix and leaves the rest.
 pub fn flush() {
-    SMALL.flush();
-    LARGE.flush();
+    let prefix = crate::ns::prefix();
+    if prefix.is_empty() {
+        SMALL.flush();
+        LARGE.flush();
+    } else {
+        SMALL.flush_prefix(&prefix);
+        LARGE.flush_prefix(&prefix);
+    }
 }
 
 // --- PHP bridge -----------------------------------------------------------
@@ -881,7 +930,9 @@ extern "C" fn c_flush() {
 extern "C" fn c_forget_tag(tag: *const c_char, tlen: usize) {
     crate::ffi::guard("cache::forget_tag", (), || {
         let tag = unsafe { crate::ffi::bytes(tag, tlen) };
-        crate::rcache::forget_tag(tag);
+        // Tags are stored namespaced (see server::maybe_store), so an application can
+        // only invalidate pages its own responses tagged.
+        crate::rcache::forget_tag(&crate::ns::key(tag));
     })
 }
 
@@ -920,9 +971,15 @@ mod tests {
     // The cache tests share the process-wide SMALL/LARGE regions (they init/flush
     // the same statics), so serialize them — parallel execution would interfere.
     // `into_inner` ignores poisoning so one failing test doesn't cascade.
-    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // The cache, the queue and the process-global namespace are one piece of shared
+    // state, so their tests serialise on one lock — `ns::tests::GUARD`. Two locks
+    // looked like isolation and were not: a queue test setting a namespace in one
+    // thread re-keyed a cache stress test's increments in another, and 33 of 16 000
+    // went "missing".
     fn guard() -> std::sync::MutexGuard<'static, ()> {
-        TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+        crate::ns::tests::GUARD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// A lock-free reader must never observe a half-written value.
@@ -1140,6 +1197,70 @@ mod tests {
             }
         }
         println!();
+    }
+
+    /// Two applications in one instance used to share one key space: either could
+    /// read the other's sessions by key, and `askr_cache_flush()` from one logged the
+    /// other's users out. The namespace is set per request from the docroot; here it is
+    /// set by hand and the two views must not overlap.
+    #[test]
+    fn two_namespaces_do_not_see_each_other_and_flush_is_scoped() {
+        let _g = guard();
+        init(256, 64);
+        flush();
+
+        crate::ns::set("aaaaaaaaaaaaaaaa");
+        assert!(set(b"sess:1", b"alice", 0));
+        assert!(set(b"shared-name", b"from-a", 0));
+        crate::ns::set("bbbbbbbbbbbbbbbb");
+        assert!(set(b"shared-name", b"from-b", 0));
+
+        assert_eq!(get(b"sess:1"), None, "B cannot read A's session");
+        assert_eq!(get(b"shared-name").as_deref(), Some(&b"from-b"[..]));
+        assert!(!delete(b"sess:1"), "nor delete it");
+
+        // B flushes: only B goes.
+        flush();
+        assert_eq!(get(b"shared-name"), None);
+        crate::ns::set("aaaaaaaaaaaaaaaa");
+        assert_eq!(
+            get(b"sess:1").as_deref(),
+            Some(&b"alice"[..]),
+            "A survives B's flush"
+        );
+        assert_eq!(get(b"shared-name").as_deref(), Some(&b"from-a"[..]));
+
+        // No namespace: the raw table, and flush() means everything.
+        crate::ns::set("");
+        assert_eq!(
+            get(b"sess:1"),
+            None,
+            "the raw view has no un-prefixed sess:1"
+        );
+        flush();
+        crate::ns::set("aaaaaaaaaaaaaaaa");
+        assert_eq!(get(b"sess:1"), None);
+        crate::ns::set("");
+    }
+
+    /// `delta` is a PHP integer. `cur + delta` wrapped in release builds, so two
+    /// increments by i64::MAX turned a counter negative — and a limit keyed on that
+    /// counter was open again.
+    #[test]
+    fn a_counter_saturates_instead_of_wrapping() {
+        let _g = guard();
+        init(256, 64);
+        crate::ns::set("");
+        delete(b"ctr:sat");
+        assert_eq!(increment(b"ctr:sat", i64::MAX, 0), i64::MAX);
+        assert_eq!(increment(b"ctr:sat", i64::MAX, 0), i64::MAX, "stays pinned");
+        assert_eq!(increment(b"ctr:sat", 1, 0), i64::MAX);
+        assert_eq!(
+            increment(b"ctr:sat", -1, 0),
+            i64::MAX - 1,
+            "and still moves down"
+        );
+        delete(b"ctr:sat");
     }
 
     /// A key can end up in two slots: the probe in `set` holds one slot lock at a

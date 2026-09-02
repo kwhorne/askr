@@ -29,7 +29,14 @@ struct Job {
     queue_hash: u64,
     available_at: u64,   // unix ms — poppable when now >= this
     reserved_until: u64, // unix ms — 0 = not reserved; lapsed if now >= this
-    created_at: u64,     // unix ms — when push() accepted the job; never changes
+    /// The reservation this job is currently out under; 0 when nobody holds it.
+    ///
+    /// This is what `pop` hands back as the job's id, and what `delete`/`release`
+    /// look a job up by. It is what fences a stale ack: once a lease lapses and another
+    /// worker pops the job, the slot carries a *new* lease, and the first worker's
+    /// token matches nothing — "no such job", not somebody else's job.
+    lease: u64,
+    created_at: u64, // unix ms — when push() accepted the job; never changes
     // The queue name, truncated, so a stuck backlog can be *named* rather than just
     // counted. `queue_hash` alone was enough to route jobs and useless to diagnose: an
     // app sending mail to onQueue('mail') while the worker polled 'default' left jobs
@@ -43,12 +50,15 @@ struct Job {
 
 /// Longest queue name kept for reporting. Names are hashed for routing, so a longer name
 /// still works — it is only truncated in `askr_queue_stats()` output and warnings.
-const QUEUE_NAME_MAX: usize = 48;
+const QUEUE_NAME_MAX: usize = 96;
 
 #[repr(C)]
 struct Ring {
     next_id: AtomicU64,
-    _pad: [u64; 7],
+    /// Global, so a lease is never reused by another slot while a stale holder
+    /// could still present it.
+    next_lease: AtomicU64,
+    _pad: [u64; 6],
     // slots follow, laid out contiguously after the header via the mapping.
 }
 
@@ -136,6 +146,12 @@ unsafe fn r_u32(p: *const u32) -> u32 {
 
 /// A reserved job handed to a worker.
 pub struct Reserved {
+    /// The **lease**, not the job's id — the thing to pass back to `delete`/`release`.
+    ///
+    /// A worker that pops a job holds it under this token. If its lease lapses and
+    /// another worker pops the same job, that worker gets a fresh token and this one
+    /// stops matching anything. Opaque to the application: the Laravel driver stores
+    /// it and hands it back, which is all it ever did with the id.
     pub id: u64,
     pub attempts: u32,
     pub payload: Vec<u8>,
@@ -147,6 +163,7 @@ pub struct Reserved {
 static NO_RING_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
+    let queue = &*crate::ns::key(queue);
     let Some((p, slots)) = base() else {
         // No ring: the server was started without queue slots. Returning 0 is all the PHP
         // API can express, and Laravel does not check it — so a dropped job is invisible
@@ -154,7 +171,7 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
         // Once per process: this is per push, and a busy app would drown the log.
         if !NO_RING_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             tracing::error!(
-                queue = %String::from_utf8_lossy(queue),
+                queue = %String::from_utf8_lossy(crate::ns::strip(queue)),
                 "queue push DISCARDED — no shared-memory ring is mapped. Start the server \
                  with --queue-slots (or [queue] slots) or jobs pushed from PHP go nowhere: \
                  no exception, no retry, no mail."
@@ -169,7 +186,11 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
     let id = unsafe { (*ring).next_id.fetch_add(1, Ordering::SeqCst) } + 1;
     let qh = hash_q(queue);
     let created_at = now_ms();
-    let available_at = created_at + delay * 1000;
+    // Saturating throughout: `delay` and `visibility` are PHP integers, and
+    // `visibility * 1000` with a large value overflowed — panicking in debug and
+    // wrapping to a small `reserved_until` in release, which made a job somebody
+    // was running immediately poppable again.
+    let available_at = created_at.saturating_add(delay.saturating_mul(1000));
     // Start the probe at a spot derived from the id, so concurrent pushes spread.
     let start = (id as usize) % slots;
     for i in 0..slots {
@@ -188,6 +209,7 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
                     n,
                 );
                 ptr::write(ptr::addr_of_mut!((*e).reserved_until), 0);
+                ptr::write(ptr::addr_of_mut!((*e).lease), 0);
                 ptr::write(ptr::addr_of_mut!((*e).attempts), 0);
                 ptr::write(ptr::addr_of_mut!((*e).payload_len), payload.len() as u32);
                 ptr::copy_nonoverlapping(
@@ -233,7 +255,7 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
             .is_ok()
     {
         tracing::error!(
-            queue = %String::from_utf8_lossy(queue),
+            queue = %String::from_utf8_lossy(crate::ns::strip(queue)),
             slots,
             "queue push DISCARDED — every slot is occupied. The job is gone: no \
              exception, no retry. Raise --queue-slots (or [queue] slots), or find out \
@@ -250,6 +272,7 @@ const FULL_WARN_EVERY_SECS: u64 = 30;
 /// Reserve the oldest ready job for `queue` (available and not live-reserved) for
 /// `visibility` seconds. Increments its attempt count. None if nothing ready.
 pub fn pop(queue: &[u8], visibility: u64) -> Option<Reserved> {
+    let queue = &*crate::ns::key(queue);
     let (p, slots) = base()?;
     let qh = hash_q(queue);
     let now = now_ms();
@@ -296,29 +319,49 @@ pub fn pop(queue: &[u8], visibility: u64) -> Option<Reserved> {
         ptr::write(ptr::addr_of_mut!((*e).attempts), attempts);
         ptr::write(
             ptr::addr_of_mut!((*e).reserved_until),
-            now + visibility * 1000,
+            now.saturating_add(visibility.saturating_mul(1000)),
         );
+        // A fresh lease for this reservation. Any token handed out for an earlier
+        // reservation of this slot — a worker whose lease lapsed — is now stale.
+        let ring = NEXT_ID.load(Ordering::SeqCst);
+        let lease = (*ring).next_lease.fetch_add(1, Ordering::SeqCst) + 1;
+        ptr::write(ptr::addr_of_mut!((*e).lease), lease);
+        let _ = id; // the job id stays the slot's occupancy marker; the caller gets the lease
         let plen = (r_u32(ptr::addr_of!((*e).payload_len)) as usize).min(PAYLOAD_MAX);
         let payload =
             std::slice::from_raw_parts(ptr::addr_of!((*e).payload) as *const u8, plen).to_vec();
         Some(Reserved {
-            id,
+            id: lease,
             attempts,
             payload,
         })
     }
 }
 
-/// Delete (ack) a reserved job. True if it existed.
-pub fn delete(id: u64) -> bool {
+/// Delete (ack) a reserved job by its lease. True if the lease is current.
+///
+/// Looking the job up by *lease* rather than by id is the whole fence. `pop` used to
+/// leave the id alone across reservations, so once a lease lapsed and a second worker
+/// took the job, the first worker's `delete(id)` acked the job the second was still
+/// running — and its `release(id)` made the job poppable a third time. Now a lapsed
+/// worker's token names a reservation that no longer exists.
+pub fn delete(lease: u64) -> bool {
     let Some((p, slots)) = base() else {
         return false;
     };
+    if lease == 0 {
+        return false;
+    }
     for idx in 0..slots {
         let e = unsafe { p.add(idx) };
         let _g = Slot::lock(e);
         unsafe {
-            if r_u64(ptr::addr_of!((*e).id)) == id {
+            if r_u64(ptr::addr_of!((*e).id)) != 0 && r_u64(ptr::addr_of!((*e).lease)) == lease {
+                // Leases are global; the queue name carries the namespace. An
+                // application that presents another's token gets "no such job".
+                if !slot_in_namespace(e) {
+                    return false;
+                }
                 ptr::write(ptr::addr_of_mut!((*e).id), 0);
                 return true;
             }
@@ -327,20 +370,35 @@ pub fn delete(id: u64) -> bool {
     false
 }
 
+/// Does the job in this slot belong to the current namespace? Caller holds the lock.
+unsafe fn slot_in_namespace(e: *mut Job) -> bool {
+    let n = (r_u32(ptr::addr_of!((*e).name_len)) as usize).min(QUEUE_NAME_MAX);
+    let name = std::slice::from_raw_parts(ptr::addr_of!((*e).name) as *const u8, n);
+    crate::ns::owns(name)
+}
+
 /// Release a reserved job back to the queue, available again after `delay`
 /// seconds (retry). True if it existed.
-pub fn release(id: u64, delay: u64) -> bool {
+pub fn release(lease: u64, delay: u64) -> bool {
     let Some((p, slots)) = base() else {
         return false;
     };
-    let avail = now_ms() + delay * 1000;
+    if lease == 0 {
+        return false;
+    }
+    let avail = now_ms().saturating_add(delay.saturating_mul(1000));
     for idx in 0..slots {
         let e = unsafe { p.add(idx) };
         let _g = Slot::lock(e);
         unsafe {
-            if r_u64(ptr::addr_of!((*e).id)) == id {
+            if r_u64(ptr::addr_of!((*e).id)) != 0 && r_u64(ptr::addr_of!((*e).lease)) == lease {
+                if !slot_in_namespace(e) {
+                    return false;
+                }
                 ptr::write(ptr::addr_of_mut!((*e).available_at), avail);
                 ptr::write(ptr::addr_of_mut!((*e).reserved_until), 0);
+                // The reservation is over; a later pop issues a new lease.
+                ptr::write(ptr::addr_of_mut!((*e).lease), 0);
                 return true;
             }
         }
@@ -407,6 +465,7 @@ pub struct Counts {
 
 /// Walk the table once and bucket every occupied slot for `queue`.
 pub fn counts(queue: &[u8]) -> Counts {
+    let queue = &*crate::ns::key(queue);
     let Some((p, slots)) = base() else {
         return Counts::default();
     };
@@ -462,11 +521,8 @@ pub fn by_queue() -> Vec<(String, Counts)> {
                 continue;
             }
             let n = (ptr::read(ptr::addr_of!((*e).name_len)) as usize).min(QUEUE_NAME_MAX);
-            let name = String::from_utf8_lossy(std::slice::from_raw_parts(
-                ptr::addr_of!((*e).name) as *const u8,
-                n,
-            ))
-            .into_owned();
+            let stored = std::slice::from_raw_parts(ptr::addr_of!((*e).name) as *const u8, n);
+            let name = String::from_utf8_lossy(crate::ns::strip(stored)).into_owned();
             let avail = r_u64(ptr::addr_of!((*e).available_at));
             let reserved = r_u64(ptr::addr_of!((*e).reserved_until));
             let created = r_u64(ptr::addr_of!((*e).created_at));
@@ -490,6 +546,7 @@ pub fn by_queue() -> Vec<(String, Counts)> {
 }
 
 pub fn size(queue: &[u8]) -> u64 {
+    let queue = &*crate::ns::key(queue);
     let Some((p, slots)) = base() else {
         return 0;
     };
@@ -629,7 +686,8 @@ mod tests {
     // thing that finally showed it.
     //
     // `into_inner` ignores poisoning so one failing test doesn't cascade into the rest.
-    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Shared with the cache tests — see cache::tests::guard for why one lock.
+    use crate::ns::tests::GUARD as TEST_GUARD;
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -700,6 +758,94 @@ mod tests {
 
     /// The watchdog can only name a stuck queue if the name is in the ring. Before
     /// 1.4.11 only the hash was, which routed jobs perfectly and diagnosed nothing.
+    /// `visibility * 1000` overflowed for a large PHP integer: a panic in debug, and
+    /// in release a wrapped, tiny `reserved_until` — the job a worker was running became
+    /// poppable again at once. Saturation pins it to "never", which is what an absurd
+    /// visibility means.
+    #[test]
+    fn absurd_delays_and_visibilities_saturate_instead_of_wrapping() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        init(64);
+        crate::ns::set("");
+
+        let never = push(b"sat", b"delayed forever", u64::MAX);
+        assert!(never > 0, "push must not panic");
+        assert!(
+            pop(b"sat", 30).is_none(),
+            "a saturated delay is not yet available"
+        );
+        // It can never be popped, so it can never be acked; it stays in the ring.
+
+        assert!(push(b"sat", b"held", 0) > 0);
+        let got = pop(b"sat", u64::MAX).expect("a saturated visibility still reserves");
+        assert_eq!(got.payload, b"held");
+        assert!(
+            pop(b"sat", 30).is_none(),
+            "and nobody else can pop it meanwhile"
+        );
+        assert!(delete(got.id));
+    }
+
+    /// The known issue this retires. A worker whose lease lapsed could still ack —
+    /// or worse, release — the job a second worker had since taken, because both
+    /// held the same id. Each reservation now has its own lease, and only the current
+    /// one is honoured.
+    #[test]
+    fn a_stale_lease_cannot_ack_or_release_a_job_someone_else_now_holds() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        init(64);
+        crate::ns::set("");
+
+        assert!(push(b"lease", b"once-only", 0) > 0);
+        // Visibility 0: the lease lapses immediately, standing in for a slow worker.
+        let first = pop(b"lease", 0).expect("first worker takes it");
+        let second = pop(b"lease", 60).expect("lease lapsed; second worker takes it");
+        assert_ne!(first.id, second.id, "a new reservation is a new lease");
+        assert_eq!(second.attempts, 2);
+
+        // The slow first worker wakes up.
+        assert!(
+            !delete(first.id),
+            "a stale lease must not ack the second worker's job"
+        );
+        assert!(!release(first.id, 0), "nor put it back for a third run");
+        assert!(
+            pop(b"lease", 60).is_none(),
+            "the job is still held by the second worker"
+        );
+
+        // The holder acks with the lease it was actually given.
+        assert!(delete(second.id));
+        assert!(pop(b"lease", 60).is_none(), "and it is gone");
+        assert!(!delete(second.id), "a lease is single-use");
+    }
+
+    /// Two applications, one ring. A could pop B's jobs — and run B's job classes
+    /// inside A's codebase — or acknowledge them by guessing an id. Queue names carry
+    /// the namespace now, and an ack from the wrong application is "no such job".
+    #[test]
+    fn a_job_is_invisible_and_unackable_from_another_namespace() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        init(64);
+
+        crate::ns::set("aaaaaaaaaaaaaaaa");
+        let id = push(b"default", b"job-for-a", 0);
+        assert!(id > 0);
+
+        crate::ns::set("bbbbbbbbbbbbbbbb");
+        assert!(pop(b"default", 30).is_none(), "B does not see A's queue");
+        assert_eq!(size(b"default"), 0);
+        assert!(!delete(id), "B cannot ack A's job by id");
+        assert!(!release(id, 0), "nor release it");
+
+        crate::ns::set("aaaaaaaaaaaaaaaa");
+        let got = pop(b"default", 30).expect("A still has its job");
+        assert_eq!(got.payload, b"job-for-a");
+        assert!(delete(got.id), "and can ack it with the lease it was given");
+        // Reporting shows the application's own name, not the prefixed one.
+        crate::ns::set("");
+    }
+
     #[test]
     fn by_queue_names_each_backlog_separately() {
         let _g = guard();
@@ -780,7 +926,9 @@ mod tests {
         assert!(delete(r1.id));
         assert!(release(r2.id, 0));
         let r3 = pop(b"default", 60).expect("released job comes back");
-        assert_eq!(r3.id, r2.id);
+        assert_eq!(r3.payload, b"job-b");
+        assert_ne!(r3.id, r2.id, "a new reservation is a new lease");
+        assert!(!delete(r2.id), "and the old lease no longer acks it");
         assert_eq!(r3.attempts, 2); // attempt count carried across the retry
         assert!(delete(r3.id));
 
