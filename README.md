@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/kwhorne/askr/actions/workflows/ci.yml"><img src="https://github.com/kwhorne/askr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  &nbsp;·&nbsp; <strong>v1.5.0</strong> &nbsp;·&nbsp; MIT
+  &nbsp;·&nbsp; <strong>v1.5.1</strong> &nbsp;·&nbsp; MIT
 </p>
 
 <p align="center">
@@ -55,7 +55,7 @@ Self-contained releases for Linux (x86_64 and arm64) carry the binary, the embed
 OPcache and the examples in one tarball:
 
 ```bash
-VER=v1.5.0; ARCH=$(uname -m)
+VER=v1.5.1; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 

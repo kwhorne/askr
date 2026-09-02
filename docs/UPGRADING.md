@@ -35,7 +35,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.5.0; ARCH=$(uname -m)
+VER=v1.5.1; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -51,14 +51,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.5.0     # or :1.5 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.5.1     # or :1.5 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.5` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.5.0-full`) are the same server built with the optional features
+The `-full` tags (`1.5.1-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -121,6 +121,43 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.5.1
+
+**One change can stop a start.** A non-loopback admin bind now **requires**
+`ASKR_ADMIN_TOKEN`; without it the server refuses to start rather than exposing an open
+reload trigger and a public dump of PIDs and memory. If you run `--admin 0.0.0.0:…` (or
+any non-loopback `[admin] listen`) with no token, set one, or bind the admin plane to
+`127.0.0.1` and reach it over SSH. A loopback bind is unchanged.
+
+**One change is visible to code that reads job ids.** Queue jobs are now leased: a job's
+id, as the driver hands it back, changes on each retry, because it identifies the
+*reservation* rather than the row — that is what stops a worker whose lease lapsed from
+acknowledging a job another worker has since taken. If you correlate log lines across a
+job's attempts, key on the payload's uuid (what Laravel's `failed_jobs` uses), not the
+id.
+
+The rest need no action, but are worth knowing:
+
+- **Multi-site instances are partitioned.** With `[[site]]`, the shared cache, sessions,
+  locks, counters and job queue are now keyed per application (by docroot), so two sites
+  in one instance no longer share them — two domains on one docroot still do. Queue and
+  scheduler sidecars belong to the application at the top-level `root`; a second
+  application in the same instance has no workers of its own. Broadcasting stays
+  instance-wide (one Pusher secret per instance). See
+  [Hosting](HOSTING.md#what-sites-share-and-what-they-dont).
+- **`Vary` responses are cached again.** In 1.5.0 a response carrying its own `Vary`
+  (e.g. `Accept-Language`) was not cached; it is now stored as one variant per value, so
+  the hit rate returns on localised pages without serving one visitor's language to
+  another.
+- **The Pusher HTTP trigger requires a signature.** `POST /apps/{id}/events` must carry
+  Pusher's `auth_signature` (and `body_md5`, `auth_timestamp`). `pusher-php-server` —
+  and therefore Laravel's broadcaster — sends it on every call, so a correctly configured
+  app needs no change; a bespoke trigger caller must sign, or it gets a `401`.
+
+New, opt-in: **`[queue] persist = "<name>"`** keeps the job ring in a named shared-memory
+object so pending jobs survive a restart (`askr upgrade` included). In a container raise
+`--shm-size`; see [Docker](DOCKER.md#shared-memory-size).
 
 ### To 1.5.0
 

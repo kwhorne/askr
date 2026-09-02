@@ -5,6 +5,26 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.5.1 — 2026-09-02
+
+Closing out the known issues. Every issue open at 1.5.0 is resolved or closed, and the
+list is now empty.
+
+The security work that landed after the 1.5.0 tag leads: the Pusher HTTP trigger accepted
+unsigned events from anyone who could reach the port, and browsers lost a cookie over
+HTTP/2 because the client saw only the first of several `cookie` fields. Then the
+shared-memory subsystem was partitioned per application, so one instance can host several
+sites without them reading each other's cache, sessions or jobs; queue leases can no
+longer be acknowledged by a worker whose lease has lapsed; the response cache varies on
+what the origin says it varies on instead of refusing to cache it; the job ring can
+survive a restart; the Landlock sandbox asks for the newest ABI and reports what the
+kernel enforced; and a non-loopback admin bind now refuses to start without a token.
+
+The e2e suite is deterministic again, which is what let the last two issues — a
+once-seen reload anomaly and the suite's own flakiness — close. See
+[Upgrading](docs/UPGRADING.md#to-151) for the one change that can block a start and the
+one that changes what Laravel sees as a job id.
+
 ### Security
 
 - **The Pusher HTTP trigger accepted unsigned requests from anyone.** `POST
