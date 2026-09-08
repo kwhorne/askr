@@ -35,7 +35,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.5.1; ARCH=$(uname -m)
+VER=v1.5.2; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -51,14 +51,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.5.1     # or :1.5 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.5.2     # or :1.5 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.5` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.5.1-full`) are the same server built with the optional features
+The `-full` tags (`1.5.2-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -121,6 +121,25 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.5.2
+
+**If you are on 1.5.1, this upgrade is not optional.** 1.5.1 answered `400` to every
+HTTP/1.x request to a Laravel or Symfony app, because `HTTP_HOST` reached PHP as
+`works.example, works.example:443` and Symfony rejects a comma in the host. HTTP/2 was
+unaffected, so a site behind an h2 proxy — or an HTTP client pinned to `2.0` — may never
+have seen it. Nothing to configure: upgrade and remove any `['version' => 2.0]` you added
+to work around it.
+
+**One value changes, and only over HTTP/2.** `HTTP_HOST` is now the authority exactly as
+the client sent it, port included — which is what nginx + FPM pass, and what PHP already
+saw over HTTP/1.x. Over HTTP/2 it previously arrived port-stripped, so an h2 request to a
+non-default port now shows `example.test:8443` where it showed `example.test`. This is
+the correct form and the two protocols now agree, but if you compare `HTTP_HOST` against
+a literal, or feed it somewhere that expects no port, use `SERVER_NAME` — that is still
+the port-stripped form, and it is what virtual-host routing and the response-cache key
+use. In Laravel, `$request->getHost()` strips the port for you; `getHttpHost()` keeps it,
+as it should.
 
 ### To 1.5.1
 

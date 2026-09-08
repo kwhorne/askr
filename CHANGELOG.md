@@ -5,6 +5,51 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.5.2 — 2026-09-08
+
+A one-bug hotfix, and the bug is mine: **1.5.1 answered `400` to every HTTP/1.x request
+to a Laravel or Symfony app.** If you are on 1.5.1, upgrade. Nothing else changed.
+
+### Fixed
+
+- **`HTTP_HOST` reached PHP twice, joined by a comma — a framework 400 on every
+  HTTP/1.x request.** 1.5.1 taught the `$_SERVER` builder to join repeated header
+  fields, which is what the HTTP/2 cookie fix in that release needed. But `HTTP_HOST` is
+  set explicitly from the effective host *before* that loop runs, and the loop then
+  re-added it from the `Host:` header it had been derived from. The join turned the two
+  into one value: `works.example, works.example:443`.
+
+  Symfony treats a comma in the host as a `SuspiciousOperationException`, so
+  `Request::create()` threw before the kernel ever saw the request, and Laravel answered
+  `400` — to `/`, to `/up`, to a login POST, to everything. HTTP/2 was unaffected,
+  because hyper carries the authority in the `:authority` pseudo-header and there is no
+  `Host:` field to duplicate. That asymmetry is why the deployment that found this could
+  work around it with `['version' => 2.0]` on the HTTP client, and why the cause looked
+  like it had to be in the request URI. It wasn't: the URI is origin-form on both
+  protocols.
+
+  Each change was harmless on its own. Before the join, the loop pushed a *second*
+  `HTTP_HOST` and PHP's array build kept whichever came last — the valid one — so the
+  duplicate had been there, invisible, for as long as the header loop had. The join is
+  what made it fatal.
+
+  `HTTP_HOST` now comes only from the effective host, in the raw form the client sent it:
+  port included, which is what nginx + FPM pass and what PHP already saw over HTTP/1.x.
+  `SERVER_NAME` keeps the port-stripped form, which is what virtual-host routing and the
+  response-cache key use. Over HTTP/2 this means a non-default port now appears in
+  `HTTP_HOST` where it previously didn't — see
+  [Upgrading](docs/UPGRADING.md#to-152) if you compare that value.
+
+  **Why the tests missed it, and what now catches it.** The e2e suite drives real
+  HTTP/1.1 over a socket through a real worker, and all 22 tests passed: the worker
+  scripts in it echo a string and never look at the host. The transport was never the
+  gap; the assertion was. There are now two regression tests — a unit test that a
+  request carrying a `Host:` header yields exactly one comma-free `HTTP_HOST` and that
+  HTTP/1.x and HTTP/2 agree on it, and an e2e test whose worker validates the host the
+  way a framework does and refuses one it doesn't recognise. Against the 1.5.1 code the
+  second reproduces the production failure verbatim: `400`, `suspicious host:
+  askr.test, askr.test:8080`. Both were verified red before the fix.
+
 ## 1.5.1 — 2026-09-02
 
 Closing out the known issues. Every issue open at 1.5.0 is resolved or closed, and the
