@@ -82,9 +82,11 @@ pub fn build_request(
         None => path.clone(),
     };
 
-    let host = effective_host(&parts.headers, &parts.uri)
-        .map(|h| host_without_port(&h).to_string())
-        .unwrap_or_else(|| "localhost".to_string());
+    // The raw authority (may include a port) for HTTP_HOST, and the port-stripped form
+    // for SERVER_NAME/vhost routing. Kept separate so HTTP_HOST stays conventional.
+    let raw_host =
+        effective_host(&parts.headers, &parts.uri).unwrap_or_else(|| "localhost".to_string());
+    let host = host_without_port(&raw_host).to_string();
 
     let content_type = parts
         .headers
@@ -131,7 +133,7 @@ pub fn build_request(
         ("SERVER_NAME".into(), host.clone()),
         ("SERVER_PORT".into(), server_port.to_string()),
         ("SERVER_ADDR".into(), "127.0.0.1".into()),
-        ("HTTP_HOST".into(), host),
+        ("HTTP_HOST".into(), raw_host),
         ("REMOTE_ADDR".into(), peer.ip().to_string()),
         ("REMOTE_PORT".into(), peer.port().to_string()),
         ("REQUEST_TIME".into(), now_secs().to_string()),
@@ -157,6 +159,13 @@ pub fn build_request(
         // never become `HTTP_PROXY`, which many HTTP clients (Guzzle, libcurl via
         // getenv) read to route outbound requests. Drop it unconditionally.
         if key.eq_ignore_ascii_case("proxy") {
+            continue;
+        }
+        // HTTP_HOST is authoritative from effective_host above (which also covers the
+        // HTTP/2 case, where the host is the URI authority and not a header). Letting
+        // the Host header through here would add a second HTTP_HOST that the merge
+        // below joins into `host, host:port` — invalid, and a framework 400.
+        if key.eq_ignore_ascii_case("host") {
             continue;
         }
         // Underscores collapse into the same $_SERVER key as dashes, so
@@ -270,6 +279,57 @@ mod tests {
         );
         // Any other repeated field joins with a comma, per RFC 9110.
         assert_eq!(var("HTTP_ACCEPT"), vec!["text/html, application/json"]);
+    }
+
+    /// 1.5.1 taught the header loop to join repeated fields, and HTTP_HOST — already
+    /// set from `effective_host` — was re-added from the `Host:` header and joined
+    /// with it: `example.com, example.com:8080`. Symfony rejects a comma in the host
+    /// (`SuspiciousOperationException`), so every HTTP/1.x request to a Laravel or
+    /// Symfony app answered 400 while HTTP/2 kept working, because over h2 hyper puts
+    /// the authority in the URI and there is no header to duplicate. Before the join
+    /// the loop pushed a second HTTP_HOST and PHP's last-wins kept the valid one, so
+    /// this was invisible until the two changes met.
+    #[test]
+    fn host_reaches_php_once_and_without_a_comma() {
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000);
+        let build = |parts: &Parts| {
+            let req = build_request(
+                parts,
+                Vec::new(),
+                Path::new("/srv"),
+                Path::new("/srv/index.php"),
+                "/index.php",
+                peer,
+                false,
+                8080,
+            );
+            let one = |name: &str| -> String {
+                let all: Vec<&str> = req
+                    .server_vars
+                    .iter()
+                    .filter(|(k, _)| k == name)
+                    .map(|(_, v)| v.as_str())
+                    .collect();
+                assert_eq!(all.len(), 1, "exactly one {name}, got {all:?}");
+                all[0].to_string()
+            };
+            (one("HTTP_HOST"), one("SERVER_NAME"))
+        };
+
+        // HTTP/1.x: origin-form target, authority in the Host header.
+        let h1 = build(&parts_with(&[("Host", "example.com:8080")]));
+        assert_eq!(h1.0, "example.com:8080", "HTTP_HOST keeps the port");
+        assert_eq!(h1.1, "example.com", "SERVER_NAME drops it");
+
+        // HTTP/2: hyper hands the authority over in the URI, with no Host header.
+        let h2 = hyper::Request::builder()
+            .method("GET")
+            .uri("http://example.com:8080/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert_eq!(build(&h2), h1, "the two protocols agree");
     }
 
     #[test]

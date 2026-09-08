@@ -1228,6 +1228,77 @@ root = "{}"
     assert!(b.body.contains("site-b"), "got {:?}", b.body);
 }
 
+/// `HTTP_HOST` must reach the worker exactly once, and exactly as the client sent it.
+///
+/// 1.5.1 taught `build_request` to join repeated header fields (the HTTP/2 cookie fix),
+/// and `HTTP_HOST` — already set from the effective host — was then joined with the
+/// `Host:` header it was derived from: `works.example, works.example:443`. Symfony
+/// treats a comma in the host as a `SuspiciousOperationException`, so
+/// `Request::create()` threw and **every HTTP/1.x request to a Laravel or Symfony app
+/// answered 400**. HTTP/2 was unaffected: hyper carries the authority in the URI
+/// pseudo-header, so there is no `Host:` field to duplicate — which is why the one
+/// deployment that hit this could work around it with `['version' => 2.0]`.
+///
+/// The whole e2e suite speaks real HTTP/1.1 over a socket and every test still passed,
+/// because the worker scripts here echo a string and never look at the host. So this
+/// one does what a framework does: it refuses a host it doesn't recognise. That is the
+/// assertion the suite was missing, not the transport.
+#[test]
+fn the_host_reaches_the_worker_once_and_unmangled() {
+    let dir = unique_dir("hosthdr");
+    // Stand-in for Symfony's host validation: anything but a single clean authority
+    // is a 400, exactly as `Request::create()` would treat it.
+    let worker = r#"<?php
+while (askr_handle_request(function (array $r): int {
+    $host = $r['headers']['HTTP_HOST'] ?? '(missing)';
+    $name = $r['headers']['SERVER_NAME'] ?? '(missing)';
+    if (!preg_match('/^[a-zA-Z0-9.\-]+(:\d+)?$/', $host)) {
+        http_response_code(400);
+        echo "suspicious host: $host";
+        return 400;
+    }
+    echo "host=$host name=$name";
+    return 200;
+})) {}
+"#;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+workers = "1"
+
+[worker]
+script = "{}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let s = Server::start_in(dir, &[("index.php", "<?php echo 'unused';")], &config);
+
+    // With a port and without one: a client may send either, and neither may become
+    // two HTTP_HOST values or one containing a comma.
+    for host in ["askr.test:8080", "askr.test"] {
+        let r = request(s.port, "GET", "/up", &[("Host", host)]);
+        assert_eq!(
+            r.status,
+            200,
+            "Host: {host} answered {} — {:?}; log:\n{}",
+            r.status,
+            r.body,
+            s.log_contents()
+        );
+        let name = host.split(':').next().unwrap();
+        assert_eq!(
+            r.body.trim(),
+            format!("host={host} name={name}"),
+            "HTTP_HOST must be the authority as sent, and SERVER_NAME the same without \
+             the port"
+        );
+    }
+}
+
 /// PHP diagnostics must reach the operator's log, never the visitor's browser.
 ///
 /// Askr's built-in defaults were `display_errors=1` + `log_errors=0`, so a notice was
