@@ -567,6 +567,7 @@ fn main() -> anyhow::Result<()> {
                 WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
                 QUEUE_CAP.store(r.queue_slots, Ordering::SeqCst);
                 squeue::set_persist_name(r.queue_persist.clone());
+                queue::set_stall_secs(r.queue_stall_secs);
                 let sc = Sidecars {
                     queue: r.queue_workers,
                     queue_max: r.queue_workers_max.max(r.queue_workers),

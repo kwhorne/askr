@@ -70,13 +70,21 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 
 ```json
 {
-  "version": "1.5.2",
+  "version": "1.6.0",
   "listen": "0.0.0.0:8000",
   "mode": "worker",
   "uptime_secs": 3600,
   "workers_configured": 8,
   "workers_alive": 8,
   "respawns": 3,
+  "queues": [
+    {"queue": "default", "pending": 2, "delayed": 0, "reserved": 1,
+     "oldest_pending_secs": 3, "last_polled_secs": 0, "last_drained_secs": 1}
+  ],
+  "queues_idle": [
+    {"queue": "mail", "last_polled_secs": 1, "last_drained_secs": 46}
+  ],
+  "warnings": [],
   "pids": [43509, 43510, 43511, 43512, 43513, 43514, 43515, 43516]
 }
 ```
@@ -92,7 +100,69 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 | `respawns` | Total worker respawns (recycles + crashes + reloads). |
 | `rss_kb_total` | Total resident memory across workers (KB). |
 | `workers` | Per-worker `{pid, rss_kb}` (the leak signal — watch RSS vs recycling). |
+| `queues` | Per-queue backlog — `{queue, pending, delayed, reserved, oldest_pending_secs}` — each entry also carrying `last_polled_secs` and `last_drained_secs`. |
+| `queues_idle` | Queues a worker polls that hold no jobs right now: `{queue, last_polled_secs, last_drained_secs}`. |
+| `warnings` | Lanes that are in trouble, named, with the numbers behind the call. Empty when nothing is wrong — see below. |
 | `pids` | Live worker PIDs. |
+
+#### Queue liveness and `warnings`
+
+A production queue lane went three days with nothing draining it. Askr diagnosed it
+correctly every ten seconds for the whole three days — it named the queue and suggested
+the cause — but only in its own log. No failed jobs, no admin warning, no health signal;
+the app's `/up` answered 200 throughout. A log line a product never reads is not an alert.
+The queue depth was already on this endpoint; what was missing was Askr saying *this is
+wrong*, so a dashboard would have had to hardcode Askr's threshold to reach a conclusion
+Askr had already reached.
+
+Two fields carry the liveness of a lane. `last_polled_secs` is seconds since a queue
+worker last **asked** that queue for a job — whether or not it got one; `last_drained_secs`
+is seconds since one last **reserved** a job from it. Both are `null` when it has never
+happened. `null` means *never*, which is not "a long time ago", and must not be rendered as
+a duration.
+
+A lane is remembered once polled, which is what `queues_idle` reports: a queue that is
+polled and currently empty stays visible, and that is what tells "nobody is listening to
+`mail`" apart from "there are no queue workers at all". Up to 64 distinct queue names are
+tracked; beyond that a lane simply has no liveness signal, and is never reported as faulty
+on that basis.
+
+The poll/drain pair separates two faults that job age alone cannot tell apart and whose
+remedies are opposite. That is what `warnings` reports:
+
+```json
+"warnings": [
+  {"kind": "queue_unattended", "queue": "mail", "pending": 812,
+   "oldest_pending_secs": 259181, "last_polled_secs": null, "last_drained_secs": null,
+   "detail": "no worker is asking this queue for jobs — check the queue name a worker polls (ASKR_QUEUE) against the one the app dispatches to"}
+]
+```
+
+- **`queue_unattended`** — jobs are waiting and nothing is polling the lane. Almost always
+  a queue-name mismatch: the app dispatches to `onQueue('mail')` and the worker polls
+  `default`. Adding workers does nothing.
+- **`queue_not_draining`** — workers are polling and the backlog still grows. The lane is
+  saturated, or jobs keep being released back. More workers, or look at what is failing.
+
+`kind` is a stable machine-readable tag — switch on it. `detail` is prose for the person
+reading it and is **not** stable; never match on it.
+
+`warnings` is the field a dashboard renders directly, and that is the point: a product
+that renders it does not reimplement Askr's thresholds and then drift from them when
+either side changes. How long a job may sit ready and unclaimed before a lane counts as
+stalled is [`[queue] stall_secs`](CONFIGURATION.md#queue) (default 30 s) — the same number
+behind the watchdog log line and the per-queue `/metrics` series.
+
+Two details worth knowing before you alert on this. "Nothing is polling the lane" means
+**no poll in the last 60 seconds, or none ever** — not a single missed tick. A Laravel
+queue worker polls continuously while jobs flow and on its `--sleep` interval (3 s by
+default) when idle, so a minute of silence is many missed polls. A worker configured with
+a `--sleep` near or above 60 s can produce a brief `queue_unattended` for jobs that arrive
+just after a poll; the next evaluation clears it. That window is not configurable.
+
+And `askr_queue_unattended` is emitted only for lanes that currently hold jobs, so an
+empty lane has no series rather than a `0`. Alerting on `== 1` is correct; alerting on
+`== 0` is not a health check.
 
 ### `GET /api/metrics`
 

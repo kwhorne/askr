@@ -70,13 +70,56 @@ struct Ring {
     /// could still present it.
     next_lease: AtomicU64,
     _pad: [u64; 2],
+    /// Per-queue liveness, so "nothing is draining this lane" is a measurement rather
+    /// than an inference. See [`Lane`].
+    lanes: [Lane; LANES],
     // slots follow, laid out contiguously after the header via the mapping.
 }
+
+/// What a worker has actually done with one queue, as opposed to what is sitting in it.
+///
+/// The backlog watchdog could only ever say "these jobs are old", which is the same
+/// observation for two opposite faults: a lane that is saturated (workers draining it
+/// as fast as they can, add more) and a lane that nothing consumes at all (a worker
+/// polling the wrong name — fix the name). Job age cannot tell them apart, and the
+/// remedies are opposite, so the operator had to guess.
+///
+/// `pop` stamps `last_polled_ms` every time a worker *asks* this lane for work and
+/// `last_drained_ms` only when it actually gets a job. The pair separates the faults:
+/// pending jobs and no recent poll means nobody is listening to this name; pending jobs,
+/// recent polls and no recent drain means jobs are there but not becoming available.
+/// Both are stated as facts in the admin API instead of being left to the reader.
+///
+/// A lane is claimed on first use and never released — a queue name a worker polled
+/// once stays visible with zero pending, which is what makes "a worker polls `mail`,
+/// nothing is queued" distinguishable from "nobody has ever polled `mail`".
+#[repr(C)]
+struct Lane {
+    /// `hash_q` of the namespaced queue name; 0 means a free entry.
+    hash: AtomicU64,
+    /// Unix ms when a worker last asked this lane for a job, empty-handed or not.
+    last_polled_ms: AtomicU64,
+    /// Unix ms when a worker last actually reserved a job from it; 0 = never.
+    last_drained_ms: AtomicU64,
+    /// Length of `name`, so the reporting side can name the lane without a job in it.
+    name_len: AtomicU32,
+    _pad: u32,
+    name: [u8; QUEUE_NAME_MAX],
+}
+
+/// Distinct queue names tracked for liveness. A deployment with more than this many
+/// is well past the point where a per-lane table is the useful view, and the overflow
+/// degrades to "no liveness signal for that lane" rather than to wrong numbers.
+const LANES: usize = 64;
 
 /// "ASKRQUE1" — the header is complete and this is a queue ring.
 const MAGIC: u64 = 0x4153_4b52_5155_4531;
 /// The `Job`/`Ring` layout this binary understands.
-const LAYOUT_VERSION: u32 = 1;
+///
+/// 2 added [`Lane`] to the header, which moved where the slots start. A persistent ring
+/// written by an older binary is therefore recreated rather than misread — `version` is
+/// one of the fields `header_mismatch` checks, so that happens with a log line saying why.
+const LAYOUT_VERSION: u32 = 2;
 
 /// Is the ring a named mapping that outlives this process tree?
 static PERSISTENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -141,6 +184,170 @@ fn hash_q(q: &[u8]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     q.hash(&mut h);
     h.finish()
+}
+
+/// Per-queue liveness, as the reporting side sees it.
+pub struct LaneStats {
+    pub name: String,
+    /// Unix ms a worker last asked this lane for work; 0 = never.
+    pub last_polled_ms: u64,
+    /// Unix ms a worker last took a job from it; 0 = never.
+    pub last_drained_ms: u64,
+}
+
+/// Find this queue's lane, claiming a free entry on first use.
+///
+/// Open addressing, linear probing from the hash. The claim is a compare-exchange, so
+/// two workers racing on a queue name nobody has polled before settle on one entry
+/// instead of each taking their own and halving the table.
+///
+/// Returns `None` only when every entry is taken by some *other* queue: the signal for
+/// that lane is then simply absent, which the reporting side renders as "unknown" rather
+/// than as "not drained". An absent signal must never read as a fault.
+///
+/// # Safety
+/// `ring` points at a live, writable ring mapping.
+unsafe fn lane_for(ring: *mut Ring, qh: u64, name: &[u8]) -> Option<*const Lane> {
+    // 0 marks a free entry, so a hash that lands on 0 has to become something else.
+    let qh = if qh == 0 { 1 } else { qh };
+    let start = (qh % LANES as u64) as usize;
+    for probe in 0..LANES {
+        let i = (start + probe) % LANES;
+        let l = ptr::addr_of_mut!((*ring).lanes[i]);
+        let cur = (*l).hash.load(Ordering::Acquire);
+        if cur == qh {
+            return Some(l);
+        }
+        if cur == 0 {
+            // Claim with the hash FIRST, then write the name.
+            //
+            // Writing the name first looks friendlier — a reader would never see a
+            // claimed lane without one — but it is wrong: two workers on *different*
+            // queues probing the same free entry both write their name, and whichever
+            // then wins the compare-exchange publishes its hash over the loser's name.
+            // The lane would report the wrong queue, which is worse than reporting none.
+            //
+            // So the hash is the claim, and `name_len` is published with a release store
+            // after the bytes. A reader that sees a claimed lane with `name_len == 0` is
+            // looking at the gap between the two and skips it; the lane shows up on the
+            // next read, microseconds later.
+            match (*l)
+                .hash
+                .compare_exchange(0, qh, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    let n = name.len().min(QUEUE_NAME_MAX);
+                    ptr::copy_nonoverlapping(
+                        name.as_ptr(),
+                        ptr::addr_of_mut!((*l).name) as *mut u8,
+                        n,
+                    );
+                    (*l).name_len.store(n as u32, Ordering::Release);
+                    return Some(l);
+                }
+                // Lost the race. Same queue means the winner claimed it for us too;
+                // a different queue means keep probing rather than steal their entry.
+                Err(won) if won == qh => return Some(l),
+                Err(_) => continue,
+            }
+        }
+    }
+    None
+}
+
+/// Every claimed lane as `(hash, stored name)` — the raw pairing, for asserting that a
+/// lane's name belongs to its hash. Test-only: nothing in production needs the hash.
+#[cfg(test)]
+pub(crate) fn lane_pairs_for_tests() -> Vec<(u64, Vec<u8>)> {
+    let ring = NEXT_ID.load(Ordering::SeqCst);
+    if ring.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 0..LANES {
+        unsafe {
+            let l = ptr::addr_of!((*ring).lanes[i]);
+            let h = (*l).hash.load(Ordering::Acquire);
+            let n = ((*l).name_len.load(Ordering::Acquire) as usize).min(QUEUE_NAME_MAX);
+            if h == 0 || n == 0 {
+                continue;
+            }
+            let stored = std::slice::from_raw_parts(ptr::addr_of!((*l).name) as *const u8, n);
+            out.push((h, stored.to_vec()));
+        }
+    }
+    out
+}
+
+/// Note that a worker asked `queue` for work — whether or not it got any.
+///
+/// This is the signal that separates "nobody is listening to this name" from "this lane
+/// is just busy", which job age alone cannot do. Called on every poll, so it stays a
+/// single relaxed store on an already-mapped page.
+fn mark_polled(qh: u64, name: &[u8], now: u64) {
+    let ring = NEXT_ID.load(Ordering::SeqCst);
+    if ring.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(l) = lane_for(ring, qh, name) {
+            (*l).last_polled_ms.store(now, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Note that a worker actually reserved a job from `queue`.
+fn mark_drained(qh: u64, name: &[u8], now: u64) {
+    let ring = NEXT_ID.load(Ordering::SeqCst);
+    if ring.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(l) = lane_for(ring, qh, name) {
+            (*l).last_drained_ms.store(now, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Every lane a worker has polled since the ring was created.
+///
+/// Includes lanes with nothing queued, which is the point: a lane that is polled and
+/// empty is healthy, and a lane with jobs that nobody has ever polled is the fault the
+/// aggregate numbers hid. Names are returned with the application namespace stripped,
+/// matching [`by_queue`].
+pub fn lanes() -> Vec<LaneStats> {
+    let ring = NEXT_ID.load(Ordering::SeqCst);
+    if ring.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 0..LANES {
+        unsafe {
+            let l = ptr::addr_of!((*ring).lanes[i]);
+            if (*l).hash.load(Ordering::Acquire) == 0 {
+                continue;
+            }
+            let n = ((*l).name_len.load(Ordering::Acquire) as usize).min(QUEUE_NAME_MAX);
+            let stored = std::slice::from_raw_parts(ptr::addr_of!((*l).name) as *const u8, n);
+            // Claimed, name not yet published — see `lane_for`. Skipping is right: a
+            // lane reported with an empty name is indistinguishable from a queue
+            // literally named "", and it becomes readable on the very next pass.
+            if n == 0 {
+                continue;
+            }
+            // A lane claimed by another application in a shared ring is not ours to report.
+            if !crate::ns::owns(stored) {
+                continue;
+            }
+            out.push(LaneStats {
+                name: String::from_utf8_lossy(crate::ns::strip(stored)).into_owned(),
+                last_polled_ms: (*l).last_polled_ms.load(Ordering::Relaxed),
+                last_drained_ms: (*l).last_drained_ms.load(Ordering::Relaxed),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// Map the queue table with `slots` job slots. Call in the master before fork.
@@ -585,6 +792,11 @@ pub fn pop(queue: &[u8], visibility: u64) -> Option<Reserved> {
     let (p, slots) = base()?;
     let qh = hash_q(queue);
     let now = now_ms();
+    // Before the scan, and regardless of what it finds. An empty-handed poll is the
+    // observation that matters most: it is the proof that a worker *is* listening to
+    // this name, which is what tells a backlog on some other lane apart from a backlog
+    // on this one.
+    mark_polled(qh, queue, now);
     // First pass: find the best candidate (smallest available_at) without holding
     // a lock across the whole scan.
     let mut best: Option<(usize, u64, u64)> = None; // (idx, available_at, id)
@@ -639,6 +851,8 @@ pub fn pop(queue: &[u8], visibility: u64) -> Option<Reserved> {
         let plen = (r_u32(ptr::addr_of!((*e).payload_len)) as usize).min(PAYLOAD_MAX);
         let payload =
             std::slice::from_raw_parts(ptr::addr_of!((*e).payload) as *const u8, plen).to_vec();
+        // The reservation is committed, so this lane has demonstrably drained.
+        mark_drained(qh, queue, now);
         Some(Reserved {
             id: lease,
             attempts,
@@ -999,6 +1213,128 @@ mod tests {
     use crate::ns::tests::GUARD as TEST_GUARD;
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A lane records that a worker *asked*, separately from whether it got anything.
+    ///
+    /// This is the whole point of the table: job age cannot distinguish a lane nothing
+    /// polls from a lane that is merely busy, and those have opposite remedies. The
+    /// Félagi outage was the first kind, diagnosed correctly in the log for three days
+    /// and invisible everywhere a person would look.
+    #[test]
+    fn a_poll_is_recorded_separately_from_a_drain() {
+        let _g = guard();
+        init(128);
+        let q = b"lane-liveness";
+
+        // An empty-handed poll still proves a worker is listening to this name.
+        assert!(pop(q, 60).is_none(), "nothing queued yet");
+        let l = lanes()
+            .into_iter()
+            .find(|l| l.name == "lane-liveness")
+            .expect("polling a queue claims its lane");
+        assert!(l.last_polled_ms > 0, "the poll is recorded");
+        assert_eq!(
+            l.last_drained_ms, 0,
+            "nothing was taken, so the lane has never drained"
+        );
+
+        // A successful reservation is what marks it drained.
+        push(q, b"job", 0);
+        assert!(pop(q, 60).is_some(), "the job is there to take");
+        let l = lanes()
+            .into_iter()
+            .find(|l| l.name == "lane-liveness")
+            .expect("lane still present");
+        assert!(l.last_drained_ms > 0, "the drain is recorded");
+    }
+
+    /// Every claimed lane's name must belong to that lane's hash.
+    ///
+    /// This is the invariant the claim ordering exists to hold. The first version of
+    /// `lane_for` wrote the name and *then* compare-exchanged the hash, so two workers on
+    /// different queues probing the same free entry both wrote their name and the CAS
+    /// winner published its hash over the loser's — a lane reporting the wrong queue,
+    /// which is worse than one reporting none, because it sends the operator to a queue
+    /// that is working fine.
+    ///
+    /// **Honest about its reach:** run against the old ordering, this failed 0 times in
+    /// 20 — the window between the name write and the CAS is a few instructions wide, and
+    /// 24 threads doing one poll each do not reliably land in it. So this guards the
+    /// invariant against a future reordering; it is not a reproducer for the race, and
+    /// nothing here should be read as proof the old ordering was safe. It wasn't: the
+    /// interleaving is reachable, just rare, and two queue *processes* starting together
+    /// on different lanes is exactly when it would happen.
+    #[test]
+    fn concurrent_lane_claims_keep_names_with_their_own_queue() {
+        let _g = guard();
+        init(256);
+        // Enough distinct names to collide on probe positions, well under LANES.
+        let names: Vec<String> = (0..24).map(|i| format!("race-lane-{i:02}")).collect();
+        std::thread::scope(|sc| {
+            for n in &names {
+                sc.spawn(move || {
+                    // An empty-handed poll is all it takes to claim a lane.
+                    let _ = pop(n.as_bytes(), 60);
+                });
+            }
+        });
+
+        // The direct invariant: re-hash what each lane says its name is, and it must be
+        // the hash the lane was claimed under.
+        for (h, stored) in lane_pairs_for_tests() {
+            assert_eq!(
+                h,
+                hash_q(&stored),
+                "lane claimed under {h} carries the name {:?}, which hashes to {} — a \
+                 name landed on another queue's entry",
+                String::from_utf8_lossy(&stored),
+                hash_q(&stored)
+            );
+        }
+
+        // And every queue that was polled is present exactly once.
+        let got: Vec<String> = lanes()
+            .into_iter()
+            .map(|l| l.name)
+            .filter(|n| n.starts_with("race-lane-"))
+            .collect();
+        let mut uniq = got.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(
+            uniq.len(),
+            got.len(),
+            "a name appeared on more than one lane: {got:?}"
+        );
+        for n in &names {
+            assert!(got.contains(n), "lane {n} was lost in the race: {got:?}");
+        }
+    }
+
+    /// A lane a worker polled stays visible after it empties.
+    ///
+    /// `by_queue` reports queues that hold jobs, so a healthy drained lane vanishes from
+    /// it entirely. That is exactly the lane worth seeing: "a worker polls `mail` and
+    /// there is nothing queued" is the observation that makes an unattended lane
+    /// elsewhere diagnosable rather than ambiguous.
+    #[test]
+    fn a_drained_lane_is_still_reported() {
+        let _g = guard();
+        init(128);
+        let q = b"lane-emptied";
+        push(q, b"job", 0);
+        let r = pop(q, 60).expect("job");
+        assert!(delete(r.id), "ack it, so the queue is empty");
+
+        assert!(
+            !by_queue().iter().any(|(n, _)| n == "lane-emptied"),
+            "an empty queue holds no jobs, so by_queue drops it"
+        );
+        assert!(
+            lanes().iter().any(|l| l.name == "lane-emptied"),
+            "but the lane is still known, with its liveness intact"
+        );
     }
 
     #[test]

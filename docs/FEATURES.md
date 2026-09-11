@@ -595,7 +595,10 @@ askr serve … --queue 1 --queue-max 8 --queue-slots 8192 --queue-script worker.
 target (~1 worker per 10 ready jobs, clamped); as the backlog clears it drains one
 worker every couple seconds (scaled-down workers get a graceful `SIGTERM` and are
 not respawned). Backlog and pool size are exported on `/metrics`:
-`askr_queue_workers`, `askr_queue_ready`, `askr_queue_total`, `askr_queue_oldest_seconds`.
+`askr_queue_workers`, `askr_queue_ready`, `askr_queue_total`, `askr_queue_oldest_seconds`
+— and, since 1.6.0, per-queue series labelled `queue="…"` plus a `warnings` array in
+`/api/status`, because a lane nobody polls is invisible in an aggregate and cannot be
+fixed by scaling. See [Observability](OBSERVABILITY.md#queue-health-on-metrics).
 
 ## 11. Auto-TLS via ACME (0.7.0)
 

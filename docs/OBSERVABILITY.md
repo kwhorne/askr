@@ -33,7 +33,7 @@ default build, its behaviour, and CI are unaffected.
 tarball (durable L2 + observability compiled in):
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:0.9-full        # or the -full release tarball
+docker pull ghcr.io/kwhorne/askr:1.5-full        # or the -full release tarball
 ```
 
 Or build it yourself:
@@ -230,6 +230,49 @@ ASKR_OTEL_ENDPOINT=http://127.0.0.1:4317 askr serve --root public …
 > Spans are exported on a background batch processor, so they never touch request
 > latency. v1 traces PHP requests; cache-HIT / static fast paths (sub-ms) show on
 > `/metrics` instead.
+
+## Queue health on `/metrics`
+
+Prometheus scrapes the admin listener's `/metrics` ([Admin](ADMIN.md)). Unlike the sink
+above it needs no feature flag and no DSN — it is there in every build.
+
+A queue lane once sat three days with nothing draining it while the app's own health
+endpoint answered 200. Askr had the numbers the whole time and wrote its conclusion to its
+log every ten seconds, where no scrape could see it. These series are how a scrape reaches
+the same conclusion.
+
+The aggregates `askr_queue_workers`, `askr_queue_ready`, `askr_queue_total` and
+`askr_queue_oldest_seconds` are unchanged, but they cannot say *which* lane — and that is
+the only question worth alerting on: a fleet-wide `askr_queue_oldest_seconds` is equally
+high whether one abandoned lane is ageing or every lane is merely busy. Five series,
+each labelled `queue="<name>"`, answer it:
+
+| Series | Meaning |
+| --- | --- |
+| `askr_queue_pending_jobs` | Jobs ready and unclaimed, by queue. |
+| `askr_queue_oldest_pending_seconds` | Age of the oldest ready job, by queue. |
+| `askr_queue_seconds_since_poll` | Seconds since a worker last asked this queue for work. |
+| `askr_queue_seconds_since_drain` | Seconds since a worker last took a job from it. |
+| `askr_queue_unattended` | `1` when jobs are waiting and nothing is polling this queue, else `0`. |
+
+`askr_queue_seconds_since_poll` and `askr_queue_seconds_since_drain` are **absent** for a
+lane where it has never happened, rather than `0`. A `0` would read as "polled just now" —
+the exact opposite of the truth, and the one reading that would keep an alert quiet. Alert
+on `absent()`, or on `askr_queue_unattended`, which is the same judgement Askr logs and
+reports in `warnings`:
+
+```yaml
+- alert: AskrQueueUnattended
+  expr: askr_queue_unattended == 1
+  for: 5m
+  annotations:
+    summary: "nothing is polling queue {{ $labels.queue }}"
+```
+
+How long a job may sit ready and unclaimed before a lane counts as stalled is
+[`[queue] stall_secs`](CONFIGURATION.md#queue) (default 30 s). The same threshold produces
+the `warnings` array in `GET /api/status`, which names the fault as `queue_unattended` or
+`queue_not_draining` — see [Admin](ADMIN.md#queue-liveness-and-warnings).
 
 ## Retention
 

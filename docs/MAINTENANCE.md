@@ -46,6 +46,7 @@ What to actually look at in `/api/status`:
 | `respawns` | stable between checks | Climbing: a worker dies repeatedly. This is the single most informative number on the server. |
 | `rss_kb_total` | flat over days | Climbing without bound: a leak your `max_rss` isn't catching. |
 | `uptime_secs` | grows | Resets you didn't cause: crash-loop or OOM killer. |
+| `warnings` | `[]` | Non-empty: Askr has found a specific fault and named it. A `queue_unattended` entry means jobs are queued on a lane nothing polls — see [Admin](ADMIN.md#queue-liveness-and-warnings). |
 
 A `respawns` count that increases by itself is worth ten minutes now rather than an outage
 later. Everything in [worker mode's symptom index](WORKER_MODE.md) shows up here first.
@@ -359,7 +360,15 @@ instead of guessing:
 | `accept failed` with `EMFILE` | Out of file descriptors. Raise `LimitNOFILE` in the unit. |
 | `canary UNHEALTHY` | The reload aborted and you're still on the old code. Good. |
 | `tag_overflow` | A response had more cache tags than Askr can track, so it wasn't cached. Not an error, but it means that page is uncached. |
-| `queue backlog is not being consumed` | Jobs are available and nothing is taking them. The line names the queue. Either no queue worker is running (`--queue` with `--queue-script`), or it doesn't poll that name (`ASKR_QUEUE`, comma-separated). |
+| `queue backlog is not being consumed — no worker is asking this queue for jobs` | Jobs are available and nothing is polling that lane. The line names the queue. Either no queue worker is running (`--queue` with `--queue-script`), or it doesn't poll that name (`ASKR_QUEUE`, comma-separated). Adding workers does nothing. |
+| `queue backlog is growing while workers poll it` | The queue name is right and the lane isn't keeping up, or jobs are being released back. Raise the queue worker count, and look at what is failing. Both faults used to log the first message, which sent an operator hunting a queue-name typo during a plain saturation. |
+
+Both queue lines are also a `warnings` entry in `GET /api/status` — `kind` is
+`queue_unattended` or `queue_not_draining` — and a per-queue series on `/metrics`. Use
+those rather than the log: `/healthz` reports worker liveness, not queue health, and a
+lane once sat three days undrained with the app's own `/up` answering 200 throughout,
+because the only thing that knew was a log line nobody read. See
+[Admin](ADMIN.md#queue-liveness-and-warnings).
 
 For anything that *looks* fine but behaves wrong — interactivity that dies after the first
 page load, an anonymous visitor served as somebody else, 419 on every form, empty
@@ -383,7 +392,7 @@ Two habits that would have saved days:
 # 1. is it healthy, and has it been?
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9000/healthz
 curl -s http://127.0.0.1:9000/api/status -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" \
-  | jq '{workers_alive, respawns, rss_kb_total, uptime_secs}'
+  | jq '{workers_alive, respawns, rss_kb_total, uptime_secs, warnings}'
 
 # 2. certificate — expiry and issuer
 echo | openssl s_client -connect example.com:443 -servername example.com 2>/dev/null \

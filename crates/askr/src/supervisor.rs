@@ -17,9 +17,6 @@ pub(crate) const MAX_WORKERS: usize = 512;
 // Queue autoscaling target: ~1 worker per this many ready (waiting) jobs.
 pub(crate) const QUEUE_BACKLOG_PER_WORKER: usize = 10;
 
-/// How long a job may sit available and unclaimed before Askr says so. Ten seconds of
-/// normal queue latency is unremarkable; thirty means nothing is listening.
-const STALE_BACKLOG_SECS: u64 = 30;
 pub(crate) static CHILDREN: [AtomicI32; MAX_WORKERS] = [const { AtomicI32::new(0) }; MAX_WORKERS];
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(crate) static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -796,32 +793,47 @@ pub(crate) fn supervise(
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             let mut seen: Vec<String> = Vec::new();
-            for (name, c) in crate::queue::by_queue() {
-                if c.pending == 0 || c.oldest_pending_created_ms == 0 {
-                    continue;
-                }
-                let age = now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000;
-                if age < STALE_BACKLOG_SECS {
-                    continue;
-                }
-                seen.push(name.clone());
+            for w in crate::queue::warnings(now_ms) {
+                seen.push(w.queue.clone());
                 let due = warned_stale
-                    .get(&name)
+                    .get(&w.queue)
                     .map(|t| t.elapsed() >= std::time::Duration::from_secs(60))
                     .unwrap_or(true);
-                if due {
-                    warned_stale.insert(name.clone(), std::time::Instant::now());
-                    let workers = QUEUE_DESIRED.load(Ordering::SeqCst);
-                    tracing::warn!(
-                        queue = %name,
-                        pending = c.pending,
-                        oldest_secs = age,
+                if !due {
+                    continue;
+                }
+                warned_stale.insert(w.queue.clone(), std::time::Instant::now());
+                let workers = QUEUE_DESIRED.load(Ordering::SeqCst);
+                // Two faults, told apart by whether anything is polling the lane, because
+                // the remedies are opposite. The old single message asserted the first
+                // one ("no worker is taking jobs from this queue") for both, so an
+                // operator reading it during a genuine saturation was sent to check a
+                // queue name that was perfectly correct.
+                match w.fault {
+                    crate::queue::LaneFault::Unattended => tracing::warn!(
+                        queue = %w.queue,
+                        pending = w.pending,
+                        oldest_secs = w.oldest_pending_secs,
+                        last_polled_secs = ?w.last_polled_secs,
                         queue_workers = workers,
-                        "queue backlog is not being consumed — no worker is taking jobs \
-                         from this queue. Check that a queue worker is running (--queue \
+                        "queue backlog is not being consumed — no worker is asking this \
+                         queue for jobs. Check that a queue worker is running (--queue \
                          with --queue-script) and that it polls this queue name \
-                         (ASKR_QUEUE, comma-separated)."
-                    );
+                         (ASKR_QUEUE, comma-separated). Also visible as a warning in the \
+                         admin API (GET /api/status) and as askr_queue_unattended."
+                    ),
+                    crate::queue::LaneFault::NotDraining => tracing::warn!(
+                        queue = %w.queue,
+                        pending = w.pending,
+                        oldest_secs = w.oldest_pending_secs,
+                        last_drained_secs = ?w.last_drained_secs,
+                        queue_workers = workers,
+                        "queue backlog is growing while workers poll it — the queue name \
+                         is right and the lane is not keeping up, or jobs are being \
+                         released back. Raise --queue (or [queue] workers_max) and check \
+                         what is failing. Also visible as a warning in the admin API \
+                         (GET /api/status)."
+                    ),
                 }
             }
             // Forget queues that drained, so the next occurrence warns immediately rather

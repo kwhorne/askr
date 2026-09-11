@@ -302,20 +302,82 @@ fn status_json(info: &Info) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let queues = crate::queue::by_queue()
-        .into_iter()
+    // Liveness per lane, so a reader can tell a lane nothing polls from one that is
+    // merely busy without knowing Askr's thresholds. `null` means never, which is not
+    // the same as "a long time ago" and must not render as a duration.
+    let lanes = crate::queue::lanes();
+    let stamp = |ms: u64| -> String {
+        if ms == 0 {
+            "null".into()
+        } else {
+            (now_ms.saturating_sub(ms) / 1000).to_string()
+        }
+    };
+    let occupied = crate::queue::by_queue();
+    let queues = occupied
+        .iter()
         .map(|(name, c)| {
             let age = if c.oldest_pending_created_ms > 0 {
                 now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
             } else {
                 0
             };
+            let lane = lanes.iter().find(|l| &l.name == name);
             format!(
-                r#"{{"queue":{name},"pending":{p},"delayed":{d},"reserved":{r},"oldest_pending_secs":{age}}}"#,
-                name = json_string(&name),
+                r#"{{"queue":{name},"pending":{p},"delayed":{d},"reserved":{r},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
+                name = json_string(name),
                 p = c.pending,
                 d = c.delayed,
                 r = c.reserved,
+                lp = lane.map_or("null".into(), |l| stamp(l.last_polled_ms)),
+                ld = lane.map_or("null".into(), |l| stamp(l.last_drained_ms)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    // Lanes a worker has polled but which hold nothing right now. Healthy, and worth
+    // reporting: it is the evidence that a worker is attached to that name at all, which
+    // is what makes an unattended lane elsewhere diagnosable rather than ambiguous.
+    let idle = lanes
+        .iter()
+        .filter(|l| !occupied.iter().any(|(n, _)| n == &l.name))
+        .map(|l| {
+            format!(
+                r#"{{"queue":{name},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
+                name = json_string(&l.name),
+                lp = stamp(l.last_polled_ms),
+                ld = stamp(l.last_drained_ms),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    // What is actually wrong, named, with the numbers that justify it.
+    //
+    // This is the field the Félagi outage needed and did not have: Askr held every
+    // number, computed the fault correctly every ten seconds for three days, and only
+    // ever wrote it to its own stderr. A product cannot render a log line it never sees,
+    // and it should not have to reimplement the thresholds to rediscover a conclusion
+    // Askr had already reached. Empty array means nothing is wrong.
+    let warnings = crate::queue::warnings_from(now_ms, &occupied, &lanes)
+        .into_iter()
+        .map(|w| {
+            format!(
+                r#"{{"kind":"{kind}","queue":{q},"pending":{p},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld},"detail":{detail}}}"#,
+                kind = w.fault.kind(),
+                q = json_string(&w.queue),
+                p = w.pending,
+                age = w.oldest_pending_secs,
+                lp = w.last_polled_secs.map_or("null".into(), |s| s.to_string()),
+                ld = w.last_drained_secs.map_or("null".into(), |s| s.to_string()),
+                detail = json_string(match w.fault {
+                    crate::queue::LaneFault::Unattended =>
+                        "no worker is asking this queue for jobs — check the queue name a \
+                         worker polls (ASKR_QUEUE) against the one the app dispatches to",
+                    crate::queue::LaneFault::NotDraining =>
+                        "workers poll this queue and the backlog is still growing — raise \
+                         the queue worker count, or check what is failing and releasing \
+                         jobs back",
+                }),
             )
         })
         .collect::<Vec<_>>()
@@ -342,7 +404,7 @@ fn status_json(info: &Info) -> String {
         )
     };
     format!(
-        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"queues":[{queues}],"rollout":"{ro}","sandbox":{sandbox},"workers":[{workers}],"pids":[{pids}]}}"#,
+        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"queues":[{queues}],"queues_idle":[{idle}],"warnings":[{warnings}],"rollout":"{ro}","sandbox":{sandbox},"workers":[{workers}],"pids":[{pids}]}}"#,
         ver = env!("CARGO_PKG_VERSION"),
         listen = info.server_listen,
         mode = info.mode,
@@ -355,6 +417,8 @@ fn status_json(info: &Info) -> String {
         qr = s.queue_ready,
         qt = s.queue_total,
         qo = s.queue_oldest_secs,
+        idle = idle,
+        warnings = warnings,
         ro = s.rollout,
     )
 }
@@ -364,6 +428,24 @@ fn status_json(info: &Info) -> String {
 /// Queue names come from the application, so they are the one field here that is not
 /// machine-generated — everything else in this document is a number or a fixed word. An
 /// app is free to name a queue `say "hi"`, and a hand-built document has to survive it.
+/// Escape a Prometheus label value: backslash, double quote and newline, and nothing
+/// else (the exposition format defines only those three).
+///
+/// An app is free to name a queue `say "hi"`, and a scrape that cannot be parsed loses
+/// every series in the response, not just this one.
+fn label_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -636,6 +718,71 @@ fn prometheus() -> Response<Full<Bytes>> {
          # HELP askr_queue_oldest_seconds Age of the oldest ready job.\n# TYPE askr_queue_oldest_seconds gauge\naskr_queue_oldest_seconds {}\n",
         st.queue_workers, st.queue_ready, st.queue_total, st.queue_oldest_secs
     );
+
+    // Per queue, labelled. The aggregates above cannot answer "which lane", and that is
+    // the only question worth alerting on: a fleet-wide `askr_queue_oldest_seconds` is
+    // equally high whether one abandoned lane is ageing or every lane is busy.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let occupied = crate::queue::by_queue();
+    let lanes = crate::queue::lanes();
+    if !occupied.is_empty() || !lanes.is_empty() {
+        let _ = write!(
+            s,
+            "# HELP askr_queue_pending_jobs Jobs ready and unclaimed, by queue.\n# TYPE askr_queue_pending_jobs gauge\n\
+             # HELP askr_queue_oldest_pending_seconds Age of the oldest ready job, by queue.\n# TYPE askr_queue_oldest_pending_seconds gauge\n\
+             # HELP askr_queue_seconds_since_poll Seconds since a worker last asked this queue for work.\n# TYPE askr_queue_seconds_since_poll gauge\n\
+             # HELP askr_queue_seconds_since_drain Seconds since a worker last took a job from this queue.\n# TYPE askr_queue_seconds_since_drain gauge\n\
+             # HELP askr_queue_unattended 1 when jobs are waiting and nothing is polling this queue.\n# TYPE askr_queue_unattended gauge\n"
+        );
+        for (name, c) in &occupied {
+            let q = label_value(name);
+            let age = if c.oldest_pending_created_ms > 0 {
+                now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
+            } else {
+                0
+            };
+            let _ = write!(
+                s,
+                "askr_queue_pending_jobs{{queue=\"{q}\"}} {}\naskr_queue_oldest_pending_seconds{{queue=\"{q}\"}} {age}\n",
+                c.pending
+            );
+        }
+        // A lane never polled has no age to report. Emitting 0 would read as "polled just
+        // now" — the opposite of the truth — so the series is simply absent, and an alert
+        // uses `absent()` or the unattended gauge instead.
+        for l in &lanes {
+            let q = label_value(&l.name);
+            if l.last_polled_ms > 0 {
+                let _ = writeln!(
+                    s,
+                    "askr_queue_seconds_since_poll{{queue=\"{q}\"}} {}",
+                    now_ms.saturating_sub(l.last_polled_ms) / 1000
+                );
+            }
+            if l.last_drained_ms > 0 {
+                let _ = writeln!(
+                    s,
+                    "askr_queue_seconds_since_drain{{queue=\"{q}\"}} {}",
+                    now_ms.saturating_sub(l.last_drained_ms) / 1000
+                );
+            }
+        }
+        let warned = crate::queue::warnings_from(now_ms, &occupied, &lanes);
+        for (name, _) in &occupied {
+            let q = label_value(name);
+            let unattended = warned
+                .iter()
+                .any(|w| &w.queue == name && w.fault == crate::queue::LaneFault::Unattended);
+            let _ = writeln!(
+                s,
+                "askr_queue_unattended{{queue=\"{q}\"}} {}",
+                u8::from(unattended)
+            );
+        }
+    }
 
     // Latency histogram (cumulative buckets, seconds).
     let buckets = m.bucket_counts();

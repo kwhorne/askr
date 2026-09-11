@@ -132,11 +132,19 @@ Run queue workers in the same binary, supervised alongside the web workers.
 | `script` | path | Queue runner script (e.g. `examples/askr-queue.php`). |
 | `slots` | int | Shared-memory job queue slots (`0` = off; 32 KB each) — `askr_queue_*` + the `AskrQueue` driver. See [Cache](CACHE.md). |
 | `persist` | string | Name a shared-memory object for the ring so pending jobs **survive a restart** (1.5.1). Off by default: the object lives in `/dev/shm`, which containers cap at 64 MiB — see [Docker](DOCKER.md#shared-memory-size). A ring whose layout no longer matches the binary is recreated, empty, with a log line saying why. |
+| `stall_secs` | int | How long a job may sit ready and unclaimed before Askr calls the lane stalled — in the log, in `/api/status`'s `warnings`, and in `askr_queue_unattended`. Default `30`; `0` keeps the default. |
 
 **`slots` is required when `workers` is set**, and Askr refuses to start without it. The
 ring is only mapped when slots are configured; without it every push returns 0, Laravel does
 not check that, and queued jobs are discarded silently — which is how a live site stopped
 sending mail with nothing in any log.
+
+Ten seconds of queue latency is unremarkable; thirty means nothing is listening, which is
+why **`stall_secs` defaults to 30**. Raise it for an app whose queues are deliberately
+batchy, lower it to be told sooner. One threshold drives the watchdog log line, the
+`warnings` array in `GET /api/status` and the `askr_queue_unattended` metric together, so a
+dashboard cannot disagree with the log about whether a lane is stalled — see
+[Admin](ADMIN.md#queue-liveness-and-warnings).
 
 ### `[scheduler]`
 

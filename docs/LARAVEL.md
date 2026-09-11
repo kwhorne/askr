@@ -230,6 +230,14 @@ drains one worker every couple of seconds as the backlog clears — gracefully
 `/metrics`: `askr_queue_workers`, `askr_queue_ready`, `askr_queue_total`,
 `askr_queue_oldest_seconds`.
 
+Those are fleet-wide, which is the wrong grain for the failure that actually bites:
+jobs piling up on a queue nobody polls, because the app dispatches to `onQueue('mail')`
+while the worker polls `default`. Autoscaling cannot fix that — there is no consumer to
+scale — and the aggregate looks the same either way. Since 1.6.0 there are per-queue
+series (`askr_queue_pending_jobs`, `askr_queue_unattended` and friends, all labelled
+`queue="…"`) and a `warnings` array in `/api/status` that names the lane. See
+[Observability](OBSERVABILITY.md#queue-health-on-metrics).
+
 Named queues / priority work as usual — set `--queue-script` to a runner that does
 `queue:work --queue=high,default,low`.
 
@@ -281,7 +289,7 @@ It's behind a build feature, so the default build is unaffected:
 
 ```bash
 # use the published -full image/tarball (durable L2 + observ compiled in) …
-docker pull ghcr.io/kwhorne/askr:0.9-full
+docker pull ghcr.io/kwhorne/askr:1.5-full
 # … or build it yourself
 cargo build --release --features sql-backend
 ```

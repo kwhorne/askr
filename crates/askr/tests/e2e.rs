@@ -414,10 +414,28 @@ impl Server {
         Some(out)
     }
 
+    /// Block until the admin plane answers, or say truthfully why it never did.
+    ///
+    /// Sixty seconds, matching `wait_ready`, not twenty. This is a readiness wait, not an
+    /// assertion about how fast a cold PHP boot is: with a dozen servers starting at once
+    /// the master can take longer than twenty seconds to get there, and the test then
+    /// failed reporting the harness rather than the product. Seen once in six full-suite
+    /// runs, on `a_reload_replaces_every_worker` — the same test Askr-53 was about.
+    ///
+    /// It also checks the process is still alive, because the old version could not tell
+    /// "the admin plane is slow" from "the server exited on a port collision" and blamed
+    /// the admin plane for both.
     fn wait_admin(&self) {
         let addr: SocketAddr = format!("127.0.0.1:{}", self.admin).parse().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while std::time::Instant::now() < deadline {
+            // `kill(pid, 0)` rather than `try_wait`, which needs &mut Child.
+            if unsafe { libc::kill(self.pid(), 0) } != 0 {
+                panic!(
+                    "askr exited before its admin plane came up on {addr}; log:\n{}",
+                    self.log_contents()
+                );
+            }
             // A completed HTTP exchange, not just a TCP accept: the listener is bound a
             // moment before it answers, so a connect-only probe let the first real
             // request hit a closed connection and panic in the client.
@@ -1521,6 +1539,123 @@ script = "{}"
     assert!(
         !s.log_has("exiting for supervisor respawn"),
         "the worker must not be respawned by an exit():\n{}",
+        s.log_contents()
+    );
+}
+
+/// A queue nothing is draining has to be visible in the product, not only in the log.
+///
+/// This is the Félagi outage, as a test. Askr held every number needed to diagnose it,
+/// computed the fault correctly every ten seconds for three days, and wrote the answer
+/// only to its own stderr: no failed jobs, no admin warning, no health signal, `/up`
+/// answering 200 the whole time. A log line a product never reads is not an alert.
+///
+/// So the assertion is deliberately on `/api/status` rather than on the log: the log was
+/// already right. What was missing was a field a dashboard could render.
+///
+/// It also pins the classification, because that is the actionable half. `mail` here has
+/// jobs and nothing polling it — a worker on the wrong queue name, where adding workers
+/// changes nothing — and must report `queue_unattended`, not the generic "backlog" the
+/// single old message asserted for both faults.
+#[test]
+fn a_queue_nothing_drains_is_reported_by_the_admin_api() {
+    let dir = unique_dir("stalledlane");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A queue worker that polls `default` only — while the app dispatches to `mail`.
+    // The exact shape of the fault that went unnoticed for three days.
+    let queue_script = dir.join("queue.php");
+    // Polls in a loop rather than exiting after one attempt. A queue script that returns
+    // is respawned immediately, and one that returns every 100 ms forks a few hundred
+    // times a minute — enough extra load, with the whole suite running at once, to make
+    // this test's own timings unreliable. It cost one flaky run before it was noticed.
+    std::fs::write(
+        &queue_script,
+        "<?php
+for ($i = 0; $i < 80; $i++) { askr_queue_pop('default', 60); usleep(100000); }
+",
+    )
+    .unwrap();
+    let app = r#"<?php
+askr_queue_push('mail', json_encode(['uuid' => 'x', 'displayName' => 'SendInvite']), 0);
+echo 'queued';
+"#;
+    let s = Server::start_in(
+        dir,
+        &[("index.php", app)],
+        &format!(
+            "[server]\nlisten = \"127.0.0.1:{{PORT}}\"\nroot = \"{{ROOT}}\"\nworkers = \"1\"\n\n\
+             [admin]\nlisten = \"127.0.0.1:{{ADMIN}}\"\n\n\
+             [queue]\nslots = 64\nworkers = 1\nstall_secs = 1\nscript = \"{}\"\n",
+            queue_script.to_str().unwrap()
+        ),
+    );
+    s.wait_admin();
+
+    // Retried: a cold PHP boot on a loaded box can outlast the client's timeout, and a
+    // test that fails there is reporting the harness, not the product.
+    let mut queued = false;
+    for _ in 0..5 {
+        if get(s.port, "/").body.trim() == "queued" {
+            queued = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert!(
+        queued,
+        "could not enqueue the job; log:\n{}",
+        s.log_contents()
+    );
+
+    // `stall_secs = 1` is what keeps this test short; the default is thirty seconds.
+    //
+    // Wait for the *log* as well as the API, because the two are not simultaneous and
+    // the difference is worth pinning: `/api/status` computes the fault on demand and
+    // reported it within a second here, while the watchdog's tick is ten seconds and its
+    // per-queue cooldown a minute. The API is the faster surface, which is the opposite
+    // of how this was found in production.
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut status = String::new();
+    let mut api_first = None;
+    let started = std::time::Instant::now();
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        status = s.admin_status();
+        if api_first.is_none() && status.contains("queue_unattended") {
+            api_first = Some(started.elapsed());
+        }
+        if api_first.is_some() && s.log_has("no worker is asking this queue for jobs") {
+            break;
+        }
+    }
+    assert!(
+        api_first.is_some(),
+        "the admin API never reported the stalled lane. got:\n{status}\nlog:\n{}",
+        s.log_contents()
+    );
+
+    assert!(
+        status.contains(r#""kind":"queue_unattended""#),
+        "the stalled lane must appear in /api/status warnings — this is the field the \
+         outage needed and did not have. got:\n{status}\nlog:\n{}",
+        s.log_contents()
+    );
+    assert!(
+        status.contains(r#""queue":"mail""#),
+        "and it must name the lane, since the aggregate is what made it invisible: \
+         {status}"
+    );
+    // The worker polls `default`, so that lane is attached-and-empty: the evidence that
+    // makes `mail` diagnosable rather than ambiguous.
+    assert!(
+        status.contains(r#""queues_idle""#) && status.contains(r#""queue":"default""#),
+        "a polled, empty lane is reported too, which is what distinguishes \"nobody is \
+         listening to mail\" from \"no workers at all\": {status}"
+    );
+    // And the log still says it, with the fault named.
+    assert!(
+        s.log_has("no worker is asking this queue for jobs"),
+        "the operator-facing log keeps the diagnosis:\n{}",
         s.log_contents()
     );
 }

@@ -327,6 +327,13 @@ pub struct QueueSection {
     /// Off by default: the object lives in /dev/shm, which a container caps at 64 MiB.
     #[serde(default)]
     pub persist: Option<String>,
+    /// How long a job may sit ready and unclaimed before Askr calls the lane stalled —
+    /// in the log, in `/api/status`'s `warnings`, and in `askr_queue_unattended`.
+    /// Defaults to 30 seconds: ten is unremarkable queue latency, thirty means nothing
+    /// is listening. Raise it for an app whose queues are deliberately batchy, lower it
+    /// to be told sooner. 0 keeps the default.
+    #[serde(default)]
+    pub stall_secs: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -538,6 +545,8 @@ pub struct Resolved {
     pub queue_script: Option<PathBuf>,
     pub queue_slots: usize,
     pub queue_persist: Option<String>,
+    /// Seconds a ready job may wait before its lane is reported stalled. 0 = default.
+    pub queue_stall_secs: u64,
     pub scheduler_script: Option<PathBuf>,
     pub sidecars: Vec<String>,
     pub cache_slots: usize,
@@ -899,6 +908,7 @@ impl FileConfig {
             queue_script: self.queue.script,
             queue_slots: self.queue.slots,
             queue_persist: self.queue.persist,
+            queue_stall_secs: self.queue.stall_secs,
             scheduler_script: self.scheduler.script,
             sidecars: self.sidecar.into_iter().map(|s| s.command).collect(),
             cache_slots: self.cache.slots,
