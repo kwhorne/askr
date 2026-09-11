@@ -35,7 +35,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.5.2; ARCH=$(uname -m)
+VER=v1.6.0; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -51,14 +51,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.5.2     # or :1.5 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.6.0     # or :1.6 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.5` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.5.2-full`) are the same server built with the optional features
+The `-full` tags (`1.6.0-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -121,6 +121,47 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.6.0
+
+**Nothing is required, and one thing is worth wiring up the same day.** `GET /api/status`
+now carries a top-level `warnings` array — empty when all is well, and populated with a
+stable `kind`, the queue name and the numbers behind it when a queue is not being drained.
+Render it somewhere a person looks. That is the whole point of the release: Askr has been
+able to diagnose an abandoned queue for several versions and could only say so in its log,
+where a production site missed it for three days.
+
+Switch on `kind` (`queue_unattended`, `queue_not_draining`), never on `detail` — the prose
+is not stable, and is written for a human reading a dashboard.
+
+**If you scrape Prometheus**, the new per-queue series are worth an alert:
+
+```promql
+# A lane with jobs that nothing is polling. The remedy is the queue *name*, not more workers.
+max by (queue) (askr_queue_unattended) == 1
+```
+
+Note that `askr_queue_seconds_since_poll` and `askr_queue_seconds_since_drain` are absent
+for a lane where it has never happened rather than 0 — 0 would read as "just now" — so
+alert on `askr_queue_unattended` or use `absent()`, not on a comparison that a missing
+series silently never satisfies.
+
+**If your queues are deliberately batchy**, `[queue] stall_secs` (default 30) is now the
+one knob behind the log line, the `warnings` array and `askr_queue_unattended`. Raise it
+rather than learning to ignore the warning.
+
+**Docker users: check your `--admin` bind.** `docs/DOCKER.md` used to open with
+`--admin 0.0.0.0:9000`, which since 1.5.1 refuses to start without `ASKR_ADMIN_TOKEN` —
+and which, even with a token, puts the reload trigger on the Docker network. The
+documented pattern is `--admin 127.0.0.1:9000`: the image's healthcheck runs inside the
+container and reaches it, and the port leaves the network entirely. If you copied the old
+quick-start, this is the change to make. Nothing in the binary changed here; the
+documentation was wrong.
+
+**The job ring's layout version changed**, so `[queue] persist` rings written by an older
+Askr are recreated empty at boot, with a log line saying why. Pending jobs in a persistent
+ring do not survive this one upgrade. Drain the queue before upgrading if that matters;
+`persist` is off by default, so most deployments are unaffected.
 
 ### To 1.5.2
 

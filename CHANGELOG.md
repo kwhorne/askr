@@ -5,6 +5,108 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.6.0 — 2026-09-11
+
+Askr knew. That is the whole release.
+
+A production site had a queue lane nothing was draining for three days. Askr diagnosed it
+correctly every ten seconds the entire time — named the queue, named the likely cause —
+and wrote the answer only to its own stderr. No failed jobs, no admin warning, no health
+signal; the app's `/up` answered 200 throughout. The queue depth was already in the admin
+API, so a dashboard could have counted the jobs. What it could not do was learn that the
+count was *wrong*, because the threshold that made it wrong lived privately inside the
+supervisor.
+
+So this release moves the conclusion out of the log and into the API, and sharpens it on
+the way: Askr now measures whether a queue is being *drained*, not just how old its jobs
+are. Those are different questions with opposite answers, and it had only ever been able
+to ask the second one.
+
+### Added
+
+- **`warnings` in `GET /api/status`.** A top-level array, empty when nothing is wrong, and
+  the field a dashboard renders directly. Each entry carries a stable `kind`, the queue,
+  the numbers that justify the flag, and human prose in `detail`. Switch on `kind`;
+  `detail` is not stable.
+
+  The point is that a consumer no longer reimplements Askr's thresholds to rediscover a
+  conclusion Askr already reached — and then drifts from them the next time either side
+  changes. The watchdog, the API and the Prometheus gauge now share one computation, so
+  they cannot disagree.
+
+- **Per-queue liveness: polls and drains, measured separately.** A queue worker asking a
+  lane for a job is recorded whether or not it gets one; actually reserving a job is
+  recorded separately. The pair tells apart two faults that look identical in job age and
+  have opposite remedies:
+
+  - `queue_unattended` — jobs waiting, nothing polling the lane. Nearly always a queue
+    name mismatch: the app dispatches to `onQueue('mail')` while the worker polls
+    `default`. Adding workers does nothing, which is why the old advice was worse than
+    useless here.
+  - `queue_not_draining` — workers are polling and the backlog still grows. Saturated, or
+    jobs are being released back.
+
+  Verified both ways against a running server with identical job age in each case: the
+  same 40-job backlog classifies as `queue_not_draining` when a worker polls that lane and
+  `queue_unattended` when it polls another.
+
+  A lane is remembered once polled, so a queue that is polled and currently empty stays
+  visible in the new `queues_idle` array. That sounds like noise and is the opposite: "a
+  worker is attached to `default` and there is nothing on it" is exactly the evidence that
+  makes "nothing is attached to `mail`" a diagnosis rather than a guess. Up to 64 distinct
+  queue names are tracked; beyond that a lane has no liveness signal and is never flagged
+  on that basis.
+
+- **Per-queue Prometheus series**, labelled `queue="<name>"`: `askr_queue_pending_jobs`,
+  `askr_queue_oldest_pending_seconds`, `askr_queue_seconds_since_poll`,
+  `askr_queue_seconds_since_drain` and `askr_queue_unattended`. The existing aggregates
+  are unchanged and cannot answer "which lane" — a fleet-wide
+  `askr_queue_oldest_seconds` is equally high whether one abandoned lane is ageing or
+  every lane is merely busy, and only one of those is an incident.
+
+  `seconds_since_poll` and `seconds_since_drain` are **absent** for a lane where it has
+  never happened, rather than 0: emitting 0 would read as "just now", the exact opposite
+  of the truth. Alert with `absent()` or on `askr_queue_unattended`.
+
+- **`[queue] stall_secs`** (default 30) — how long a job may sit ready and unclaimed
+  before Askr calls the lane stalled, in all three places at once. Ten seconds of queue
+  latency is unremarkable; thirty means nothing is listening. Raise it for a deliberately
+  batchy app, lower it to be told sooner.
+
+### Changed
+
+- **The backlog watchdog names the fault instead of assuming one.** It used to log `no
+  worker is taking jobs from this queue` for *both* faults, so an operator reading it
+  during a plain saturation was sent to check a queue name that was perfectly correct.
+  There are now two messages, and both point at the admin API as the route that does not
+  require reading logs.
+
+- **Docker docs: the quick-start did not start.** `docs/DOCKER.md` opened with
+  `--admin 0.0.0.0:9000` while the same document said twice, further down, to use
+  `127.0.0.1:9000` — and since 1.5.1 a non-loopback admin bind refuses to start without
+  `ASKR_ADMIN_TOKEN`. Running the documented command against the published 1.5.2 image
+  fails outright. `examples/docker/quickstart.yml` had the same bind, under a comment that
+  described the opposite of what the code enforces. Both fixed, along with the stale image
+  tags (`:0.8`, `:0.9-full`, `:1.4`) scattered through the install and integration docs.
+
+- **The documented Docker healthcheck probed the wrong path.** The docs showed
+  `/api/status`; the image has probed `/healthz` since that endpoint was added, precisely
+  because `/api/status` requires `ASKR_ADMIN_TOKEN` once one is set and a credentialed
+  probe eventually declares a healthy container unhealthy. The docs were teaching the
+  mistake the endpoint exists to prevent.
+
+### Fixed
+
+- **A queue lane could be reported under the wrong name.** The lane table claimed an entry
+  by writing the queue name and *then* compare-exchanging the hash, so two workers on
+  different queues probing the same free entry both wrote their name and the winner
+  published its hash over the loser's. The claim is now the compare-exchange, with the
+  name published after it. Found while reviewing the new code rather than in the field,
+  and worth saying plainly: the regression test asserts the invariant but failed 0 times
+  in 20 runs against the old ordering — the window is a few instructions wide. It guards
+  against reordering; it is not a reproducer, and nothing about it says the old ordering
+  was safe.
+
 ## 1.5.2 — 2026-09-08
 
 A one-bug hotfix, and the bug is mine: **1.5.1 answered `400` to every HTTP/1.x request
