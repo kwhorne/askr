@@ -19,8 +19,8 @@
 # Useful once it's up:
 #
 #     curl localhost:8080/                      your app
-#     curl localhost:9000/api/status            workers, mode, memory
-#     curl localhost:9000/metrics               Prometheus
+#     docker compose exec askr curl -s localhost:9000/api/status   workers, mode, memory
+#     docker compose exec askr curl -s localhost:9000/metrics      Prometheus
 #     docker compose logs -f                    PHP diagnostics land here, not in
 #                                               the response body
 #     docker compose exec askr /opt/askr/askr tune       what config this app wants
@@ -28,8 +28,8 @@
 
 services:
   askr:
-    # Pin an exact version in anything that matters. `:1.4` follows patches.
-    image: ghcr.io/kwhorne/askr:1.4
+    # Pin an exact version in anything that matters. `:1.5` follows patches.
+    image: ghcr.io/kwhorne/askr:1.5
 
     # The entrypoint is Askr's launcher, so the command starts at `serve` —
     # no leading `askr`.
@@ -48,7 +48,11 @@ services:
       - --response-cache=512
       # Status, metrics and reload API. The image's healthcheck polls this, so a
       # container started without it works but reports itself unhealthy forever.
-      - --admin=0.0.0.0:9000
+      # Loopback inside the container, so the healthcheck reaches it and the Docker
+      # network can't. A non-loopback bind requires ASKR_ADMIN_TOKEN: without it the
+      # server refuses to start, because an open admin plane on a network is a public
+      # reload trigger. Read it with `docker compose exec askr curl …` (see above).
+      - --admin=127.0.0.1:9000
 
     environment:
       # Where the worker script boots the app from.
@@ -56,11 +60,9 @@ services:
 
     ports:
       - "8080:8080"
-      # Admin plane on localhost only — it can reload workers and read metrics.
-      # It logs a warning about binding a non-loopback address: that's about the
-      # address *inside* the container. Docker only exposes it to 127.0.0.1 here.
-      # Set ASKR_ADMIN_TOKEN if you publish it more widely.
-      - "127.0.0.1:9000:9000"
+      # The admin plane is deliberately not published. A published port forwards to
+      # the container's network interface, not its loopback, so it wouldn't reach a
+      # loopback-bound admin plane anyway.
 
     volumes:
       - ${ASKR_APP_PATH:-.}:/app

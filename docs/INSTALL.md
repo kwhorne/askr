@@ -31,14 +31,19 @@ You do **not** need nginx, Apache, or Redis. Askr replaces all three.
 ### A1. Run it
 
 ```bash
-docker run --rm -p 8080:8080 -p 9000:9000 \
+docker run --rm --name askr -p 8080:8080 \
   -v /path/to/your/app:/app \
-  ghcr.io/kwhorne/askr:1.4 \
-  serve --listen 0.0.0.0:8080 --root /app/public --admin 0.0.0.0:9000
+  ghcr.io/kwhorne/askr:1.5 \
+  serve --listen 0.0.0.0:8080 --root /app/public --admin 127.0.0.1:9000
 ```
 
 Replace `/path/to/your/app` with your Laravel project directory. The app needs its
 `vendor/` installed already — Askr serves your project, it doesn't build it.
+
+Only 8080 is published. The admin plane stays on loopback inside the container,
+where the image's healthcheck can reach it and nothing on the network can; since
+1.5.1 a non-loopback `--admin` refuses to start without `ASKR_ADMIN_TOKEN`, because
+an open admin plane on a network is a public reload trigger.
 
 > Note there's no `askr` in that command. The image's entrypoint is already the
 > launcher, so you pass `serve …` directly; writing `askr serve …` gets you
@@ -49,13 +54,14 @@ Replace `/path/to/your/app` with your Laravel project directory. The app needs i
 
 ```bash
 curl -i http://localhost:8080/
-curl -s http://localhost:9000/api/status
+docker exec askr curl -s localhost:9000/api/status
 ```
 
-You should get your app's homepage, and a JSON blob with worker counts.
+You should get your app's homepage, and a JSON blob with worker counts. The status
+call runs inside the container because that's where the admin plane listens.
 
 > **`--admin` is not optional in the image.** Its healthcheck polls
-> `:9000/api/status`, so a container started without `--admin` will keep working but
+> `:9000/healthz`, so a container started without `--admin` will keep working but
 > report itself `unhealthy` forever. That has confused us, in our own project. See
 > [DOCKER.md](DOCKER.md).
 
@@ -87,9 +93,9 @@ ASKR_APP_PATH=~/code/my-app docker compose -f quickstart.yml up
 Handy once it's running:
 
 ```bash
-curl localhost:9000/api/status                       # workers, mode, memory
-docker compose exec askr /opt/askr/askr tune         # what config this app wants
-docker compose logs -f                               # PHP diagnostics land here
+docker compose exec askr curl -s localhost:9000/api/status  # workers, mode, memory
+docker compose exec askr /opt/askr/askr tune                # what config this app wants
+docker compose logs -f                                      # PHP diagnostics land here
 ```
 
 ### A4. For production
@@ -98,7 +104,7 @@ docker compose logs -f                               # PHP diagnostics land here
 into an image so a deploy is a new image rather than a mutated directory — that's
 [`examples/docker/docker-compose.yml`](../examples/docker/docker-compose.yml) with its
 `Dockerfile`, read-only root filesystem and a volume for `storage/`. Pin an exact version
-(`askr:1.5.2`), not `:1.5` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
+(`askr:1.6.0`), not `:1.5` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
 
 Then skip to [step 4: the Laravel side](#4-the-laravel-side).
 
@@ -112,7 +118,7 @@ Nothing is installed system-wide and no system PHP is touched.
 ### B1. Download and unpack
 
 ```bash
-VER=v1.5.2; ARCH=$(uname -m)
+VER=v1.6.0; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fsSLO $BASE/$TARBALL

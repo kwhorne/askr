@@ -13,21 +13,29 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:1.5.2      # exact — use this in production
-ghcr.io/kwhorne/askr:1.4        # latest 1.4.x
+ghcr.io/kwhorne/askr:1.6.0      # exact — use this in production
+ghcr.io/kwhorne/askr:1.5        # latest 1.5.x
 ghcr.io/kwhorne/askr:latest
 ```
 
 Serving an app straight from the host, no Dockerfile needed:
 
 ```bash
-docker run --rm -p 8080:8080 -p 9000:9000 \
+docker run --rm -p 8080:8080 \
   -v /path/to/your/app:/app \
-  ghcr.io/kwhorne/askr:1.4 \
-  serve --listen 0.0.0.0:8080 --root /app/public --admin 0.0.0.0:9000
+  ghcr.io/kwhorne/askr:1.5 \
+  serve --listen 0.0.0.0:8080 --root /app/public --admin 127.0.0.1:9000
 ```
 
 The entrypoint is the launcher, so the command begins at `serve` — no leading `askr`.
+
+The admin plane is on **loopback inside the container** and deliberately not
+published. The image's `HEALTHCHECK` runs inside the container, so it reaches
+`127.0.0.1:9000` fine, while the port isn't reachable from the Docker network at
+all. Read it with `docker exec <container> curl -s localhost:9000/api/status`.
+Since 1.5.1 a non-loopback `--admin` **refuses to start** without
+`ASKR_ADMIN_TOKEN`: an open admin plane on a network is a public reload trigger.
+If you do need one, set that token — see [Admin API](ADMIN.md).
 
 For anything you start more than once, [`quickstart.yml`](../examples/docker/quickstart.yml)
 is the same thing as a compose file (`docker compose up` / `down`), with worker mode, a
@@ -43,8 +51,8 @@ the optional tiers compiled in — the **durable L2 SQL Anywhere backends**
 source:
 
 ```
-ghcr.io/kwhorne/askr:1.5.2-full
-ghcr.io/kwhorne/askr:1.4-full
+ghcr.io/kwhorne/askr:1.6.0-full
+ghcr.io/kwhorne/askr:1.5-full
 ghcr.io/kwhorne/askr:full
 ```
 
@@ -74,7 +82,7 @@ bootstrap. Run as the owner of the files:
 ```yaml
 services:
     askr:
-        image: ghcr.io/kwhorne/askr:1.5.2
+        image: ghcr.io/kwhorne/askr:1.6.0
         user: "1000:1000"        # uid:gid that owns the project
         volumes:
             - ../:/var/www/app
@@ -112,7 +120,7 @@ COPY . /app
 RUN composer install --no-dev --optimize-autoloader
 
 # 2. drop them onto the Askr runtime
-FROM ghcr.io/kwhorne/askr:0.8 AS runtime
+FROM ghcr.io/kwhorne/askr:1.6.0 AS runtime
 COPY --from=deps --chown=askr /app /var/www/app
 ENV ASKR_APP_BASE=/var/www/app
 CMD ["serve", \
@@ -216,19 +224,29 @@ new container, no reload semantics to reason about.
 
 ### Healthcheck
 
-The image ships a `HEALTHCHECK` that hits the built-in admin API — enable the
-admin plane on `127.0.0.1:9000` (`--admin 127.0.0.1:9000` or `[admin] listen`):
+The image ships a `HEALTHCHECK` that hits the built-in admin plane — enable it on
+`127.0.0.1:9000` (`--admin 127.0.0.1:9000` or `[admin] listen`):
 
 ```
-HEALTHCHECK CMD curl -sf http://127.0.0.1:9000/api/status || exit 1
+HEALTHCHECK CMD curl -sf http://127.0.0.1:9000/healthz || exit 1
 ```
+
+`/healthz` and not `/api/status`, deliberately. `/api/status` returns PIDs, memory
+figures and error records, so it requires `ASKR_ADMIN_TOKEN` once one is set — and the
+probe then failed on a container that was serving perfectly, which Docker, Kubernetes
+and Swarm all read as "restart this". `/healthz` is unauthenticated and answers two
+words: `200 ok` while a worker can serve, `503` otherwise. A probe that needs a
+credential is a probe that will eventually be wrong.
 
 > **If you run without `--admin`, the container reports `unhealthy`** even though it
 > serves traffic perfectly — the healthcheck simply can't reach the (disabled) admin
 > plane. Always pass `--admin 127.0.0.1:9000` (or `[admin] listen`) in a container so
 > the healthcheck, `/metrics`, and the dashboard work.
 
-Prometheus can scrape `http://<admin>/metrics`.
+Prometheus can scrape `http://<admin>/metrics`. A scraper outside the container
+needs a non-loopback bind, which means `ASKR_ADMIN_TOKEN` must be set or the
+server won't start — or keep the bind on loopback and scrape through a sidecar in
+the same container.
 
 ### TLS
 

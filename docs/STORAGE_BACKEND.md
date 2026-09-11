@@ -42,7 +42,7 @@ Laravel driver are unchanged — only the backend differs.
 (features compiled in); otherwise build with `--features sql-backend`:
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:0.9-full               # or: cargo build --release -p askr --features sql-backend
+docker pull ghcr.io/kwhorne/askr:1.5-full               # or: cargo build --release -p askr --features sql-backend
 ASKR_QUEUE_DB=/var/lib/askr/queue.db askr serve ...     # unset => L1 fallback
 ```
 
