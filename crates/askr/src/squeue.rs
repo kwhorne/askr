@@ -1514,6 +1514,55 @@ mod tests {
         assert!(!persistent());
     }
 
+    /// A persistent ring written by an older Askr is recreated, not misread.
+    ///
+    /// 1.6.0 added the lane table to the ring header, which moved where the job slots
+    /// start. Reading a 1.5.x ring with 1.6.0's offsets would hand back garbage as jobs —
+    /// so `LAYOUT_VERSION` went to 2 and `header_mismatch` checks it. The existing
+    /// persistence test covers a *geometry* mismatch; this covers the one an upgrade
+    /// actually produces, because `docs/UPGRADING.md` promises this behaviour by name and
+    /// a promise about an upgrade path deserves a test of that path.
+    #[test]
+    fn a_ring_from_an_older_layout_version_is_recreated_empty() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::ns::set("");
+        let name = format!("askr-oldver-{}", std::process::id());
+        unlink_for_tests(&name);
+
+        reset_for_tests();
+        init_persistent(32, &name);
+        assert!(push(b"durable", b"from the old version", 0) > 0);
+        assert_eq!(size(b"durable"), 1);
+
+        // Stamp the header back to the previous layout version, exactly as a ring left
+        // behind by 1.5.x would read.
+        unsafe {
+            let ring = NEXT_ID.load(Ordering::SeqCst);
+            assert!(!ring.is_null());
+            ptr::write(ptr::addr_of_mut!((*ring).version), LAYOUT_VERSION - 1);
+        }
+        reset_for_tests();
+
+        init_persistent(32, &name);
+        assert!(persistent());
+        assert_eq!(
+            size(b"durable"),
+            0,
+            "a ring from an older layout must be recreated empty, not read with the \
+             wrong slot offset"
+        );
+        // And the recreated ring is usable, at the current version.
+        assert!(push(b"durable", b"new life", 0) > 0);
+        reset_for_tests();
+        init_persistent(32, &name);
+        assert_eq!(size(b"durable"), 1, "and it persists again");
+
+        reset_for_tests();
+        unlink_for_tests(&name);
+        init(64);
+        assert!(!persistent());
+    }
+
     /// Two applications, one ring. A could pop B's jobs — and run B's job classes
     /// inside A's codebase — or acknowledge them by guessing an id. Queue names carry
     /// the namespace now, and an ack from the wrong application is "no such job".
