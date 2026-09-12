@@ -289,7 +289,7 @@ It's behind a build feature, so the default build is unaffected:
 
 ```bash
 # use the published -full image/tarball (durable L2 + observ compiled in) …
-docker pull ghcr.io/kwhorne/askr:1.5-full
+docker pull ghcr.io/kwhorne/askr:1.6-full
 # … or build it yourself
 cargo build --release --features sql-backend
 ```

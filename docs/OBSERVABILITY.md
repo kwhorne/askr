@@ -33,7 +33,7 @@ default build, its behaviour, and CI are unaffected.
 tarball (durable L2 + observability compiled in):
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.5-full        # or the -full release tarball
+docker pull ghcr.io/kwhorne/askr:1.6-full        # or the -full release tarball
 ```
 
 Or build it yourself:

@@ -35,7 +35,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.6.0; ARCH=$(uname -m)
+VER=v1.6.1; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -51,14 +51,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.6.0     # or :1.6 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.6.1     # or :1.6 to follow patches
 ```
 
-Pin the **exact** version in production and bump it deliberately. `:1.5` follows
+Pin the **exact** version in production and bump it deliberately. `:1.6` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.6.0-full`) are the same server built with the optional features
+The `-full` tags (`1.6.1-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -121,6 +121,13 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.6.1
+
+**Nothing to do.** A dependency refresh and two test fixes; no behaviour changed, no
+config key added, nothing to adopt. Take it for the refreshed TLS stack (`rustls`
+0.23.44, `aws-lc-rs` 1.18.1) if you terminate TLS in Askr, or skip it and take 1.6.2
+when there is one.
 
 ### To 1.6.0
 

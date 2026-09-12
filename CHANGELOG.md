@@ -5,6 +5,57 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.6.1 — 2026-09-12
+
+Maintenance. No behaviour changes; the reason to take it is the refreshed TLS stack and
+two test fixes that make a red run mean something.
+
+### Changed
+
+- **Dependency refresh**, lockfile only — no constraint in `Cargo.toml` moved. The TLS
+  path gets `rustls` 0.23.44 and `aws-lc-rs` 1.18.1, the self-signed certificate path
+  `rcgen` 0.14.10 (which pulls `pem` 4), and response compression a new `flate2`/
+  `miniz_oxide` pairing that brings in `zlib-rs`. Dependabot groups these as
+  "minor-and-patch", which is true of the direct dependencies and undersells what the
+  lock resolves to: `pem` crosses a major, and `aws-lc-sys` and `miniz_oxide` cross a
+  0.x minor, which is breaking under cargo's semver.
+
+  Verified functionally rather than by the green check, because these crates are the
+  ones that actually serve requests: a self-signed certificate is issued and negotiates
+  TLS 1.3 with ALPN h2; HTTP/1.0, HTTP/1.1 and HTTP/2 all answer 200; and a 20,400-byte
+  response gzips to 145 and decompresses back to exactly 20,400 with `Content-Encoding`
+  and `Vary` intact. CI runs clippy across the optional features but not `cargo test`
+  with them, so the `sql-backend` suite was run by hand too.
+
+- **`actions/attest-build-provenance` v3 → v4.2.2.** v4 is a repackaging — upstream
+  states it is "simply a wrapper on top of `actions/attest`" — with `subject-path`
+  unchanged and no outputs consumed here. The pin is a supply-chain control, so the SHA
+  was checked against upstream rather than trusted: the `v4.2.2` tag points exactly at
+  the pinned commit, which also carries `v4`. **This release is the first to exercise
+  it**, because the workflow it lives in runs only on a tag push and no pull-request
+  check ever executes it.
+
+### Fixed
+
+- **A failed e2e start deleted the test's own files, and its log.** `Server::drop`
+  removes the whole temp directory, and the harness built a `Server` *before* waiting
+  for readiness — so a start that failed dropped one, taking with it every file the test
+  had written before calling `start_in`. The retry on a port collision then rebuilt only
+  what it knew about, and a config pointing at `dir/queue.php` failed with
+  `queue.script not found`: a file the test had written and the harness had deleted.
+  Worse, the panic quoted a log that no longer existed, so a real failure reported an
+  empty log and told you nothing.
+
+  A failed start now keeps its directory. Measured across full-workspace runs: 3 of 10
+  failed before, 0 of 8 after. Pre-existing, and it surfaced now because 1.6.0 added
+  another concurrently-starting server and made the port race more likely.
+
+- **The queue ring's layout-version upgrade path is now tested.**
+  [Upgrading](docs/UPGRADING.md#to-160) promises that a `[queue] persist` ring written by
+  an older Askr is recreated rather than misread; only a *geometry* mismatch had a test,
+  so the path an upgrade actually takes had none. Verified load-bearing: removing the
+  version check from the header comparison makes it fail.
+
 ## 1.6.0 — 2026-09-11
 
 Askr knew. That is the whole release.

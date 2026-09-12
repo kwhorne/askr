@@ -28,8 +28,8 @@
 
 services:
   askr:
-    # Pin an exact version in anything that matters. `:1.5` follows patches.
-    image: ghcr.io/kwhorne/askr:1.5
+    # Pin an exact version in anything that matters. `:1.6` follows patches.
+    image: ghcr.io/kwhorne/askr:1.6
 
     # The entrypoint is Askr's launcher, so the command starts at `serve` —
     # no leading `askr`.
