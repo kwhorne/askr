@@ -157,6 +157,18 @@ struct Server {
     port: u16,
     admin: u16,
     log: PathBuf,
+    /// Leave `dir` on disk when this Server is dropped.
+    ///
+    /// `Drop` removes the whole directory, and `try_start_in` builds a Server *before*
+    /// `wait_ready`, so a start that failed dropped one — deleting every file the test
+    /// had written into `dir` before calling `start_in`, and the log with them. Two
+    /// consequences, both seen: the retry in `start_in_with_env` rebuilt `dir/app` from
+    /// `files` but could not restore anything else, so a config pointing at
+    /// `dir/queue.php` then failed with "queue.script not found" — a completely
+    /// misleading error; and the panic message quoted a log file that had just been
+    /// deleted, so a real failure reported an empty log. A failed start now keeps its
+    /// directory, which costs a few stale temp dirs and buys a diagnosable failure.
+    keep_dir: bool,
 }
 
 /// An unused local port. Racy in principle, but each test gets its own and the
@@ -263,8 +275,14 @@ impl Server {
             port,
             admin,
             log,
+            keep_dir: false,
         };
-        s.wait_ready()?;
+        if let Err(e) = s.wait_ready() {
+            // Keep the directory: the retry needs the files the test wrote, and whoever
+            // reads the panic needs the log.
+            s.keep_dir = true;
+            return Err(e);
+        }
         Ok(s)
     }
 
@@ -484,7 +502,9 @@ impl Drop for Server {
                 }
             }
         }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if !self.keep_dir {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
