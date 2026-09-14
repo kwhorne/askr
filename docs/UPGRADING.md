@@ -4,9 +4,14 @@ The short version: **within `1.x`, an upgrade is a drop-in.** Replace the binary
 the image tag), reload, done. You don't need to touch `askr.toml`.
 
 That's a promise, not a hope — the surfaces that make it true are listed in
-[STABILITY.md](STABILITY.md), and every release since 1.0 has kept it. New features
-arrive as new config keys that default to off, so a config written for 1.0.0 still
-means exactly the same thing on the newest 1.x.
+[STABILITY.md](STABILITY.md), and new features arrive as new config keys that default to
+off, so a config written for 1.0.0 still means exactly the same thing on the newest 1.x.
+
+**One release has broken it, deliberately.** 1.7.0 refuses to start an instance that uses
+`[[site]]` together with a queue or scheduler sidecar until you say which application the
+sidecar serves. The alternative was to keep guessing, and the guess had been silently
+throwing away every queued job on those instances since 1.5.1. If that is you, see
+[To 1.7.0](#to-170) — it is one line of config, and worth reading *before* you upgrade.
 
 - [How to upgrade](#how-to-upgrade)
 - [Zero-downtime upgrades](#zero-downtime-upgrades)
@@ -35,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.6.1; ARCH=$(uname -m)
+VER=v1.7.0; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -51,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.6.1     # or :1.6 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.7.0     # or :1.7 to follow patches
 ```
 
-Pin the **exact** version in production and bump it deliberately. `:1.6` follows
+Pin the **exact** version in production and bump it deliberately. `:1.7` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.6.1-full`) are the same server built with the optional features
+The `-full` tags (`1.7.0-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -111,8 +116,12 @@ See [Deployment](DEPLOYMENT.md#canary-reload-zero-bad-deploy).
 - **Tarball:** the previous prefix is at `<prefix>/../askr.old`. Swap it back and
   restart.
 - **Docker:** run the previous tag. This is why pinning matters.
-- **Config:** a config written for an older 1.x is still valid, so rolling back the
-  binary never requires rolling back `askr.toml`.
+- **Config:** a config written for an older 1.x is still valid on a newer binary, so
+  upgrading never requires touching `askr.toml`. The reverse is not true: unknown keys are
+  rejected, so if you have *added* a key for a newer release — `[queue] root` in 1.7.0,
+  say — a rollback needs that key removed. `askr config-check askr.toml` run against the
+  binary you are about to roll back to tells you in one command, before you stop
+  anything.
 
 Rolling back is a supported operation, not an emergency improvisation. If a downgrade
 ever fails on a config that the newer version accepted, that's a bug worth reporting —
@@ -121,6 +130,68 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.7.0
+
+**Read this one before upgrading if you use `[[site]]`.** Two things can bite, and one of
+them may already have.
+
+**Your queue may have been dead since 1.5.1.** Shared memory is namespaced per
+application, derived from the docroot. `[[site]]` makes each virtual host a separate
+application — but queue and scheduler sidecars took the namespace of the top-level
+`[server] root`, and `askr_queue_pop` matches the namespaced key. A sidecar rooted at one
+application cannot see another's jobs at all. Jobs were accepted, stored, and never read:
+no exception, no failed job, nothing the application could see. One deployment ran that
+way for six days.
+
+Check before you upgrade, on whatever version you are on. Enqueue a job and watch
+`reserved` go above zero:
+
+```bash
+curl -s -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://127.0.0.1:9000/api/status \
+  | jq '.queues'
+```
+
+`reserved: 0` on a lane with `pending` above zero, holding steady, is the signature. An
+empty queue proves nothing, and neither does an absence of backlog warnings straight after
+a restart — a restart recreates the ring, so the warnings are guaranteed to be quiet for a
+while whether or not anything is wrong.
+
+**A `[[site]]` instance with a sidecar now refuses to start** until you say which
+application the sidecar serves:
+
+```toml
+[queue]
+root = "/var/www/example.com/public"   # = the [[site]] root that dispatches the jobs
+slots = 8192
+workers = 4
+script = "/opt/askr/examples/askr-queue.php"
+
+[scheduler]
+root = "/var/www/example.com/public"   # defaults to [queue] root
+script = "/opt/askr/examples/askr-scheduler.php"
+```
+
+If the top-level application is the one queueing, set `[queue] root` to the same path as
+`[server] root`. That is a valid answer — it just has to be an answer, because Askr cannot
+infer it from a queue script and the previous default was a guess that failed in silence.
+
+**Single-application instances need nothing.** No `[[site]]`, no change: both keys default
+to `[server] root`, which is already what you want.
+
+**If you alert on queue metrics**, every per-queue series now carries an `app` label
+alongside `queue`, so a recording rule or dashboard that groups by `queue` alone will now
+see one series per application instead of one merged series. There is also a new gauge
+worth an alert of its own:
+
+```promql
+# Jobs one application queued that only another application's workers poll.
+# Adding workers cannot fix this — the queue name is right and the application is not.
+max by (queue, app) (askr_queue_unreachable) == 1
+```
+
+And `/api/status` gained `app` on every queue entry, plus a `queue_wrong_application`
+warning kind carrying `polled_by`. Switch on `kind`, never on `detail`.
 
 ### To 1.6.1
 

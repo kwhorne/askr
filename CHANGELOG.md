@@ -5,6 +5,76 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.7.0 — 2026-09-14
+
+**If you run `[[site]]` with a queue or scheduler sidecar, your queue has probably been
+dead since 1.5.1 and nothing told you.** That is the release.
+
+A production instance accepted every queued job for six days and read none of them: all
+outbound mail, every webhook, every queued broadcast. It surfaced when a person could not
+reset their password — the reset email was one of the jobs nothing ever read. The admin
+API showed the jobs waiting with `reserved: 0` on every lane; nothing was ever even
+claimed.
+
+Shared memory is namespaced per application, derived from the docroot. `[[site]]` gives
+each virtual host its own docroot, so each is a separate application — but the queue and
+scheduler **sidecars** took the namespace of the top-level `[server] root`.
+`askr_queue_pop` matches the *namespaced* key, so a sidecar rooted at one application can
+never see another's jobs. Not slowly. Never. The jobs were invisible to the only
+processes that could run them, and every layer above reported a healthy fleet.
+
+1.5.1 introduced the namespacing. The upgrade note for it says "Queue and scheduler
+sidecars belong to the application at the top-level `root`" — which describes this
+behaviour accurately and files it as a design decision rather than as the silent queue
+killer it is.
+
+### Fixed
+
+- **Sidecars can now be told which application they serve**, with `[queue] root` and
+  `[scheduler] root`. Both default to `[server] root`, which is correct for the single-
+  application instances that are the majority. Set it to the `[[site]] root` of the
+  application that dispatches the jobs.
+
+- **The ambiguous configuration refuses to start.** `[[site]]` together with a queue or
+  scheduler sidecar, and neither `root` key set, is now a startup error that names the key
+  to set. Askr cannot infer which application a queue script belongs to — a sidecar is one
+  process with one namespace for its whole life — and the previous default was a guess
+  that failed in total silence. Refusing costs one line of config. Guessing cost six days
+  of discarded work and a person locked out of their account. `[queue] root` equal to
+  `[server] root` is a perfectly good answer; it just has to be an answer.
+
+- **A queue nothing can reach is no longer reported as one that is merely behind.** The
+  1.6.0 warning system classified this exact fault as `queue_not_draining` and advised
+  "raise the queue worker count" — advice that is not just wrong but unachievable, since
+  no number of workers on the wrong application can pop those jobs. The cause was in the
+  classifier: it matched lanes to jobs on the *display* name, and both applications' lanes
+  display as `mail`. It now matches on the namespaced identity, and the new fault
+  `queue_wrong_application` names both applications — whose jobs are waiting, and whose
+  workers are polling the name instead.
+
+- **The admin API stopped merging two applications into one.** `by_queue()` stripped the
+  namespace off and reported jobs under the bare queue name, which is precisely why a
+  queue that could never drain was indistinguishable from one that was busy. Every queue
+  entry in `/api/status` — in `queues`, `queues_idle` and `warnings` — now carries `app`,
+  and every per-queue Prometheus series carries a matching `app` label.
+
+### Added
+
+- **`askr_queue_unreachable`**, a Prometheus gauge that is 1 when jobs are waiting under
+  one application and only another application's workers poll that queue name. Deliberately
+  separate from `askr_queue_unattended`: "nobody is listening" and "somebody is listening,
+  under the wrong application" have different fixes, and an alert that conflates them sends
+  the operator after a queue name that is already correct.
+
+### Verified
+
+Reproduced before fixing and re-checked after, against a running server rather than by
+reading: a `[[site]]` instance with a sidecar reproduces `pending: 1, reserved: 0` and
+never drains; the same instance with `[queue] root` pointing at the site drains on the
+first poll; and pointing `[queue] root` at the wrong application deliberately now reports
+`queue_wrong_application` naming both, where it previously said "raise the queue worker
+count".
+
 ## 1.6.1 — 2026-09-12
 
 Maintenance. No behaviour changes; the reason to take it is the refreshed TLS stack and

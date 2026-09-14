@@ -13,8 +13,8 @@ cron).
 Published to GHCR for `linux/amd64` and `linux/arm64` on every release tag:
 
 ```
-ghcr.io/kwhorne/askr:1.6.1      # exact — use this in production
-ghcr.io/kwhorne/askr:1.6        # latest 1.6.x
+ghcr.io/kwhorne/askr:1.7.0      # exact — use this in production
+ghcr.io/kwhorne/askr:1.7        # latest 1.7.x
 ghcr.io/kwhorne/askr:latest
 ```
 
@@ -23,7 +23,7 @@ Serving an app straight from the host, no Dockerfile needed:
 ```bash
 docker run --rm -p 8080:8080 \
   -v /path/to/your/app:/app \
-  ghcr.io/kwhorne/askr:1.6 \
+  ghcr.io/kwhorne/askr:1.7 \
   serve --listen 0.0.0.0:8080 --root /app/public --admin 127.0.0.1:9000
 ```
 
@@ -51,8 +51,8 @@ the optional tiers compiled in — the **durable L2 SQL Anywhere backends**
 source:
 
 ```
-ghcr.io/kwhorne/askr:1.6.1-full
-ghcr.io/kwhorne/askr:1.6-full
+ghcr.io/kwhorne/askr:1.7.0-full
+ghcr.io/kwhorne/askr:1.7-full
 ghcr.io/kwhorne/askr:full
 ```
 
@@ -82,7 +82,7 @@ bootstrap. Run as the owner of the files:
 ```yaml
 services:
     askr:
-        image: ghcr.io/kwhorne/askr:1.6.1
+        image: ghcr.io/kwhorne/askr:1.7.0
         user: "1000:1000"        # uid:gid that owns the project
         volumes:
             - ../:/var/www/app
@@ -120,7 +120,7 @@ COPY . /app
 RUN composer install --no-dev --optimize-autoloader
 
 # 2. drop them onto the Askr runtime
-FROM ghcr.io/kwhorne/askr:1.6.1 AS runtime
+FROM ghcr.io/kwhorne/askr:1.7.0 AS runtime
 COPY --from=deps --chown=askr /app /var/www/app
 ENV ASKR_APP_BASE=/var/www/app
 CMD ["serve", \
