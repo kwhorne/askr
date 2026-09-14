@@ -33,7 +33,7 @@ default build, its behaviour, and CI are unaffected.
 tarball (durable L2 + observability compiled in):
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.6-full        # or the -full release tarball
+docker pull ghcr.io/kwhorne/askr:1.7-full        # or the -full release tarball
 ```
 
 Or build it yourself:
@@ -244,8 +244,9 @@ the same conclusion.
 The aggregates `askr_queue_workers`, `askr_queue_ready`, `askr_queue_total` and
 `askr_queue_oldest_seconds` are unchanged, but they cannot say *which* lane — and that is
 the only question worth alerting on: a fleet-wide `askr_queue_oldest_seconds` is equally
-high whether one abandoned lane is ageing or every lane is merely busy. Five series,
-each labelled `queue="<name>"`, answer it:
+high whether one abandoned lane is ageing or every lane is merely busy. Six series, each
+labelled `queue="<name>"` **and `app="<namespace>"`** — the application the jobs or the lane
+belong to, empty where there is no namespace — answer it:
 
 | Series | Meaning |
 | --- | --- |
@@ -254,6 +255,7 @@ each labelled `queue="<name>"`, answer it:
 | `askr_queue_seconds_since_poll` | Seconds since a worker last asked this queue for work. |
 | `askr_queue_seconds_since_drain` | Seconds since a worker last took a job from it. |
 | `askr_queue_unattended` | `1` when jobs are waiting and nothing is polling this queue, else `0`. |
+| `askr_queue_unreachable` | `1` when jobs are waiting under one application and only another application's workers poll that queue name, else `0`. |
 
 `askr_queue_seconds_since_poll` and `askr_queue_seconds_since_drain` are **absent** for a
 lane where it has never happened, rather than `0`. A `0` would read as "polled just now" —
@@ -269,10 +271,34 @@ reports in `warnings`:
     summary: "nothing is polling queue {{ $labels.queue }}"
 ```
 
+The `app` label is the application a lane belongs to, a namespace derived from its docroot.
+Shared memory is partitioned per application and `askr_queue_pop` matches the *namespaced*
+key, so `queue="mail"` under two applications is two lanes, and one of them can be drained
+briskly while the other is never read at all. Before 1.7.0 they were summed into one series,
+and the healthy one hid the dead one.
+
+`askr_queue_unreachable` is that second case, and it is deliberately not folded into
+`askr_queue_unattended`: "nothing is polling this lane" is fixed by starting a worker or
+correcting the queue name, while "another application's workers are polling this name" is
+fixed by pointing the sidecar at the right docroot with
+[`[queue] root` / `[scheduler] root`](CONFIGURATION.md#queue). An alert that conflates them
+sends the operator after a queue name that is already correct, and no number of extra
+workers can pop those jobs. Like `askr_queue_unattended`, the gauge exists only for lanes
+that currently hold jobs, so `== 1` is the alert:
+
+```yaml
+- alert: AskrQueueUnreachable
+  expr: askr_queue_unreachable == 1
+  for: 5m
+  annotations:
+    summary: "{{ $labels.app }}'s jobs on queue {{ $labels.queue }} are unreachable"
+```
+
 How long a job may sit ready and unclaimed before a lane counts as stalled is
 [`[queue] stall_secs`](CONFIGURATION.md#queue) (default 30 s). The same threshold produces
-the `warnings` array in `GET /api/status`, which names the fault as `queue_unattended` or
-`queue_not_draining` — see [Admin](ADMIN.md#queue-liveness-and-warnings).
+the `warnings` array in `GET /api/status`, which names the fault as `queue_unattended`,
+`queue_wrong_application` or `queue_not_draining` — see
+[Admin](ADMIN.md#queue-liveness-and-warnings).
 
 ## Retention
 

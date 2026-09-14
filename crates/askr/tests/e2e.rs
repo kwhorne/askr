@@ -1680,6 +1680,89 @@ echo 'queued';
     );
 }
 
+/// A sidecar beside `[[site]]` must not silently consume the wrong application's queue.
+///
+/// Shared memory is namespaced per application, derived from the docroot, and
+/// `askr_queue_pop` matches the namespaced key. A sidecar is one process with one
+/// namespace for its whole life, so it serves exactly one application — and Askr cannot
+/// infer which from a queue script that could belong to any of them. It used to default
+/// to the top-level `root`, which meant that on any instance where a `[[site]]`
+/// application dispatched the jobs, every job was accepted, stored, and never read: no
+/// exception, no failed job, nothing the application could see. A real deployment ran
+/// that way for six days and noticed only because a person could not reset a password.
+///
+/// Refusing costs one line of config. Guessing cost six days.
+#[test]
+fn a_sidecar_beside_virtual_hosts_must_say_which_application_it_serves() {
+    let dir = unique_dir("sidecarns");
+    std::fs::create_dir_all(dir.join("site")).unwrap();
+    std::fs::write(dir.join("site/index.php"), "<?php echo 'site';").unwrap();
+    let queue_script = dir.join("queue.php");
+    std::fs::write(&queue_script, "<?php usleep(200000);\n").unwrap();
+
+    let config = format!(
+        "[server]\nlisten = \"127.0.0.1:{{PORT}}\"\nroot = \"{{ROOT}}\"\n\n\
+         [[site]]\nhosts = [\"other.test\"]\nroot = \"{}\"\n\n\
+         [queue]\nslots = 64\nworkers = 1\nscript = \"{}\"\n",
+        dir.join("site").to_str().unwrap(),
+        queue_script.to_str().unwrap()
+    );
+    let app = dir.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("index.php"), "<?php echo 'top';").unwrap();
+    let cfg = dir.join("askr.toml");
+    std::fs::write(
+        &cfg,
+        config
+            .replace("{PORT}", &free_port().to_string())
+            .replace("{ROOT}", app.to_str().unwrap()),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args(["serve", "--config", cfg.to_str().unwrap()])
+        .output()
+        .expect("spawn askr");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an ambiguous sidecar namespace must not start: {err}"
+    );
+    assert!(
+        err.contains("cannot tell which application the sidecar serves"),
+        "and the error has to name the fix, not just complain: {err}"
+    );
+    assert!(
+        err.contains("[queue] root"),
+        "the message must name the key that resolves it: {err}"
+    );
+
+    // And with the key set, it starts and serves.
+    std::fs::write(
+        &cfg,
+        format!(
+            "[server]\nlisten = \"127.0.0.1:{}\"\nroot = \"{}\"\n\n\
+             [[site]]\nhosts = [\"other.test\"]\nroot = \"{}\"\n\n\
+             [queue]\nroot = \"{}\"\nslots = 64\nworkers = 1\nscript = \"{}\"\n",
+            free_port(),
+            app.to_str().unwrap(),
+            dir.join("site").to_str().unwrap(),
+            dir.join("site").to_str().unwrap(),
+            queue_script.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let ok = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args(["config-check", cfg.to_str().unwrap()])
+        .output()
+        .expect("spawn askr");
+    assert!(
+        ok.status.success(),
+        "naming the application must be accepted: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+}
+
 /// `--config` is the whole configuration, and must say so rather than ignore flags.
 ///
 /// The file/CLI split is an either/or, not a merge: with `--config` given, every other

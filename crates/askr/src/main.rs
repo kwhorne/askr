@@ -637,6 +637,10 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(ss.is_file(), "scheduler script not found: {}", ss.display());
                 }
                 let cfg = Config {
+                    // The CLI has no `[[site]]` — virtual hosts are config-file only — so
+                    // there is exactly one application and the sidecars share its docroot.
+                    sidecar_docroot: docroot.clone(),
+                    scheduler_docroot: docroot.clone(),
                     docroot,
                     front_controller: front,
                     listen,

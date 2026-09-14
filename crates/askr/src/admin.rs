@@ -313,19 +313,23 @@ fn status_json(info: &Info) -> String {
             (now_ms.saturating_sub(ms) / 1000).to_string()
         }
     };
-    let occupied = crate::queue::by_queue();
+    let occupied = crate::queue::by_queue_with_app();
     let queues = occupied
         .iter()
-        .map(|(name, c)| {
+        .map(|(app, name, c)| {
             let age = if c.oldest_pending_created_ms > 0 {
                 now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
             } else {
                 0
             };
-            let lane = lanes.iter().find(|l| &l.name == name);
+            // Matched on the namespaced identity, not the display name. A lane polled by
+            // another application's worker cannot yield these jobs, and reporting its
+            // poll time here is what made an unreachable queue look attended.
+            let lane = lanes.iter().find(|l| &l.name == name && &l.app == app);
             format!(
-                r#"{{"queue":{name},"pending":{p},"delayed":{d},"reserved":{r},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
+                r#"{{"queue":{name},"app":{app},"pending":{p},"delayed":{d},"reserved":{r},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
                 name = json_string(name),
+                app = app.as_deref().map_or("null".into(), json_string),
                 p = c.pending,
                 d = c.delayed,
                 r = c.reserved,
@@ -340,11 +344,12 @@ fn status_json(info: &Info) -> String {
     // is what makes an unattended lane elsewhere diagnosable rather than ambiguous.
     let idle = lanes
         .iter()
-        .filter(|l| !occupied.iter().any(|(n, _)| n == &l.name))
+        .filter(|l| !occupied.iter().any(|(a, n, _)| n == &l.name && a == &l.app))
         .map(|l| {
             format!(
-                r#"{{"queue":{name},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
+                r#"{{"queue":{name},"app":{app},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
                 name = json_string(&l.name),
+                app = l.app.as_deref().map_or("null".into(), json_string),
                 lp = stamp(l.last_polled_ms),
                 ld = stamp(l.last_drained_ms),
             )
@@ -362,14 +367,29 @@ fn status_json(info: &Info) -> String {
         .into_iter()
         .map(|w| {
             format!(
-                r#"{{"kind":"{kind}","queue":{q},"pending":{p},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld},"detail":{detail}}}"#,
+                r#"{{"kind":"{kind}","queue":{q},"app":{app},"polled_by":[{polled}],"pending":{p},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld},"detail":{detail}}}"#,
                 kind = w.fault.kind(),
                 q = json_string(&w.queue),
+                app = w.app.as_deref().map_or("null".into(), json_string),
+                polled = match &w.fault {
+                    crate::queue::LaneFault::WrongApplication { polled_by } => polled_by
+                        .iter()
+                        .map(|a| json_string(a))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    _ => String::new(),
+                },
                 p = w.pending,
                 age = w.oldest_pending_secs,
                 lp = w.last_polled_secs.map_or("null".into(), |s| s.to_string()),
                 ld = w.last_drained_secs.map_or("null".into(), |s| s.to_string()),
                 detail = json_string(match w.fault {
+                    crate::queue::LaneFault::WrongApplication { .. } =>
+                        "these jobs were pushed by one application and the only workers \
+                         polling this queue name belong to another, so no worker can ever \
+                         see them — set [queue] root (and [scheduler] root) to the docroot \
+                         of the application that dispatches them. Adding workers cannot \
+                         help",
                     crate::queue::LaneFault::Unattended =>
                         "no worker is asking this queue for jobs — check the queue name a \
                          worker polls (ASKR_QUEUE) against the one the app dispatches to",
@@ -726,7 +746,7 @@ fn prometheus() -> Response<Full<Bytes>> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let occupied = crate::queue::by_queue();
+    let occupied = crate::queue::by_queue_with_app();
     let lanes = crate::queue::lanes();
     if !occupied.is_empty() || !lanes.is_empty() {
         let _ = write!(
@@ -735,10 +755,12 @@ fn prometheus() -> Response<Full<Bytes>> {
              # HELP askr_queue_oldest_pending_seconds Age of the oldest ready job, by queue.\n# TYPE askr_queue_oldest_pending_seconds gauge\n\
              # HELP askr_queue_seconds_since_poll Seconds since a worker last asked this queue for work.\n# TYPE askr_queue_seconds_since_poll gauge\n\
              # HELP askr_queue_seconds_since_drain Seconds since a worker last took a job from this queue.\n# TYPE askr_queue_seconds_since_drain gauge\n\
-             # HELP askr_queue_unattended 1 when jobs are waiting and nothing is polling this queue.\n# TYPE askr_queue_unattended gauge\n"
+             # HELP askr_queue_unattended 1 when jobs are waiting and nothing is polling this queue.\n# TYPE askr_queue_unattended gauge\n\
+             # HELP askr_queue_unreachable 1 when jobs are waiting under one application and only another application's workers poll that queue name.\n# TYPE askr_queue_unreachable gauge\n"
         );
-        for (name, c) in &occupied {
+        for (app, name, c) in &occupied {
             let q = label_value(name);
+            let a = label_value(app.as_deref().unwrap_or(""));
             let age = if c.oldest_pending_created_ms > 0 {
                 now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
             } else {
@@ -746,7 +768,7 @@ fn prometheus() -> Response<Full<Bytes>> {
             };
             let _ = write!(
                 s,
-                "askr_queue_pending_jobs{{queue=\"{q}\"}} {}\naskr_queue_oldest_pending_seconds{{queue=\"{q}\"}} {age}\n",
+                "askr_queue_pending_jobs{{queue=\"{q}\",app=\"{a}\"}} {}\naskr_queue_oldest_pending_seconds{{queue=\"{q}\",app=\"{a}\"}} {age}\n",
                 c.pending
             );
         }
@@ -755,31 +777,44 @@ fn prometheus() -> Response<Full<Bytes>> {
         // uses `absent()` or the unattended gauge instead.
         for l in &lanes {
             let q = label_value(&l.name);
+            let a = label_value(l.app.as_deref().unwrap_or(""));
             if l.last_polled_ms > 0 {
                 let _ = writeln!(
                     s,
-                    "askr_queue_seconds_since_poll{{queue=\"{q}\"}} {}",
+                    "askr_queue_seconds_since_poll{{queue=\"{q}\",app=\"{a}\"}} {}",
                     now_ms.saturating_sub(l.last_polled_ms) / 1000
                 );
             }
             if l.last_drained_ms > 0 {
                 let _ = writeln!(
                     s,
-                    "askr_queue_seconds_since_drain{{queue=\"{q}\"}} {}",
+                    "askr_queue_seconds_since_drain{{queue=\"{q}\",app=\"{a}\"}} {}",
                     now_ms.saturating_sub(l.last_drained_ms) / 1000
                 );
             }
         }
         let warned = crate::queue::warnings_from(now_ms, &occupied, &lanes);
-        for (name, _) in &occupied {
+        for (app, name, _) in &occupied {
             let q = label_value(name);
-            let unattended = warned
+            let a = label_value(app.as_deref().unwrap_or(""));
+            let fault = warned
                 .iter()
-                .any(|w| &w.queue == name && w.fault == crate::queue::LaneFault::Unattended);
-            let _ = writeln!(
+                .find(|w| &w.queue == name && &w.app == app)
+                .map(|w| &w.fault);
+            let unattended = matches!(fault, Some(crate::queue::LaneFault::Unattended));
+            // Separate from `unattended` on purpose: "nobody is listening" and "somebody
+            // is listening, under the wrong application" have different fixes, and an
+            // alert that conflates them sends the operator to the queue name when the
+            // name is already right.
+            let unreachable = matches!(
+                fault,
+                Some(crate::queue::LaneFault::WrongApplication { .. })
+            );
+            let _ = write!(
                 s,
-                "askr_queue_unattended{{queue=\"{q}\"}} {}",
-                u8::from(unattended)
+                "askr_queue_unattended{{queue=\"{q}\",app=\"{a}\"}} {}\naskr_queue_unreachable{{queue=\"{q}\",app=\"{a}\"}} {}\n",
+                u8::from(unattended),
+                u8::from(unreachable)
             );
         }
     }

@@ -255,11 +255,74 @@ while two domains serving one docroot are one application and share, as they sho
 
 Two consequences worth knowing:
 
-- **Queue and scheduler sidecars belong to the application at the top-level `root`.**
-  A second application's jobs land in its own namespace and nothing pops them — which
-  is correct (they would otherwise run inside the wrong codebase) and also means
-  that application has no workers. Untrusted or unrelated applications want their own
-  instance.
+- **Queue and scheduler sidecars serve exactly one application, and the configuration has
+  to say which.** A second application's jobs land in its own namespace, and a sidecar
+  namespaced to another application cannot pop them at all. Since 1.7.0 that is
+  [`[queue] root` / `[scheduler] root`](#queue-and-scheduler-sidecars-serve-one-application),
+  and Askr refuses to start without it.
 - **Broadcasting is not partitioned.** Channel names are instance-wide, and the Pusher
   secret is one per instance. Treat realtime as belonging to one application per
   instance.
+
+### Queue and scheduler sidecars serve one application
+
+A queue or scheduler sidecar is one process with one namespace for its whole life, so it
+consumes exactly one application's jobs. On an instance with `[[site]]` there is more than
+one application, and which one the sidecar belongs to is a question only the configuration
+can answer.
+
+The mechanism is the namespace above. A pushed job is stored under a key carrying the
+namespace of the application that pushed it, and `askr_queue_pop` matches on that
+*namespaced* key. A sidecar namespaced to one application therefore never sees another's
+jobs — not slowly, never: the key it asks for does not exist. Until 1.7.0 sidecars took the
+namespace of the top-level `[server] root`, so wherever a `[[site]]` application dispatched
+the jobs, every job was accepted, stored and never read. One instance ran that way for six
+days: mail, webhooks and broadcasts all stopped, nothing failed, and the admin API showed
+the jobs sitting there with `reserved: 0` on every lane — nothing had ever even been
+claimed. It was noticed when a person could not reset their password.
+
+Two keys say which application:
+
+```toml
+[server]
+root = "/var/www/default/public"
+
+[[site]]
+hosts = ["domene.no", "*.domene.no"]
+root  = "/var/www/domene/public"        # this application dispatches the jobs
+
+[queue]
+workers = 2
+slots   = 1024
+script  = "/opt/askr/examples/askr-queue.php"
+root    = "/var/www/domene/public"      # ...so its workers run in that namespace
+
+[scheduler]
+script = "/opt/askr/examples/askr-scheduler.php"
+# no root here: it defaults to [queue] root
+```
+
+`[scheduler] root` defaults to `[queue] root`, and that to `[server] root`, so a scheduler
+serving the same application as the queue workers needs no second line. Set it when the
+scheduler belongs to a different application than the queue workers, or when an instance
+runs the scheduler without queue workers — the two are resolved independently, so
+`[queue] root` never overrides it. If the application that queues the jobs *is* the
+top-level one, set `[queue] root` to the same path as `[server] root` — that is a valid and
+expected answer; it just has to be an answer.
+
+**Askr refuses to start** when `[[site]]` is configured together with a queue or scheduler
+sidecar and neither key is set. The error says it cannot tell which application the sidecar
+serves and names the key to set. An upgrade to 1.7.0 on a multi-site instance that runs a
+sidecar will hit this on the first start. It is deliberate: guessing cost six days of
+silently discarded work, and refusing costs one line of config.
+
+Pointing the sidecar does not make it serve two applications. Jobs pushed by any *other*
+application on the instance still have no workers — but that is now visible instead of
+silent. `GET /api/status` carries the application (`app`) on every queue entry, so two
+applications' `mail` lanes are two entries rather than one, and a lane whose jobs only
+another application's workers poll is reported as `kind: "queue_wrong_application"` with
+`polled_by` naming those applications — see
+[Admin](ADMIN.md#queue-liveness-and-warnings). The same judgement is
+`askr_queue_unreachable` on `/metrics`
+([Observability](OBSERVABILITY.md#queue-health-on-metrics)), and the backlog watchdog logs
+it. Applications that each need their own workers want their own instance.

@@ -188,6 +188,9 @@ fn hash_q(q: &[u8]) -> u64 {
 
 /// Per-queue liveness, as the reporting side sees it.
 pub struct LaneStats {
+    /// The namespace the lane was claimed under — which application's worker polled it.
+    /// `None` for a lane claimed with no namespace set.
+    pub app: Option<String>,
     pub name: String,
     /// Unix ms a worker last asked this lane for work; 0 = never.
     pub last_polled_ms: u64,
@@ -335,18 +338,19 @@ pub fn lanes() -> Vec<LaneStats> {
             if n == 0 {
                 continue;
             }
-            // A lane claimed by another application in a shared ring is not ours to report.
-            if !crate::ns::owns(stored) {
-                continue;
-            }
+            // Every lane, not just this namespace's. A reporting process (the master)
+            // has no namespace of its own, and filtering here would have hidden exactly
+            // the lane that mattered: the one a sidecar polls under an application the
+            // jobs were never pushed to. The application is carried alongside instead.
             out.push(LaneStats {
+                app: crate::ns::namespace_of(stored).map(str::to_string),
                 name: String::from_utf8_lossy(crate::ns::strip(stored)).into_owned(),
                 last_polled_ms: (*l).last_polled_ms.load(Ordering::Relaxed),
                 last_drained_ms: (*l).last_drained_ms.load(Ordering::Relaxed),
             });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.app.cmp(&b.app)));
     out
 }
 
@@ -1030,12 +1034,21 @@ pub fn counts(queue: &[u8]) -> Counts {
 /// say *which* queue is stuck. Aggregate numbers were what made today's failure hard to
 /// see: "1 job ready" was true, and told nobody that it was on `mail` while the only
 /// worker polled `default`.
-pub fn by_queue() -> Vec<(String, Counts)> {
+/// Every queue holding a job, as `(application, queue, counts)`.
+///
+/// `application` is the namespace the jobs were pushed under — `None` for a job written
+/// with no namespace at all. The plain [`by_queue`] drops it, which is fine for a
+/// single-application instance and actively misleading for any other: a queue worker
+/// namespaced to one application cannot pop another's jobs, and with the namespace
+/// stripped the two are indistinguishable in every report. That is how a queue nothing
+/// could ever consume was reported as a queue that was merely behind.
+pub fn by_queue_with_app() -> Vec<(Option<String>, String, Counts)> {
     let Some((p, slots)) = base() else {
         return Vec::new();
     };
     let now = now_ms();
-    let mut out: std::collections::HashMap<String, Counts> = std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<(Option<String>, String), Counts> =
+        std::collections::HashMap::new();
     for idx in 0..slots {
         let e = unsafe { p.add(idx) };
         let _g = Slot::lock(e);
@@ -1045,11 +1058,12 @@ pub fn by_queue() -> Vec<(String, Counts)> {
             }
             let n = (ptr::read(ptr::addr_of!((*e).name_len)) as usize).min(QUEUE_NAME_MAX);
             let stored = std::slice::from_raw_parts(ptr::addr_of!((*e).name) as *const u8, n);
+            let app = crate::ns::namespace_of(stored).map(str::to_string);
             let name = String::from_utf8_lossy(crate::ns::strip(stored)).into_owned();
             let avail = r_u64(ptr::addr_of!((*e).available_at));
             let reserved = r_u64(ptr::addr_of!((*e).reserved_until));
             let created = r_u64(ptr::addr_of!((*e).created_at));
-            let c = out.entry(name).or_default();
+            let c = out.entry((app, name)).or_default();
             // Same bucket order as `counts()`, so the two can never disagree.
             if reserved > now {
                 c.reserved += 1;
@@ -1063,8 +1077,16 @@ pub fn by_queue() -> Vec<(String, Counts)> {
             }
         }
     }
-    let mut v: Vec<_> = out.into_iter().collect();
-    v.sort_by(|a, b| b.1.pending.cmp(&a.1.pending).then_with(|| a.0.cmp(&b.0)));
+    let mut v: Vec<(Option<String>, String, Counts)> = out
+        .into_iter()
+        .map(|((app, name), c)| (app, name, c))
+        .collect();
+    v.sort_by(|a, b| {
+        b.2.pending
+            .cmp(&a.2.pending)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
     v
 }
 
@@ -1328,7 +1350,9 @@ mod tests {
         assert!(delete(r.id), "ack it, so the queue is empty");
 
         assert!(
-            !by_queue().iter().any(|(n, _)| n == "lane-emptied"),
+            !by_queue_with_app()
+                .iter()
+                .any(|(_, n, _)| n == "lane-emptied"),
             "an empty queue holds no jobs, so by_queue drops it"
         );
         assert!(
@@ -1602,7 +1626,10 @@ mod tests {
         push(deflt, b"something", 0);
         push(mail, b"later", 3600);
 
-        let by: std::collections::HashMap<String, Counts> = by_queue().into_iter().collect();
+        let by: std::collections::HashMap<String, Counts> = by_queue_with_app()
+            .into_iter()
+            .map(|(_, n, c)| (n, c))
+            .collect();
         let m = by
             .get("bq-mail")
             .expect("the bq-mail queue is reported by name");
@@ -1618,7 +1645,10 @@ mod tests {
         // the worker draining another. Draining `default` must leave `mail` untouched.
         let job = pop(deflt, 90).expect("a default job");
         assert!(delete(job.id));
-        let by: std::collections::HashMap<String, Counts> = by_queue().into_iter().collect();
+        let by: std::collections::HashMap<String, Counts> = by_queue_with_app()
+            .into_iter()
+            .map(|(_, n, c)| (n, c))
+            .collect();
         assert!(!by.contains_key("bq-default"), "bq-default drained");
         assert_eq!(
             by.get("bq-mail").map(|c| c.pending),
@@ -1629,7 +1659,10 @@ mod tests {
         // A name longer than the stored field must not corrupt the neighbouring fields.
         let long = format!("bq-{}", "q".repeat(QUEUE_NAME_MAX + 20)).into_bytes();
         push(&long, b"x", 0);
-        let by: std::collections::HashMap<String, Counts> = by_queue().into_iter().collect();
+        let by: std::collections::HashMap<String, Counts> = by_queue_with_app()
+            .into_iter()
+            .map(|(_, n, c)| (n, c))
+            .collect();
         let truncated = String::from_utf8_lossy(&long[..QUEUE_NAME_MAX]).into_owned();
         assert_eq!(
             by.get(&truncated).map(|c| c.pending),

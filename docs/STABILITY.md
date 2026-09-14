@@ -37,8 +37,14 @@ master↔worker protocol and may change at any time — don't invoke them direct
 
 - Every documented key under `[server]`, `[cache]`, `[tls]`, `[acme]`, `[sidecars]`,
   etc.: its name, type, and meaning. See [CONFIGURATION.md](CONFIGURATION.md).
-- Unknown keys are ignored, not rejected — so a config written for a newer Askr
-  still loads on an older one (forward-compatible), and vice-versa.
+- A config written for an older Askr still loads on a newer one: keys are only ever
+  added, and new ones default to the previous behaviour.
+- **Unknown keys are rejected, not ignored.** A typo fails at startup with the list of
+  keys that section accepts, rather than being silently ignored until someone wonders why
+  the setting had no effect. The cost is that a config using a *newer* release's keys does
+  not load on an older one — so if you add a key and later roll the binary back, remove
+  the key too. `askr config-check` against the version you intend to run catches this
+  before you stop anything.
 
 ### 3. Environment variables
 

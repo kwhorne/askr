@@ -82,6 +82,20 @@ fn open_access_log(path: Option<&Path>) -> Option<Mutex<Box<dyn std::io::Write +
 #[derive(Clone)]
 pub struct Config {
     pub docroot: PathBuf,
+    /// Docroot whose application the queue/scheduler sidecars serve, and therefore whose
+    /// shared-memory namespace they use.
+    ///
+    /// Usually the same as `docroot`. It differs when `[queue] root` (or
+    /// `[scheduler] root`) is set, which is what a `[[site]]` instance needs: a sidecar
+    /// namespaced to the top-level root cannot pop jobs a site's application pushed,
+    /// because `pop` matches the namespaced key. That failure is silent — jobs accepted,
+    /// stored, never read — so the knob exists to make it sayable.
+    pub sidecar_docroot: PathBuf,
+    /// Docroot whose application the scheduler sidecar serves. `[scheduler] root`, else
+    /// `[queue] root`, else `[server] root` — separate from `sidecar_docroot` because the
+    /// scheduler and the queue workers are distinct processes and may belong to different
+    /// applications.
+    pub scheduler_docroot: PathBuf,
     pub front_controller: PathBuf, // relative, e.g. index.php
     pub listen: SocketAddr,
     pub https: bool,

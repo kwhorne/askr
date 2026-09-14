@@ -70,7 +70,7 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 
 ```json
 {
-  "version": "1.6.1",
+  "version": "1.7.0",
   "listen": "0.0.0.0:8000",
   "mode": "worker",
   "uptime_secs": 3600,
@@ -78,11 +78,11 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
   "workers_alive": 8,
   "respawns": 3,
   "queues": [
-    {"queue": "default", "pending": 2, "delayed": 0, "reserved": 1,
+    {"queue": "default", "app": "9f2c1a77b3e04d61", "pending": 2, "delayed": 0, "reserved": 1,
      "oldest_pending_secs": 3, "last_polled_secs": 0, "last_drained_secs": 1}
   ],
   "queues_idle": [
-    {"queue": "mail", "last_polled_secs": 1, "last_drained_secs": 46}
+    {"queue": "mail", "app": "9f2c1a77b3e04d61", "last_polled_secs": 1, "last_drained_secs": 46}
   ],
   "warnings": [],
   "pids": [43509, 43510, 43511, 43512, 43513, 43514, 43515, 43516]
@@ -100,8 +100,8 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 | `respawns` | Total worker respawns (recycles + crashes + reloads). |
 | `rss_kb_total` | Total resident memory across workers (KB). |
 | `workers` | Per-worker `{pid, rss_kb}` (the leak signal — watch RSS vs recycling). |
-| `queues` | Per-queue backlog — `{queue, pending, delayed, reserved, oldest_pending_secs}` — each entry also carrying `last_polled_secs` and `last_drained_secs`. |
-| `queues_idle` | Queues a worker polls that hold no jobs right now: `{queue, last_polled_secs, last_drained_secs}`. |
+| `queues` | Per-queue backlog — `{queue, app, pending, delayed, reserved, oldest_pending_secs}` — each entry also carrying `last_polled_secs` and `last_drained_secs`. |
+| `queues_idle` | Queues a worker polls that hold no jobs right now: `{queue, app, last_polled_secs, last_drained_secs}`. |
 | `warnings` | Lanes that are in trouble, named, with the numbers behind the call. Empty when nothing is wrong — see below. |
 | `pids` | Live worker PIDs. |
 
@@ -115,6 +115,15 @@ The queue depth was already on this endpoint; what was missing was Askr saying *
 wrong*, so a dashboard would have had to hardcode Askr's threshold to reach a conclusion
 Askr had already reached.
 
+Every queue-related entry carries `app`: the application whose jobs these are, or whose
+worker polls this lane, as the 16-hex-digit namespace derived from that application's
+docroot — `null` where there is no namespace. Shared memory is partitioned per application
+(see [Hosting](HOSTING.md#what-sites-share-and-what-they-dont)), and until 1.7.0 this
+endpoint stripped the namespace off and reported jobs under the bare queue name: two
+applications' `mail` lanes were one entry, so a lane being polled briskly by one
+application hid another application's jobs that nothing could reach. They are now distinct
+entries, in `queues`, in `queues_idle` and in `warnings`.
+
 Two fields carry the liveness of a lane. `last_polled_secs` is seconds since a queue
 worker last **asked** that queue for a job — whether or not it got one; `last_drained_secs`
 is seconds since one last **reserved** a job from it. Both are `null` when it has never
@@ -127,20 +136,32 @@ polled and currently empty stays visible, and that is what tells "nobody is list
 tracked; beyond that a lane simply has no liveness signal, and is never reported as faulty
 on that basis.
 
-The poll/drain pair separates two faults that job age alone cannot tell apart and whose
-remedies are opposite. That is what `warnings` reports:
+The poll/drain pair, matched per application, separates faults that job age alone cannot
+tell apart and whose remedies are opposite. That is what `warnings` reports:
 
 ```json
 "warnings": [
-  {"kind": "queue_unattended", "queue": "mail", "pending": 812,
-   "oldest_pending_secs": 259181, "last_polled_secs": null, "last_drained_secs": null,
-   "detail": "no worker is asking this queue for jobs — check the queue name a worker polls (ASKR_QUEUE) against the one the app dispatches to"}
+  {"kind": "queue_unattended", "queue": "mail", "app": "9f2c1a77b3e04d61", "polled_by": [],
+   "pending": 812, "oldest_pending_secs": 259181, "last_polled_secs": null, "last_drained_secs": null,
+   "detail": "no worker is asking this queue for jobs — check the queue name a worker polls (ASKR_QUEUE) against the one the app dispatches to"},
+  {"kind": "queue_wrong_application", "queue": "broadcasts", "app": "4b81de0c5a7f2390",
+   "polled_by": ["9f2c1a77b3e04d61"], "pending": 40, "oldest_pending_secs": 512400,
+   "last_polled_secs": null, "last_drained_secs": null,
+   "detail": "these jobs were pushed by one application and the only workers polling this queue name belong to another, so no worker can ever see them — set [queue] root (and [scheduler] root) to the docroot of the application that dispatches them. Adding workers cannot help"}
 ]
 ```
 
 - **`queue_unattended`** — jobs are waiting and nothing is polling the lane. Almost always
   a queue-name mismatch: the app dispatches to `onQueue('mail')` and the worker polls
   `default`. Adding workers does nothing.
+- **`queue_wrong_application`** — the jobs are waiting under one application and the only
+  workers polling that queue name belong to another, which `polled_by` names: an array of
+  the application namespaces that *are* polling it. The queue name is already right, and
+  the jobs are unreachable rather than behind — `askr_queue_pop` matches the namespaced
+  key, so no number of extra workers can ever pop them. The fix is `[queue] root` /
+  `[scheduler] root`, which say which application a sidecar serves — see
+  [Hosting](HOSTING.md#queue-and-scheduler-sidecars-serve-one-application). `polled_by` is
+  present on every warning and is an empty array for the other kinds.
 - **`queue_not_draining`** — workers are polling and the backlog still grows. The lane is
   saturated, or jobs keep being released back. More workers, or look at what is failing.
 

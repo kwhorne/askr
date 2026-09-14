@@ -103,6 +103,25 @@ pub fn owns(stored: &[u8]) -> bool {
     p.is_empty() || stored.starts_with(&p)
 }
 
+/// The namespace a stored key carries, or `None` when it has no prefix.
+///
+/// The counterpart to [`strip`]. Reporting code needs both: the bare name is what a
+/// person recognises, and the namespace is what says *whose* it is. Showing only the
+/// bare name is how two applications' `mail` queues looked like one — which is exactly
+/// how a queue nothing could ever drain read as a queue that was merely behind.
+pub fn namespace_of(stored: &[u8]) -> Option<&str> {
+    match stored.get(PREFIX_LEN - 1) {
+        Some(&SEP)
+            if stored[..PREFIX_LEN - 1]
+                .iter()
+                .all(|b| b.is_ascii_hexdigit()) =>
+        {
+            std::str::from_utf8(&stored[..PREFIX_LEN - 1]).ok()
+        }
+        _ => None,
+    }
+}
+
 /// A stored key without its namespace, for anything that shows keys to people.
 pub fn strip(stored: &[u8]) -> &[u8] {
     match stored.get(PREFIX_LEN - 1) {

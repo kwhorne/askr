@@ -362,13 +362,14 @@ instead of guessing:
 | `tag_overflow` | A response had more cache tags than Askr can track, so it wasn't cached. Not an error, but it means that page is uncached. |
 | `queue backlog is not being consumed — no worker is asking this queue for jobs` | Jobs are available and nothing is polling that lane. The line names the queue. Either no queue worker is running (`--queue` with `--queue-script`), or it doesn't poll that name (`ASKR_QUEUE`, comma-separated). Adding workers does nothing. |
 | `queue backlog is growing while workers poll it` | The queue name is right and the lane isn't keeping up, or jobs are being released back. Raise the queue worker count, and look at what is failing. Both faults used to log the first message, which sent an operator hunting a queue-name typo during a plain saturation. |
+| `queue jobs are unreachable — they were pushed by one application and the only workers polling this queue name belong to another` | The queue name is right and more workers cannot help. Shared memory is namespaced per application, the namespace comes from the docroot, and `pop` matches the namespaced key — so a sidecar rooted at a different application never sees these jobs. Set `[queue] root` / `[scheduler] root` to the docroot of the application that dispatches them. Only reachable with `[[site]]`; see [Hosting](HOSTING.md#queue-and-scheduler-sidecars-serve-one-application). |
 
-Both queue lines are also a `warnings` entry in `GET /api/status` — `kind` is
-`queue_unattended` or `queue_not_draining` — and a per-queue series on `/metrics`. Use
-those rather than the log: `/healthz` reports worker liveness, not queue health, and a
-lane once sat three days undrained with the app's own `/up` answering 200 throughout,
-because the only thing that knew was a log line nobody read. See
-[Admin](ADMIN.md#queue-liveness-and-warnings).
+All three queue lines are also a `warnings` entry in `GET /api/status` — `kind` is
+`queue_unattended`, `queue_wrong_application` or `queue_not_draining` — and a per-queue
+series on `/metrics`. Use those rather than the log: `/healthz` reports worker liveness,
+not queue health, and a lane once sat three days undrained with the app's own `/up`
+answering 200 throughout, because the only thing that knew was a log line nobody read.
+See [Admin](ADMIN.md#queue-liveness-and-warnings).
 
 For anything that *looks* fine but behaves wrong — interactivity that dies after the first
 page load, an anonymous visitor served as somebody else, 419 on every form, empty

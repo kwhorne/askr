@@ -42,12 +42,21 @@ pub fn stats() -> (usize, usize, u64) {
 ///
 /// Named rather than aggregated on purpose: the backlog watchdog exists to say *which*
 /// queue is not being drained, and an aggregate count cannot.
-pub fn by_queue() -> Vec<(String, crate::squeue::Counts)> {
+/// Every queue holding a job, as `(application, queue, counts)`, from the active backend.
+///
+/// The application is the shared-memory namespace the jobs were pushed under. The L2 SQL
+/// backend has no such thing — its rows live in a table keyed by queue name, shared by
+/// whatever connects to it — so it reports `None`, which reads as "one application" and
+/// is the truth there.
+pub fn by_queue_with_app() -> Vec<(Option<String>, String, crate::squeue::Counts)> {
     #[cfg(feature = "sql-backend")]
     if crate::squeue_sql::enabled() {
-        return crate::squeue_sql::by_queue();
+        return crate::squeue_sql::by_queue()
+            .into_iter()
+            .map(|(name, c)| (None, name, c))
+            .collect();
     }
-    crate::squeue::by_queue()
+    crate::squeue::by_queue_with_app()
 }
 
 /// Default for [`stall_secs`]: ten seconds of queue latency is unremarkable, thirty
@@ -91,6 +100,15 @@ pub enum LaneFault {
     /// almost always the cause — an app dispatching to `onQueue('mail')` while the
     /// worker polls `default`. Adding workers does nothing.
     Unattended,
+    /// Jobs are waiting under one application's namespace and the only workers polling
+    /// that queue name belong to a different application, so no worker can ever see
+    /// them — `pop` matches on the namespaced key.
+    ///
+    /// This is what a `[[site]]` instance does by default: sidecars take the namespace
+    /// of the top-level `root`, and a site with its own docroot is a different
+    /// application. It is not a backlog, it is an unreachable one, and it used to report
+    /// as `NotDraining` with the advice to add workers — advice that cannot work.
+    WrongApplication { polled_by: Vec<String> },
     /// Workers are polling and jobs are waiting anyway. The lane is saturated, or jobs
     /// keep being released back. More workers, or a look at what is failing.
     NotDraining,
@@ -101,6 +119,7 @@ impl LaneFault {
     pub fn kind(&self) -> &'static str {
         match self {
             LaneFault::Unattended => "queue_unattended",
+            LaneFault::WrongApplication { .. } => "queue_wrong_application",
             LaneFault::NotDraining => "queue_not_draining",
         }
     }
@@ -110,6 +129,8 @@ impl LaneFault {
 #[derive(Debug)]
 pub struct LaneWarning {
     pub queue: String,
+    /// The application whose namespace the waiting jobs were pushed under.
+    pub app: Option<String>,
     pub fault: LaneFault,
     pub pending: u64,
     pub oldest_pending_secs: u64,
@@ -143,7 +164,7 @@ pub fn lanes() -> Vec<crate::squeue::LaneStats> {
 /// Returns empty when nothing is wrong, which is what lets a product render it directly
 /// instead of reimplementing Askr's thresholds and then drifting from them.
 pub fn warnings(now_ms: u64) -> Vec<LaneWarning> {
-    warnings_from(now_ms, &by_queue(), &lanes())
+    warnings_from(now_ms, &by_queue_with_app(), &lanes())
 }
 
 /// Same, over data the caller already has.
@@ -153,11 +174,11 @@ pub fn warnings(now_ms: u64) -> Vec<LaneWarning> {
 /// scan twice.
 pub fn warnings_from(
     now_ms: u64,
-    occupied: &[(String, crate::squeue::Counts)],
+    occupied: &[(Option<String>, String, crate::squeue::Counts)],
     lanes: &[crate::squeue::LaneStats],
 ) -> Vec<LaneWarning> {
     let mut out = Vec::new();
-    for (name, c) in occupied {
+    for (app, name, c) in occupied {
         if c.pending == 0 || c.oldest_pending_created_ms == 0 {
             continue;
         }
@@ -165,18 +186,36 @@ pub fn warnings_from(
         if oldest < stall_secs() {
             continue;
         }
-        let lane = lanes.iter().find(|l| &l.name == name);
+        // Match on the *namespaced* identity. Matching on the display name alone is what
+        // made a dead queue read as a busy one: `pop` looks a job up by the namespaced
+        // key, so a lane polled by another application's worker can never yield this
+        // job — but strip the namespace off both and the two are the same string.
+        let lane = lanes.iter().find(|l| &l.name == name && &l.app == app);
         let last_polled_secs = lane.and_then(|l| age_secs(now_ms, l.last_polled_ms));
         let last_drained_secs = lane.and_then(|l| age_secs(now_ms, l.last_drained_ms));
-        // Never polled, or not polled for a long time, means nobody is listening. Note
-        // that an absent lane entry (a full table) reads as unattended only together
-        // with a backlog this old, which is already the fault condition.
         // `is_none_or` would read better and is stable only from 1.82; the MSRV here is
         // 1.80.
         let unattended = !matches!(last_polled_secs, Some(s) if s <= POLL_STALE_SECS);
+        // Nobody is polling *this* application's lane — but is somebody polling the same
+        // queue name under a different application? Then the jobs are not merely
+        // unattended, they are unreachable, and saying "check the queue name" would send
+        // the operator after a name that is already correct.
+        let others: Vec<String> = if unattended {
+            lanes
+                .iter()
+                .filter(|l| &l.name == name && &l.app != app)
+                .filter(|l| matches!(age_secs(now_ms, l.last_polled_ms), Some(s) if s <= POLL_STALE_SECS))
+                .filter_map(|l| l.app.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         out.push(LaneWarning {
             queue: name.clone(),
-            fault: if unattended {
+            app: app.clone(),
+            fault: if !others.is_empty() {
+                LaneFault::WrongApplication { polled_by: others }
+            } else if unattended {
                 LaneFault::Unattended
             } else {
                 LaneFault::NotDraining
@@ -222,16 +261,27 @@ mod tests {
     use super::*;
     use crate::squeue::{Counts, LaneStats};
 
-    fn lane(name: &str, polled_ms: u64, drained_ms: u64) -> LaneStats {
+    /// A lane belonging to application `app`. Most tests use one application, so `APP`
+    /// is the default; the cross-application tests pass a different one deliberately.
+    const APP: &str = "aaaaaaaaaaaaaaaa";
+    const OTHER: &str = "bbbbbbbbbbbbbbbb";
+
+    fn lane_in(app: &str, name: &str, polled_ms: u64, drained_ms: u64) -> LaneStats {
         LaneStats {
+            app: Some(app.into()),
             name: name.into(),
             last_polled_ms: polled_ms,
             last_drained_ms: drained_ms,
         }
     }
 
-    fn backlog(name: &str, pending: u64, oldest_ms: u64) -> (String, Counts) {
+    fn lane(name: &str, polled_ms: u64, drained_ms: u64) -> LaneStats {
+        lane_in(APP, name, polled_ms, drained_ms)
+    }
+
+    fn backlog(name: &str, pending: u64, oldest_ms: u64) -> (Option<String>, String, Counts) {
         (
+            Some(APP.into()),
             name.into(),
             Counts {
                 pending,
@@ -277,6 +327,89 @@ mod tests {
     /// A lane nothing has *ever* polled is the Félagi case: an app dispatching to
     /// `onQueue('mail')` while the worker polls `default`. It must not read as healthy
     /// just because there is no stamp to compare against.
+    /// Jobs one application pushed and another application's worker polls are
+    /// **unreachable**, not merely unattended — and must never read as "behind".
+    ///
+    /// This is the production fault. `[[site]]` gives each site its own docroot, the
+    /// namespace is derived from the docroot, and `pop` matches the namespaced key — so a
+    /// sidecar rooted at the top-level `root` cannot see a site application's jobs at
+    /// all. Six days of accepted-and-never-read jobs, and the person who noticed did so
+    /// because they could not reset their password.
+    ///
+    /// It reported as `NotDraining` — "workers poll this queue and the backlog is still
+    /// growing, raise the queue worker count" — because the classifier matched lanes to
+    /// jobs on the *display* name, and both applications' lanes display as `mail`. The
+    /// advice was not merely wrong, it was unachievable: no number of workers on the
+    /// wrong application can ever pop these jobs.
+    #[test]
+    fn jobs_only_another_application_polls_are_unreachable_not_behind() {
+        let w = warnings_from(
+            NOW,
+            &[backlog("mail", 812, NOW - 600_000)],
+            // Same queue name, polled briskly — by the wrong application.
+            &[lane_in(OTHER, "mail", NOW - 1_000, NOW - 1_000)],
+        );
+        assert_eq!(w.len(), 1);
+        assert_eq!(
+            w[0].fault,
+            LaneFault::WrongApplication {
+                polled_by: vec![OTHER.into()]
+            },
+            "a lane polled by another application is unreachable, not slow"
+        );
+        assert_eq!(w[0].fault.kind(), "queue_wrong_application");
+        assert_eq!(
+            w[0].app.as_deref(),
+            Some(APP),
+            "the warning names whose jobs"
+        );
+        assert_eq!(
+            w[0].last_polled_secs, None,
+            "nothing polls THIS application's lane, and the other one's poll must not be \
+             reported as if it counted"
+        );
+    }
+
+    /// The same queue name under two applications is two lanes, and each is judged on
+    /// its own. A healthy lane must not be dragged into a warning by its namesake.
+    #[test]
+    fn two_applications_may_share_a_queue_name_without_confusing_each_other() {
+        let w = warnings_from(
+            NOW,
+            &[
+                // APP's queue is moving: nothing older than the stall threshold.
+                backlog("mail", 5, NOW - 1_000),
+                // OTHER's has been sitting for ten minutes.
+                (
+                    Some(OTHER.into()),
+                    "mail".into(),
+                    Counts {
+                        pending: 3,
+                        delayed: 0,
+                        reserved: 0,
+                        oldest_pending_created_ms: NOW - 600_000,
+                    },
+                ),
+            ],
+            &[
+                // APP's lane is worked; OTHER's is not polled at all.
+                lane("mail", NOW - 1_000, NOW - 1_000),
+            ],
+        );
+        assert_eq!(
+            w.len(),
+            1,
+            "only the unserved application is flagged: {w:?}"
+        );
+        assert_eq!(w[0].app.as_deref(), Some(OTHER));
+        assert_eq!(
+            w[0].fault,
+            LaneFault::WrongApplication {
+                polled_by: vec![APP.into()]
+            }
+        );
+    }
+
     #[test]
     fn a_lane_with_no_entry_at_all_is_unattended() {
         let w = warnings_from(NOW, &[backlog("mail", 3, NOW - 300_000)], &[]);

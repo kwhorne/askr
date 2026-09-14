@@ -133,6 +133,7 @@ Run queue workers in the same binary, supervised alongside the web workers.
 | `slots` | int | Shared-memory job queue slots (`0` = off; 32 KB each) — `askr_queue_*` + the `AskrQueue` driver. See [Cache](CACHE.md). |
 | `persist` | string | Name a shared-memory object for the ring so pending jobs **survive a restart** (1.5.1). Off by default: the object lives in `/dev/shm`, which containers cap at 64 MiB — see [Docker](DOCKER.md#shared-memory-size). A ring whose layout no longer matches the binary is recreated, empty, with a log line saying why. |
 | `stall_secs` | int | How long a job may sit ready and unclaimed before Askr calls the lane stalled — in the log, in `/api/status`'s `warnings`, and in `askr_queue_unattended`. Default `30`; `0` keeps the default. |
+| `root` | path | Docroot of the application whose jobs these workers consume. Defaults to `[server] root`. Only needed with `[[site]]` — see below. |
 
 **`slots` is required when `workers` is set**, and Askr refuses to start without it. The
 ring is only mapped when slots are configured; without it every push returns 0, Laravel does
@@ -146,6 +147,23 @@ batchy, lower it to be told sooner. One threshold drives the watchdog log line, 
 dashboard cannot disagree with the log about whether a lane is stalled — see
 [Admin](ADMIN.md#queue-liveness-and-warnings).
 
+**`root` is the application these workers belong to, and with `[[site]]` you have to say
+it.** Shared memory is namespaced per application, the namespace is derived from the
+docroot, and `askr_queue_pop` matches the *namespaced* key. A queue sidecar is one process
+with one namespace for its whole life, so it consumes exactly one application's jobs — set
+`root` to the same path as the `[[site]] root` of the application that dispatches them. If
+that is the top-level application, set it equal to `[server] root`: that is a valid and
+expected answer, it just has to be an answer. Without `[[site]]` there is only one
+application and the default is right.
+
+Since 1.7.0 Askr **refuses to start** when `[[site]]` is configured together with a queue or
+scheduler sidecar and neither `[queue] root` nor `[scheduler] root` is set — it cannot tell
+which application the sidecar serves, and the error names the key to set. Guessing is what
+the release fixes: an instance whose jobs were dispatched by a `[[site]]` application
+accepted every job for six days and read none of them, with nothing in any log from the
+application's side. See
+[Hosting](HOSTING.md#queue-and-scheduler-sidecars-serve-one-application).
+
 ### `[scheduler]`
 
 Run the scheduler (built-in cron) in the same binary.
@@ -153,6 +171,14 @@ Run the scheduler (built-in cron) in the same binary.
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `script` | path | Scheduler runner script (e.g. `examples/askr-scheduler.php`). Omit to disable. |
+| `root` | path | Docroot of the application the scheduler runs for. Defaults to [`[queue] root`](#queue), then `[server] root`. |
+
+The scheduler sidecar is namespaced the same way as the queue workers and for the same
+reason. When both run for the same application — the usual case — `[queue] root` already
+covers it and there is no second line to write. Set `[scheduler] root` when the scheduler
+belongs to a *different* application than the queue workers, or when an instance runs the
+scheduler without queue workers at all; it is honoured independently of `[queue] root`,
+not merely as a fallback.
 
 ### `[[sidecar]]`
 

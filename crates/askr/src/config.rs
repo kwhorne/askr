@@ -334,6 +334,13 @@ pub struct QueueSection {
     /// to be told sooner. 0 keeps the default.
     #[serde(default)]
     pub stall_secs: u64,
+    /// Docroot of the application whose jobs these workers consume. Defaults to
+    /// `[server] root`.
+    ///
+    /// Only needed with `[[site]]`: shared memory is namespaced by docroot, so a sidecar
+    /// rooted at the top-level `root` cannot pop jobs a site's application pushed. Set it
+    /// to the same path as that site's `root`.
+    pub root: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -341,6 +348,9 @@ pub struct QueueSection {
 pub struct SchedulerSection {
     /// Scheduler runner script (e.g. examples/askr-scheduler.php). Off if unset.
     pub script: Option<PathBuf>,
+    /// Docroot of the application the scheduler runs for. Defaults to `[queue] root`,
+    /// then `[server] root`. See [`QueueSection::root`].
+    pub root: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -590,6 +600,31 @@ impl FileConfig {
             docroot.join(&front).display()
         );
 
+        // Which application the queue/scheduler sidecars belong to. Canonicalised the same
+        // way as `docroot`, because the namespace is a hash of the canonical path and two
+        // spellings of one directory must not become two applications.
+        let resolve_root = |r: Option<&PathBuf>, key: &str| -> anyhow::Result<Option<PathBuf>> {
+            match r {
+                Some(p) => {
+                    Ok(Some(std::fs::canonicalize(p).with_context(|| {
+                        format!("{key} {} not found", p.display())
+                    })?))
+                }
+                None => Ok(None),
+            }
+        };
+        let queue_root = resolve_root(self.queue.root.as_ref(), "queue.root")?;
+        let scheduler_root = resolve_root(self.scheduler.root.as_ref(), "scheduler.root")?;
+        // Queue workers and the scheduler are separate processes and may legitimately
+        // belong to different applications, so they get separate roots rather than one
+        // shared value. Collapsing them into one — which the first cut of this did —
+        // means `[scheduler] root` is silently ignored whenever `[queue] root` is also
+        // set: a key that does not do what its name says, which is worse than no key.
+        let sidecar_docroot = queue_root.clone().unwrap_or_else(|| docroot.clone());
+        let scheduler_docroot = scheduler_root
+            .or(queue_root)
+            .unwrap_or_else(|| docroot.clone());
+
         // Resolve [[site]] virtual hosts (each with its own docroot + front
         // controller). Host-routed per request; full dynamic dispatch is
         // per-request mode — in worker mode the booted app is fixed (statics are
@@ -822,6 +857,41 @@ impl FileConfig {
                  outside this instance consumes them."
             );
         }
+        // Virtual hosts plus a sidecar is ambiguous, and the wrong guess is silent.
+        //
+        // Shared memory is namespaced per application, derived from the docroot, and
+        // `askr_queue_pop` matches the *namespaced* key. A sidecar is one process with one
+        // namespace for its whole life, so it can only ever serve one application — and
+        // Askr cannot infer which one from a queue script that could belong to any of
+        // them. Until 1.7.0 it silently used the top-level `root`, so on any instance
+        // where a `[[site]]` application dispatched the jobs, every job was accepted,
+        // stored, and never read: no exception, no failed job, nothing in the log from the
+        // application's side. One deployment ran that way for six days and only noticed
+        // because a person could not reset their password.
+        //
+        // So: say which application. `[queue] root` = `[server] root` is a perfectly good
+        // answer when the top-level application is the one queueing; it just has to be an
+        // answer rather than a default nobody knew was being chosen.
+        // `[[sidecar]]` commands are in here too: they are supervised processes that
+        // inherit the same namespace, so a sidecar running `php artisan …` against shared
+        // memory is exposed to exactly the same silence.
+        if (self.queue.script.is_some()
+            || self.scheduler.script.is_some()
+            || !self.sidecar.is_empty())
+            && !self.site.is_empty()
+            && self.queue.root.is_none()
+            && self.scheduler.root.is_none()
+        {
+            anyhow::bail!(
+                "[[site]] is configured together with a sidecar, so \
+                 Askr cannot tell which application the sidecar serves. Shared memory is \
+                 namespaced per application (by docroot) and a sidecar can only consume \
+                 one of them — picking wrong means every job is stored and never read, \
+                 silently. Set `[queue] root` (and `[scheduler] root` if it differs) to the \
+                 docroot of the application that dispatches the jobs. If that is the \
+                 top-level application, set it to the same path as `[server] root`."
+            );
+        }
         if let Some(s) = &self.queue.script {
             anyhow::ensure!(s.is_file(), "queue.script not found: {}", s.display());
         }
@@ -842,6 +912,8 @@ impl FileConfig {
         Ok(Resolved {
             config: Config {
                 docroot,
+                sidecar_docroot,
+                scheduler_docroot,
                 front_controller: front,
                 listen,
                 https: self.server.https || tls_on,
@@ -974,6 +1046,103 @@ root = "{ROOT}"
     /// `[acme]` exists so auto-TLS and a config file aren't mutually exclusive. Before
     /// 1.4.10, ACME was CLI-only while `trusted_proxies` was file-only, which made
     /// "auto-TLS behind a proxy" impossible to express at all.
+    /// A sidecar beside `[[site]]` has to say which application it serves.
+    ///
+    /// Shared memory is namespaced by docroot and `askr_queue_pop` matches the namespaced
+    /// key, so a sidecar rooted at one application cannot see another's jobs — ever. Askr
+    /// used to default to the top-level `root` and a `[[site]]` application's queue then
+    /// filled up and was never read, in complete silence. One deployment ran that way for
+    /// six days.
+    #[test]
+    fn a_sidecar_beside_virtual_hosts_must_name_its_application() {
+        let site = app_dir("sidecar-site");
+        let body = format!(
+            r#"
+[server]
+root = "{{ROOT}}"
+
+[[site]]
+hosts = ["other.test"]
+root = "{site}"
+
+[queue]
+slots = 64
+workers = 1
+script = "{site}/index.php"
+"#,
+            site = site.display()
+        );
+        let e = err("sidecar-ambiguous", &body);
+        assert!(
+            e.contains("cannot tell which application the sidecar serves"),
+            "the ambiguous case must refuse: {e}"
+        );
+        assert!(
+            e.contains("[queue] root"),
+            "and name the key that resolves it: {e}"
+        );
+
+        // Named, it resolves — and the sidecars land on the application that was named,
+        // not on the top-level root.
+        let named = body.replace(
+            "[queue]\n",
+            &format!("[queue]\nroot = \"{}\"\n", site.display()),
+        );
+        let r = resolve("sidecar-named", &named).expect("naming the application is accepted");
+        assert_eq!(
+            r.config.sidecar_docroot,
+            std::fs::canonicalize(&site).unwrap(),
+            "queue workers take the named application"
+        );
+        assert_eq!(
+            r.config.scheduler_docroot,
+            std::fs::canonicalize(&site).unwrap(),
+            "and the scheduler inherits it when it has no root of its own"
+        );
+    }
+
+    /// `[scheduler] root` has to be honoured when `[queue] root` is also set.
+    ///
+    /// The first cut collapsed both into one value with `queue.root.or(scheduler.root)`,
+    /// so `[scheduler] root` was silently ignored whenever the queue also had one — a key
+    /// that does not do what its name says, which is worse than not having the key.
+    #[test]
+    fn the_scheduler_may_serve_a_different_application_than_the_queue() {
+        let qapp = app_dir("sidecar-q");
+        let sapp = app_dir("sidecar-s");
+        let r = resolve(
+            "sidecar-split",
+            &format!(
+                r#"
+[server]
+root = "{{ROOT}}"
+
+[queue]
+root = "{q}"
+slots = 64
+workers = 1
+script = "{q}/index.php"
+
+[scheduler]
+root = "{s}"
+script = "{s}/index.php"
+"#,
+                q = qapp.display(),
+                s = sapp.display()
+            ),
+        )
+        .expect("two roots is a valid configuration");
+        assert_eq!(
+            r.config.sidecar_docroot,
+            std::fs::canonicalize(&qapp).unwrap()
+        );
+        assert_eq!(
+            r.config.scheduler_docroot,
+            std::fs::canonicalize(&sapp).unwrap(),
+            "[scheduler] root must not be overridden by [queue] root"
+        );
+    }
+
     #[test]
     fn acme_section_resolves_and_defaults_are_left_to_the_caller() {
         let r = resolve(

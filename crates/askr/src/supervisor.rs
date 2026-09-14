@@ -438,10 +438,22 @@ pub(crate) fn supervise(
                     libc::signal(libc::SIGTERM, libc::SIG_DFL);
                 }
                 MY_SLOT.store(i, Ordering::SeqCst);
-                // Sidecars serve the application at the configured docroot; web
-                // workers re-set this per request, so the default only has to be
-                // right for the boot and for processes that never see a request.
-                crate::ns::set(&crate::ns::for_docroot(&config.docroot));
+                // Which application's shared memory this process talks to.
+                //
+                // Web workers re-set it per request from the request's docroot, so their
+                // default only has to be right for the boot. Sidecars never see a request
+                // and keep whatever is set here for their whole life — and `pop` matches
+                // the *namespaced* key, so a sidecar rooted at the wrong application
+                // cannot see its jobs at all. With `[[site]]` that is the common case,
+                // and it used to be silent: jobs accepted, stored, and never read.
+                // `sidecar_docroot` is `[queue] root` (or `[scheduler] root`) when set,
+                // and `[server] root` otherwise.
+                let ns_root = match kind {
+                    Kind::Web => &config.docroot,
+                    Kind::Scheduler => &config.scheduler_docroot,
+                    Kind::Queue | Kind::Command => &config.sidecar_docroot,
+                };
+                crate::ns::set(&crate::ns::for_docroot(ns_root));
                 let code = match kind {
                     Kind::Web => {
                         let inherited = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
@@ -822,6 +834,22 @@ pub(crate) fn supervise(
                          (ASKR_QUEUE, comma-separated). Also visible as a warning in the \
                          admin API (GET /api/status) and as askr_queue_unattended."
                     ),
+                    crate::queue::LaneFault::WrongApplication { ref polled_by } => tracing::warn!(
+                        queue = %w.queue,
+                        app = ?w.app,
+                        polled_by = ?polled_by,
+                        pending = w.pending,
+                        oldest_secs = w.oldest_pending_secs,
+                        queue_workers = workers,
+                        "queue jobs are unreachable — they were pushed by one application \
+                         and the only workers polling this queue name belong to another, \
+                         so no worker can ever see them. `pop` matches the namespaced key, \
+                         and the namespace comes from the docroot. With [[site]], sidecars \
+                         take the namespace of the top-level `root`: set [queue] root (and \
+                         [scheduler] root) to the docroot of the application that dispatches \
+                         these jobs, or make [server] root that docroot. Adding workers \
+                         cannot help."
+                    ),
                     crate::queue::LaneFault::NotDraining => tracing::warn!(
                         queue = %w.queue,
                         pending = w.pending,
@@ -928,6 +956,8 @@ pub(crate) fn run_cow(
     crate::broadcast::register_bridge();
 
     let recycle_after = config.max_requests;
+    // The CoW parent boots the web application, so it takes the web docroot; sidecars
+    // are forked separately and set their own in `spawn_slot`.
     crate::ns::set(&crate::ns::for_docroot(&config.docroot));
     let ctx = Box::into_raw(Box::new(CowCtx {
         config,
