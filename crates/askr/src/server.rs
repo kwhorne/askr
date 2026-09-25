@@ -870,6 +870,7 @@ where
                     peer,
                     config.https,
                     port,
+                    &config.trusted_proxies,
                 );
                 request.post_fields = parsed.fields;
                 request.files = parsed.files;
@@ -964,6 +965,7 @@ where
             peer,
             config.https,
             port,
+            &config.trusted_proxies,
         );
         (request, crate::upload::TempFiles::default())
     };
@@ -1378,13 +1380,16 @@ fn cidr_contains((net, bits): &Cidr, ip: &std::net::IpAddr) -> bool {
 /// isn't itself a trusted proxy — the standard approach. With no trusted proxies
 /// configured the header is ignored entirely, because believing it would let any
 /// client rotate a fake address and walk straight past a rate limit.
-fn client_ip<B>(req: &Request<B>, peer: SocketAddr, trusted: &[Cidr]) -> std::net::IpAddr {
+pub fn client_ip_from(
+    headers: &hyper::HeaderMap,
+    peer: SocketAddr,
+    trusted: &[Cidr],
+) -> std::net::IpAddr {
     let peer_ip = peer.ip();
-    if trusted.is_empty() || !trusted.iter().any(|c| cidr_contains(c, &peer_ip)) {
+    if !peer_is_trusted(peer_ip, trusted) {
         return peer_ip;
     }
-    let chain: Vec<&str> = req
-        .headers()
+    let chain: Vec<&str> = headers
         .get_all("x-forwarded-for")
         .iter()
         .filter_map(|v| v.to_str().ok())
@@ -1405,6 +1410,22 @@ fn client_ip<B>(req: &Request<B>, peer: SocketAddr, trusted: &[Cidr]) -> std::ne
         }
     }
     peer_ip
+}
+
+/// Is `peer` one of the proxies the operator has vouched for in `trusted_proxies`?
+///
+/// The same test `client_ip_from` applies before it will read `X-Forwarded-For` at all,
+/// exposed so the `$_SERVER` builder can decide what PHP gets to see with exactly the
+/// same answer.
+pub fn peer_is_trusted(peer: std::net::IpAddr, trusted: &[Cidr]) -> bool {
+    !trusted.is_empty() && trusted.iter().any(|c| cidr_contains(c, &peer))
+}
+
+/// The client's address for a `hyper::Request`. Thin wrapper over
+/// [`client_ip_from`], which is the one definition both this and the `$_SERVER`
+/// builder use.
+fn client_ip<B>(req: &Request<B>, peer: SocketAddr, trusted: &[Cidr]) -> std::net::IpAddr {
+    client_ip_from(req.headers(), peer, trusted)
 }
 
 /// Apply `[[ratelimit]]` rules. `Some(response)` means the request is refused.
@@ -1640,6 +1661,7 @@ async fn esi_fragment(
         peer,
         config.https,
         config.listen.port(),
+        &config.trusted_proxies,
     );
     match rt.php.handle(request).await {
         Ok(Reply::Buffered(resp)) if resp.status == 200 => {
@@ -2310,6 +2332,7 @@ async fn refresh_entry(
         peer,
         config.https,
         port,
+        &config.trusted_proxies,
     );
     // Only a buffered response is cacheable; a streaming one is skipped.
     if let Ok(Reply::Buffered(resp)) = rt.php.handle(request).await {

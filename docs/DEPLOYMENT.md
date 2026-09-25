@@ -181,6 +181,83 @@ HTTP with `https = true` (so `$_SERVER['HTTPS']` is set and Laravel emits
 `secure` cookies). Reload Askr after renewing certificates so workers pick up the
 new files.
 
+## Behind a reverse proxy
+
+With nginx, a load balancer or a Docker port mapping in front, the TCP peer Askr sees is
+the proxy, not the visitor. **Tell Askr which addresses are your proxies**, and it will
+hand PHP the client:
+
+```toml
+[server]
+trusted_proxies = ["172.18.0.0/16"]   # the Docker network, or your LB's addresses
+```
+
+What PHP then sees in `$_SERVER`:
+
+| Variable | Value |
+| --- | --- |
+| `REMOTE_ADDR` | The client: the rightmost `X-Forwarded-For` entry that is not itself a trusted proxy. The peer when nothing was forwarded. |
+| `HTTP_X_FORWARDED_FOR` | That same client, **one** address — never the raw chain. |
+| `ASKR_PEER_ADDR` | The TCP peer, always — your proxy. The address to look at when a forwarding chain is misconfigured. |
+| `REMOTE_PORT` | The peer's port. A forwarded chain carries addresses, not ports; nginx's `real_ip` leaves the port alone for the same reason. |
+
+This is what nginx does with `real_ip` and Apache with `mod_remoteip`, and what nginx +
+php-fpm does by passing `fastcgi_param REMOTE_ADDR $remote_addr` — so an application that
+worked there sees the same thing here. Rightmost-untrusted is the only safe reading: every
+entry to its left was supplied by a hop you did not vouch for, and may be forged.
+
+**Before 1.7.1 this was only half true.** `trusted_proxies` resolved the client for Askr's
+own rate limiter and never reached PHP: `REMOTE_ADDR` was the proxy. It was found behind
+nginx in front of a container, where an IP allowlist that waived 2FA for known addresses
+asked every visitor for a second factor, and started working again the moment nginx was
+taken out of the path.
+
+### Why the header is rewritten, not passed through
+
+Fixing `REMOTE_ADDR` alone would have left a hole. An application that trusts every proxy
+— Laravel's `trustProxies(at: '*')`, common in containers — reads `X-Forwarded-For` itself
+and takes the **leftmost** entry. Behind a proxy that appends (`$proxy_add_x_forwarded_for`)
+the chain is `forged, client`, so that application lands on `forged` whatever `REMOTE_ADDR`
+says; and with no proxy at all, a visitor simply sends the header. Either way, an allowlist
+keyed on the client address can be walked past.
+
+So Askr owns the answer, and PHP cannot derive a different one:
+
+- **From a trusted proxy**, `X-Forwarded-For` is collapsed to the client Askr resolved.
+  The other forwarding headers — `X-Real-IP`, `X-Forwarded-Host`, `-Proto`, `-Port`,
+  `-Prefix`, and RFC 7239 `Forwarded` — pass through: they are that proxy's own statements.
+- **From any other peer**, **all** of them are removed. An unvouched forwarding header is
+  not evidence of anything, and the address is not the only one that matters:
+  `X-Forwarded-Host` from a peer nobody vouched for is how a password reset link gets
+  pointed at an attacker's domain by an application that trusts every proxy.
+
+That second rule is what makes the Laravel advice below safe. Without it, "Askr has cleaned
+`X-Forwarded-For`, so `'*'` is fine" would have closed one hole and opened another.
+
+### If your proxy trust lives in Laravel instead
+
+Some deployments never set `trusted_proxies` and configure `TrustProxies` in the
+application instead, letting Laravel read `X-Forwarded-For` itself. **From 1.7.1 that
+stops working**: without `trusted_proxies` every peer is untrusted, so the header is
+removed before PHP sees it, and `$request->ip()` becomes the proxy.
+
+The fix is to move the trust to where the connection is accepted:
+
+```toml
+[server]
+trusted_proxies = ["172.18.0.1"]      # what TrustProxies used to list
+```
+
+and then set `TrustProxies` to `'*'`. That sounds like the opposite of careful and is the
+right answer here: Askr has already decided which peers are proxies, removed every
+forwarding header that did not come from one, and collapsed `X-Forwarded-For` to a single
+value, so there is nothing left for the application to be fooled by. Leaving
+`TrustProxies` listing the proxy's own address does **not** keep working: Symfony checks
+that list against `REMOTE_ADDR`, which is now the client, so it would stop honouring
+`X-Forwarded-Proto` and `X-Forwarded-Host` altogether. Askr logs the first time it removes a
+forwarding header from an untrusted peer (`X-Forwarded-For arrived from a peer that is
+not in [server] trusted_proxies`), so this break names itself instead of passing silently.
+
 ## Scaling & recycling
 
 - **`workers = "auto"`** runs one process per core. Each serves one request at a
@@ -236,7 +313,8 @@ See [Admin](ADMIN.md) for scripting examples.
 - Add `[[ratelimit]]` rules for login and API paths so one client can't spend the
   whole worker pool — refused requests never reach PHP. Behind a load balancer, set
   `[server] trusted_proxies`, or `X-Forwarded-For` is ignored and every client shares
-  one bucket. Askr warns at startup if limits are configured without it.
+  one bucket — and PHP sees the proxy in `REMOTE_ADDR` too. Askr warns at startup if
+  limits are configured without it. See [Behind a reverse proxy](#behind-a-reverse-proxy).
 
 ## Kernels & io_uring
 

@@ -62,6 +62,26 @@ pub fn host_without_port(authority: &str) -> &str {
     }
 }
 
+/// Say, once per process, that an X-Forwarded-For was removed.
+///
+/// Removing it is right — an unvouched header is not evidence — but it can break a
+/// deployment that put its proxy trust in the application (Laravel's `TrustProxies`)
+/// instead of in Askr: that application read the header itself, and now does not get
+/// it. That break would otherwise be silent, which is the thing to avoid. Once is
+/// enough to be seen and not so often as to be noise under a flood of forged headers.
+fn warn_untrusted_forwarded_for(peer: SocketAddr) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            peer = %peer.ip(),
+            "X-Forwarded-For arrived from a peer that is not in [server] trusted_proxies, \
+             so it was removed before reaching PHP and REMOTE_ADDR is the peer. If that \
+             peer is your reverse proxy, add it to trusted_proxies — the application will \
+             then see the forwarded client. (Logged once per process.)"
+        );
+    }
+}
+
 /// Build an [`askr_php::Request`] for the front controller.
 #[allow(clippy::too_many_arguments)]
 pub fn build_request(
@@ -73,6 +93,7 @@ pub fn build_request(
     peer: SocketAddr,
     https: bool,
     server_port: u16,
+    trusted_proxies: &[crate::server::Cidr],
 ) -> Request {
     let method = parts.method.as_str().to_string();
     let path = parts.uri.path().to_string();
@@ -81,6 +102,23 @@ pub fn build_request(
         Some(pq) => pq.as_str().to_string(),
         None => path.clone(),
     };
+
+    // The client, not the TCP peer, when the peer is a proxy the operator has vouched
+    // for. Behind nginx the peer is the proxy, so an application reading REMOTE_ADDR —
+    // an IP allowlist that waives 2FA for known addresses, say — saw the proxy and
+    // treated every visitor as unknown. Askr already resolved this for its own rate
+    // limiter and simply never told PHP, so the two disagreed about who the client was.
+    //
+    // Same function as the rate limiter uses, deliberately: one definition means they
+    // cannot drift apart. With no trusted proxies configured the header is ignored
+    // entirely and this is the peer, because believing an unvouched X-Forwarded-For
+    // would let any client claim any address.
+    //
+    // This is what nginx does with `real_ip` and Apache with `mod_remoteip`, and what
+    // nginx + php-fpm does by passing `fastcgi_param REMOTE_ADDR $remote_addr`.
+    let client = crate::server::client_ip_from(&parts.headers, peer, trusted_proxies);
+    let peer_trusted = crate::server::peer_is_trusted(peer.ip(), trusted_proxies);
+    let mut saw_forwarded_for = false;
 
     // The raw authority (may include a port) for HTTP_HOST, and the port-stripped form
     // for SERVER_NAME/vhost routing. Kept separate so HTTP_HOST stays conventional.
@@ -134,8 +172,16 @@ pub fn build_request(
         ("SERVER_PORT".into(), server_port.to_string()),
         ("SERVER_ADDR".into(), "127.0.0.1".into()),
         ("HTTP_HOST".into(), raw_host),
-        ("REMOTE_ADDR".into(), peer.ip().to_string()),
+        ("REMOTE_ADDR".into(), client.to_string()),
+        // The peer's port, not the client's: a forwarded chain carries addresses, not
+        // ports, so there is nothing truer to put here. nginx's real_ip module rewrites
+        // the address and leaves the port alone for the same reason.
         ("REMOTE_PORT".into(), peer.port().to_string()),
+        // The TCP peer, always — the proxy when there is one. Kept because once
+        // REMOTE_ADDR is the forwarded client, the address Askr actually accepted the
+        // connection from has nowhere else to appear, and that is the one an operator
+        // needs when a forwarding chain is misconfigured.
+        ("ASKR_PEER_ADDR".into(), peer.ip().to_string()),
         ("REQUEST_TIME".into(), now_secs().to_string()),
     ];
 
@@ -168,6 +214,46 @@ pub fn build_request(
         if key.eq_ignore_ascii_case("host") {
             continue;
         }
+        // Client-address headers: Askr has already decided who the client is, and PHP
+        // must not be able to derive a different answer from the raw header.
+        //
+        // REMOTE_ADDR alone was not enough. An application with `trustProxies(at: '*')`
+        // — common in containers — reads X-Forwarded-For itself, trusts every hop, and
+        // takes the leftmost entry. Behind a proxy that appends, the chain is
+        // `forged, client`, so the app lands on `forged` whatever REMOTE_ADDR says; with
+        // no proxy at all, a client simply sends the header and is believed. Either way
+        // an IP allowlist that waives 2FA for known addresses can be walked past.
+        //
+        // So the header is rewritten the way Apache's mod_remoteip does: from a peer in
+        // `trusted_proxies` it is collapsed to the client Askr resolved (below, after the
+        // loop), and from any other peer it is removed, because an unvouched
+        // X-Forwarded-For is not evidence of anything. X-Real-IP is the same claim in a
+        // different header and is removed from an untrusted peer for the same reason;
+        // from a trusted one it passes, since it is that proxy's own statement.
+        if key.eq_ignore_ascii_case("x-forwarded-for") {
+            if peer_trusted {
+                saw_forwarded_for = true;
+            } else {
+                warn_untrusted_forwarded_for(peer);
+            }
+            continue;
+        }
+        // Every other forwarding claim from an untrusted peer goes too, not only the
+        // address. `X-Forwarded-Host` from a peer nobody vouched for is how a password
+        // reset link gets pointed at an attacker's domain by any application that trusts
+        // all proxies, and `-Proto`/`-Port`/`-Prefix` and RFC 7239 `Forwarded` are the
+        // same kind of statement. Without this, the natural advice — "Askr has cleaned
+        // X-Forwarded-For, so `trustProxies(at: '*')` is safe now" — would have opened
+        // that hole instead of closing one. From a trusted proxy they pass unchanged:
+        // they are that proxy's own statements.
+        if !peer_trusted
+            && (key.eq_ignore_ascii_case("x-real-ip")
+                || key.eq_ignore_ascii_case("forwarded")
+                || key.len() > "x-forwarded-".len()
+                    && key[.."x-forwarded-".len()].eq_ignore_ascii_case("x-forwarded-"))
+        {
+            continue;
+        }
         // Underscores collapse into the same $_SERVER key as dashes, so
         // `X_Forwarded_For:` and `X-Forwarded-For:` both become
         // HTTP_X_FORWARDED_FOR — and which one wins depends on header iteration
@@ -195,6 +281,11 @@ pub fn build_request(
                 server_vars.push((name, v.to_string()));
             }
         }
+    }
+    // One value, and it is the one REMOTE_ADDR carries. A chain would hand the leftmost
+    // — the part any upstream hop can forge — back to any app that trusts every proxy.
+    if saw_forwarded_for {
+        server_vars.push(("HTTP_X_FORWARDED_FOR".into(), client.to_string()));
     }
 
     Request {
@@ -259,6 +350,7 @@ mod tests {
             peer,
             false,
             80,
+            &[],
         );
         assert_eq!(
             req.cookie.as_deref(),
@@ -302,6 +394,7 @@ mod tests {
                 peer,
                 false,
                 8080,
+                &[],
             );
             let one = |name: &str| -> String {
                 let all: Vec<&str> = req
@@ -330,6 +423,206 @@ mod tests {
             .into_parts()
             .0;
         assert_eq!(build(&h2), h1, "the two protocols agree");
+    }
+
+    /// `REMOTE_ADDR` must be the client, not the proxy, when the peer is vouched for.
+    ///
+    /// Behind nginx the TCP peer is the proxy, and Askr handed that to PHP. An
+    /// application reading `REMOTE_ADDR` — an IP allowlist that waives 2FA for known
+    /// addresses — therefore saw the proxy on every request and treated every visitor as
+    /// unknown. The same deployment worked the moment nginx was taken out of the path.
+    ///
+    /// Askr already resolved the real client for its own rate limiter and simply never
+    /// told PHP, so the two disagreed about who was calling. Both now go through one
+    /// function, which is the only way they cannot drift apart again.
+    ///
+    /// The cases below are the ones a forwarding chain actually produces.
+    #[test]
+    fn remote_addr_is_the_client_through_a_trusted_proxy() {
+        let trusted: Vec<crate::server::Cidr> = vec![
+            crate::server::parse_cidr("172.18.0.0/16").unwrap(),
+            crate::server::parse_cidr("2001:db8:ffff::/48").unwrap(),
+        ];
+        let proxy: SocketAddr = "172.18.0.1:36748".parse().unwrap();
+        let direct: SocketAddr = "92.220.212.22:41000".parse().unwrap();
+
+        let remote = |peer: SocketAddr, xff: Option<&str>, trusted: &[crate::server::Cidr]| {
+            let mut headers: Vec<(&str, &str)> = vec![("Host", "example.test")];
+            if let Some(v) = xff {
+                headers.push(("X-Forwarded-For", v));
+            }
+            let parts = parts_with(&headers);
+            let req = build_request(
+                &parts,
+                Vec::new(),
+                Path::new("/srv"),
+                Path::new("/srv/index.php"),
+                "/index.php",
+                peer,
+                false,
+                80,
+                trusted,
+            );
+            let get = |k: &str| {
+                req.server_vars
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            (get("REMOTE_ADDR"), get("ASKR_PEER_ADDR"))
+        };
+
+        // A single hop: the proxy forwarded the client it saw.
+        assert_eq!(
+            remote(proxy, Some("92.220.212.22"), &trusted).0,
+            "92.220.212.22"
+        );
+        // A chain: the rightmost entry is the one the trusted proxy itself observed.
+        // Anything to its left was supplied by the previous hop and may be forged.
+        assert_eq!(
+            remote(proxy, Some("198.51.100.9, 92.220.212.22"), &trusted).0,
+            "92.220.212.22"
+        );
+        // Trusted addresses at the right are our own proxies; keep walking past them.
+        assert_eq!(
+            remote(proxy, Some("92.220.212.22, 172.18.0.1"), &trusted).0,
+            "92.220.212.22"
+        );
+        // Nothing forwarded: the peer is all there is.
+        assert_eq!(remote(proxy, None, &trusted).0, "172.18.0.1");
+        // An untrusted peer's header is not evidence of anything. This is the case that
+        // matters most: without it, any client could claim any address by sending one.
+        assert_eq!(
+            remote(direct, Some("198.51.100.9"), &trusted).0,
+            "92.220.212.22"
+        );
+        // No trusted proxies configured at all — the header is ignored entirely.
+        assert_eq!(remote(proxy, Some("198.51.100.9"), &[]).0, "172.18.0.1");
+        // IPv6, bare and with a port, since a forwarded entry may carry either.
+        let v6: SocketAddr = "[2001:db8:ffff::1]:443".parse().unwrap();
+        assert_eq!(remote(v6, Some("2001:db8::1"), &trusted).0, "2001:db8::1");
+        assert_eq!(
+            remote(v6, Some("[2001:db8::1]:443"), &trusted).0,
+            "2001:db8::1"
+        );
+
+        // And the peer is still reachable, because once REMOTE_ADDR is the forwarded
+        // client the address Askr accepted the connection from has nowhere else to go.
+        let (addr, peer_addr) = remote(proxy, Some("92.220.212.22"), &trusted);
+        assert_eq!(addr, "92.220.212.22");
+        assert_eq!(peer_addr, "172.18.0.1");
+    }
+
+    /// PHP must not be able to derive a different client than REMOTE_ADDR from the raw
+    /// forwarding headers.
+    ///
+    /// Fixing REMOTE_ADDR alone left a hole: an app with `trustProxies(at: '*')` reads
+    /// X-Forwarded-For itself, trusts every hop and takes the leftmost — so behind a
+    /// proxy that appends (`forged, client`) it lands on `forged`, and with no proxy at
+    /// all a client just sends the header. An allowlist that waives 2FA can be walked
+    /// past either way. The header is now rewritten as mod_remoteip does.
+    #[test]
+    fn forwarding_headers_cannot_contradict_remote_addr() {
+        let trusted = vec![crate::server::parse_cidr("172.18.0.0/16").unwrap()];
+        let proxy: SocketAddr = "172.18.0.1:36748".parse().unwrap();
+        let direct: SocketAddr = "92.220.212.22:41000".parse().unwrap();
+        let vars = |peer: SocketAddr, headers: &[(&str, &str)], t: &[crate::server::Cidr]| {
+            let parts = parts_with(headers);
+            build_request(
+                &parts,
+                Vec::new(),
+                Path::new("/srv"),
+                Path::new("/srv/index.php"),
+                "/index.php",
+                peer,
+                false,
+                80,
+                t,
+            )
+            .server_vars
+        };
+        let get = |v: &Vec<(String, String)>, k: &str| -> Vec<String> {
+            v.iter()
+                .filter(|(n, _)| n == k)
+                .map(|(_, x)| x.clone())
+                .collect()
+        };
+
+        // Behind a trusted proxy that appends: the chain collapses to the client, so the
+        // forged leftmost entry is gone before any application can prefer it.
+        let v = vars(
+            proxy,
+            &[("X-Forwarded-For", "203.0.113.66, 92.220.212.22")],
+            &trusted,
+        );
+        assert_eq!(get(&v, "HTTP_X_FORWARDED_FOR"), vec!["92.220.212.22"]);
+        assert_eq!(get(&v, "REMOTE_ADDR"), vec!["92.220.212.22"]);
+
+        // No proxy: a client that sends its own X-Forwarded-For is not believed, and the
+        // header does not reach PHP, where a trust-everything app would believe it.
+        let v = vars(
+            direct,
+            &[
+                ("X-Forwarded-For", "203.0.113.66"),
+                ("X-Real-IP", "203.0.113.66"),
+            ],
+            &trusted,
+        );
+        assert!(
+            get(&v, "HTTP_X_FORWARDED_FOR").is_empty(),
+            "forged XFF removed"
+        );
+        assert!(
+            get(&v, "HTTP_X_REAL_IP").is_empty(),
+            "forged X-Real-IP removed"
+        );
+        assert_eq!(get(&v, "REMOTE_ADDR"), vec!["92.220.212.22"]);
+
+        // Host poisoning: a direct client claiming a forwarded host. An app trusting all
+        // proxies would build a password reset link to it.
+        let v = vars(
+            direct,
+            &[
+                ("X-Forwarded-Host", "evil.example"),
+                ("X-Forwarded-Proto", "https"),
+                ("X-Forwarded-Port", "443"),
+                ("X-Forwarded-Prefix", "/x"),
+                ("Forwarded", "for=203.0.113.66;host=evil.example"),
+            ],
+            &trusted,
+        );
+        for k in [
+            "HTTP_X_FORWARDED_HOST",
+            "HTTP_X_FORWARDED_PROTO",
+            "HTTP_X_FORWARDED_PORT",
+            "HTTP_X_FORWARDED_PREFIX",
+            "HTTP_FORWARDED",
+        ] {
+            assert!(
+                get(&v, k).is_empty(),
+                "{k} from an untrusted peer must not reach PHP"
+            );
+        }
+        // From the proxy, they are the proxy's own statements and pass.
+        let v = vars(
+            proxy,
+            &[
+                ("X-Forwarded-Host", "example.test"),
+                ("X-Forwarded-Proto", "https"),
+            ],
+            &trusted,
+        );
+        assert_eq!(get(&v, "HTTP_X_FORWARDED_HOST"), vec!["example.test"]);
+        assert_eq!(get(&v, "HTTP_X_FORWARDED_PROTO"), vec!["https"]);
+
+        // X-Real-IP from a trusted proxy is that proxy's own statement, and passes.
+        let v = vars(proxy, &[("X-Real-IP", "92.220.212.22")], &trusted);
+        assert_eq!(get(&v, "HTTP_X_REAL_IP"), vec!["92.220.212.22"]);
+
+        // A request with no forwarding header gains none.
+        let v = vars(proxy, &[("Host", "example.test")], &trusted);
+        assert!(get(&v, "HTTP_X_FORWARDED_FOR").is_empty());
     }
 
     #[test]
@@ -366,6 +659,7 @@ mod tests {
             peer,
             false,
             80,
+            &[crate::server::parse_cidr("127.0.0.1").unwrap()],
         );
         let xff: Vec<&str> = req
             .server_vars
@@ -397,6 +691,7 @@ mod tests {
             peer,
             false,
             80,
+            &[],
         );
         // The httpoxy header must NOT reach PHP as HTTP_PROXY…
         assert!(!req.server_vars.iter().any(|(k, _)| k == "HTTP_PROXY"));

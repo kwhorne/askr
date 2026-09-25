@@ -42,7 +42,7 @@ typos fail fast in `config-check`.
 | `force_https` | bool | `false` | Redirect plain HTTP to HTTPS (308), using the connection's TLS state / `https` / `X-Forwarded-Proto`. |
 | `http_redirect` | — | Answer plain HTTP here and 308 it to HTTPS, e.g. `"0.0.0.0:80"`. Needs `force_https`. Automatic on the ACME challenge address with `--acme`. |
 | `traffic_log` | path | Record one JSON line per PHP-served request for [`askr cache-report`](CLI.md#askr-cache-report). A diagnostic — turn it on for an hour, then off. |
-| `trusted_proxies` | list | `[]` | Proxies whose `X-Forwarded-For` may be believed, as IPs or CIDRs (`"10.0.0.0/8"`). Required for correct client identity in [`[[ratelimit]]`](#ratelimit) behind a load balancer. |
+| `trusted_proxies` | list | `[]` | Proxies whose `X-Forwarded-For` may be believed, as IPs or CIDRs (`"10.0.0.0/8"`). Sets the client identity everywhere: `$_SERVER['REMOTE_ADDR']` (since 1.7.1), [`[[ratelimit]]`](#ratelimit) buckets, and the forwarding headers PHP is shown — `X-Forwarded-For` collapsed to the client from a trusted peer, and every forwarding header removed from any other. See [Behind a reverse proxy](DEPLOYMENT.md#behind-a-reverse-proxy). |
 | `workers_min` | int | = `workers` | CoW autoscaling floor (with `--cow`). |
 | `workers_max` | int | = `workers` | CoW autoscaling ceiling (> min enables autoscaling). |
 | `access_log` | path | — | JSON access log per request; `-` for stdout. Off if unset. |
@@ -277,7 +277,8 @@ window = 300
 
 Refused requests get `429` with `Retry-After`. Reserved `/askr/*` endpoints are exempt.
 Set `[server] trusted_proxies` when running behind a load balancer, or `X-Forwarded-For`
-is ignored and every client shares one bucket.
+is ignored and every client shares one bucket. The same setting is what gives PHP the
+client in `REMOTE_ADDR` — see [Behind a reverse proxy](DEPLOYMENT.md#behind-a-reverse-proxy).
 
 #### `[[cache.rule]]`
 

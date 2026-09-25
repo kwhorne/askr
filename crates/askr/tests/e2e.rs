@@ -1763,6 +1763,91 @@ fn a_sidecar_beside_virtual_hosts_must_say_which_application_it_serves() {
     );
 }
 
+/// Behind a trusted proxy, PHP must see the client in `REMOTE_ADDR`, not the proxy.
+///
+/// Found behind nginx in front of a container: the TCP peer was the Docker gateway,
+/// which sat inside `trusted_proxies`, and `X-Forwarded-For` arrived with the right
+/// client — yet PHP got the gateway. An IP allowlist that waived 2FA for known addresses
+/// therefore asked everyone for a second factor, and started working again the moment
+/// nginx was taken out of the path. Askr had resolved the client correctly for its own
+/// rate limiter and never passed that answer to PHP.
+///
+/// Over a real socket, because the peer address is exactly the thing a unit test has to
+/// fake. Here the peer is loopback, and loopback is the declared proxy.
+#[test]
+fn remote_addr_is_the_forwarded_client_behind_a_trusted_proxy() {
+    let app = r#"<?php
+header('Content-Type: text/plain');
+echo ($_SERVER['REMOTE_ADDR'] ?? '-') . '|' . ($_SERVER['ASKR_PEER_ADDR'] ?? '-')
+    . '|' . ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '-');
+"#;
+    let trusted = Server::start(
+        "realip",
+        &[("index.php", app)],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+trusted_proxies = ["127.0.0.1"]
+"#,
+    );
+    let r = request(
+        trusted.port,
+        "GET",
+        "/",
+        &[("X-Forwarded-For", "92.220.212.22")],
+    );
+    assert_eq!(r.status, 200, "log:\n{}", trusted.log_contents());
+    assert_eq!(
+        r.body.trim(),
+        "92.220.212.22|127.0.0.1|92.220.212.22",
+        "the client in REMOTE_ADDR, the proxy kept in ASKR_PEER_ADDR"
+    );
+    // A forged hop to the left of the one the proxy itself observed is not believed.
+    let r = request(
+        trusted.port,
+        "GET",
+        "/",
+        &[("X-Forwarded-For", "198.51.100.9, 92.220.212.22")],
+    );
+    assert_eq!(
+        r.body.trim(),
+        "92.220.212.22|127.0.0.1|92.220.212.22",
+        "and the chain is collapsed, so an app that trusts every hop cannot pick the forged \
+         leftmost entry"
+    );
+
+    // And without a trusted proxy the header proves nothing: REMOTE_ADDR stays the peer,
+    // or any client could claim any address by sending one.
+    let open = Server::start(
+        "realip-untrusted",
+        &[("index.php", app)],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+"#,
+    );
+    let r = request(
+        open.port,
+        "GET",
+        "/",
+        &[("X-Forwarded-For", "92.220.212.22")],
+    );
+    assert_eq!(
+        r.body.trim(),
+        "127.0.0.1|127.0.0.1|-",
+        "an unvouched X-Forwarded-For must not become REMOTE_ADDR, nor reach PHP at all"
+    );
+    // Removing it can break a deployment that trusted its proxy in the application
+    // instead of in Askr, so it has to be said rather than done silently.
+    assert!(
+        open.log_has("not in [server] trusted_proxies"),
+        "the removal is logged:\n{}",
+        open.log_contents()
+    );
+}
+
 /// `--config` is the whole configuration, and must say so rather than ignore flags.
 ///
 /// The file/CLI split is an either/or, not a merge: with `--config` given, every other
