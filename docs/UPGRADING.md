@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.7.0; ARCH=$(uname -m)
+VER=v1.7.1; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.7.0     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.7.1     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.7` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.7.0-full`) are the same server built with the optional features
+The `-full` tags (`1.7.1-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,36 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.7.1
+
+**Behind a reverse proxy with `trusted_proxies` set, `REMOTE_ADDR` is now the client
+instead of the proxy.** That is the fix, and for most applications it is simply what they
+expected all along. Two things can change underneath you, and both are worth checking
+before you roll it out.
+
+**Forwarding headers from an untrusted peer are now removed.** If you never set
+`trusted_proxies` and instead let Laravel's `TrustProxies` read `X-Forwarded-For` itself,
+that header no longer reaches PHP, and `$request->ip()` becomes the proxy. Askr logs this
+the first time it happens (`X-Forwarded-For arrived from a peer that is not in [server]
+trusted_proxies`). Move the trust to Askr:
+
+```toml
+[server]
+trusted_proxies = ["172.18.0.1"]   # what TrustProxies used to list
+```
+
+**A `TrustProxies` list naming your proxy stops matching.** Symfony checks that list
+against `REMOTE_ADDR`, which is now the client, so it stops honouring `X-Forwarded-Proto`
+and `X-Forwarded-Host`. Scheme is still right if Askr has `https = true`; host is still
+right if your proxy passes `Host` (`proxy_set_header Host $host;`). The clean fix is to
+set `TrustProxies` to `'*'` — safe here, because Askr has already removed every
+forwarding header that did not come from a trusted proxy and collapsed
+`X-Forwarded-For` to one value. Full reasoning in
+[Behind a reverse proxy](DEPLOYMENT.md#behind-a-reverse-proxy).
+
+Standalone instances with nothing in front, and nothing in `trusted_proxies`, see no
+difference except that a visitor's own `X-Forwarded-*` headers no longer reach PHP.
 
 ### To 1.7.0
 

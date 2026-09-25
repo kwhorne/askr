@@ -5,6 +5,63 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.7.1 — 2026-09-25
+
+**Behind a reverse proxy, PHP was told the proxy was the client.** `trusted_proxies`
+resolved the real client for Askr's own rate limiter and never passed the answer on:
+`$_SERVER['REMOTE_ADDR']` was the TCP peer, full stop.
+
+Found behind nginx in front of a container. The peer was the Docker gateway, it sat inside
+`trusted_proxies`, and `X-Forwarded-For` arrived carrying the right client — yet PHP got
+the gateway. An IP allowlist that waives 2FA for known addresses therefore asked every
+visitor for a second factor, and started working again the moment nginx was taken out of
+the path. The report that found it also gave the fix and six test cases; all six passed
+through Askr's existing resolver unchanged. It was simply never called for `REMOTE_ADDR`.
+
+### Fixed
+
+- **`REMOTE_ADDR` is the client through a trusted proxy**: the rightmost `X-Forwarded-For`
+  entry that is not itself a trusted proxy, or the peer when nothing was forwarded. The
+  same function the rate limiter uses, deliberately — one definition, so the two cannot
+  disagree about who is calling again. With no `trusted_proxies` the header is ignored
+  and this is the peer, as before. It is what nginx does with `real_ip`, Apache with
+  `mod_remoteip`, and nginx + php-fpm with `fastcgi_param REMOTE_ADDR $remote_addr`.
+
+- **`ASKR_PEER_ADDR`** keeps the TCP peer — the proxy — because once `REMOTE_ADDR` is the
+  forwarded client, the address Askr actually accepted the connection from has nowhere
+  else to appear, and that is the one you need when a forwarding chain is misconfigured.
+  `REMOTE_PORT` stays the peer's port: a forwarded chain carries addresses, not ports.
+
+### Security
+
+- **Forwarding headers can no longer contradict `REMOTE_ADDR`.** Fixing the variable alone
+  would have left the hole open for any application that reads the headers itself.
+  Laravel's `trustProxies(at: '*')`, common in containers, takes the *leftmost*
+  `X-Forwarded-For` entry — so behind a proxy that appends, the chain `forged, client`
+  lands it on `forged`, and with no proxy at all a visitor simply sends the header. An
+  allowlist keyed on the client address could be walked past either way.
+
+  So Askr owns the answer, as `mod_remoteip` does. From a trusted proxy, `X-Forwarded-For`
+  is collapsed to the one client Askr resolved, and the other forwarding headers pass as
+  that proxy's own statements. From **any other peer, every forwarding header is removed**
+  — `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Host`, `-Proto`, `-Port`, `-Prefix`, and
+  RFC 7239 `Forwarded`. Not only the address: `X-Forwarded-Host` from a peer nobody vouched
+  for is how a password reset link gets pointed at an attacker's domain. Covering only
+  `X-Forwarded-For` would have made the natural next step — "Askr cleaned it, so `'*'` is
+  safe" — open that hole instead of closing one.
+
+  Askr logs the first time it removes a forwarding header from an untrusted peer, because
+  the removal can break a deployment that kept its proxy trust in the application instead
+  of in Askr, and that break should name itself rather than pass silently.
+
+### Verified
+
+Each fix was shown to fail against the old code before it was accepted: the unit test for
+`REMOTE_ADDR` reports `172.18.0.1` — the Docker gateway from the report — where the client
+belongs; the header test reports the raw `forged, client` chain reaching PHP; and the
+e2e test drives it over a real socket with loopback as the trusted proxy, including the
+logged warning on the untrusted side.
+
 ## 1.7.0 — 2026-09-14
 
 **If you run `[[site]]` with a queue or scheduler sidecar, your queue has probably been
