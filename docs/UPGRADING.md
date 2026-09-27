@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.7.1; ARCH=$(uname -m)
+VER=v1.7.2; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.7.1     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.7.2     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.7` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.7.1-full`) are the same server built with the optional features
+The `-full` tags (`1.7.2-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,27 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.7.2
+
+**Nothing to do for a single application.** The fix is for instances hosting several
+(`[[site]]`): `askr_cache_flush()` — Laravel's `Cache::flush()` and `artisan cache:clear` —
+now empties only the calling application's cached pages, where it used to empty every
+application's.
+
+**If `[cache] persist` is set, the response cache starts cold once.** Entries gained a
+field recording their application, so the saved dump changes format and one written by an
+older Askr is refused rather than read with the wrong layout. It refills as pages are
+requested.
+
+**A cache flush with no application set is now refused** instead of emptying everything.
+A serving process always has one, so you should never see the log line that says so
+(`askr_cache_flush() was called with no application set, and refused`). If you do, PHP
+ran outside a request or a sidecar, and that is worth a report.
+
+**Not changed, and worth knowing if you run the L2 SQL cache** (`sql-backend`,
+`ASKR_CACHE_DB`) with `[[site]]`: L2 is not namespaced, so applications in one instance
+share it. That is a design decision still open — see the changelog.
 
 ### To 1.7.1
 

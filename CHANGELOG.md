@@ -5,6 +5,12 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.7.2 — 2026-09-27
+
+**One site's `cache:clear` no longer sends every other site's pages cold.** A fix for
+multi-site instances, found by a refactor aimed at exactly this kind of fault — and the
+first release checked end to end by the new tooling rather than by hand.
+
 ### Fixed
 
 - **One site's `cache:clear` sent every other site's pages cold.** `askr_cache_flush()` —
@@ -33,7 +39,27 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   so the dump format is version 2 and a version-1 dump is refused rather than read with
   the wrong layout (only if `[cache] persist` is set).
 
+### Docs
+
+- Four stale version pins that the release-time grep could not see: `examples/docker/
+  quickstart.yml` still pulled `:1.6`, and the sentence pairing `askr-laravel` with a
+  server version said `1.4.x` — through two and three releases respectively. Found the
+  first time the new pin check ran.
+
 ### Internal
+
+- **Tests check requests the way a framework does.** A PHP fixture applies Symfony's own
+  `Request::getHost()` and the other invariants a framework relies on, and the e2e suite
+  runs it in per-request and worker mode over HTTP/1.0, 1.1 and — for the first time — 2.
+  Reintroduced one at a time, it catches the 1.5.1 `host, host:port` 400, a wrong cookie
+  join over HTTP/2, and the 1.4.7 HTTP/2 `localhost` fallback. CI now also serves a real,
+  freshly created Laravel app on every change.
+
+- **Releases are bumped and verified by tools.** `scripts/bump-version.py` rewrites every
+  version pin from one table that `check-docs.py` also enforces in CI, and
+  `scripts/verify-release.sh` checks signatures, checksums, provenance, image tags,
+  Packagist and the published image serving framework-valid requests. It has been run
+  against a release known to be broken: against v1.5.1 it reports the HTTP/1.x 400.
 
 - **Application identity is a type.** Shared memory is namespaced per application, and
   every fault in this area so far came from that identity being a loose string code had
