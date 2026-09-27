@@ -1589,28 +1589,71 @@ mod tests {
     }
 
     /// Two applications, one ring. A could pop B's jobs — and run B's job classes
-    /// inside A's codebase — or acknowledge them by guessing an id. Queue names carry
-    /// the namespace now, and an ack from the wrong application is "no such job".
+    /// inside A's codebase. Queue names carry the application now, so another
+    /// application's queue is simply not there.
     #[test]
     fn a_job_is_invisible_and_unackable_from_another_namespace() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         init(64);
 
         crate::ns::set(&crate::ns::tests::app("aaaaaaaaaaaaaaaa"));
-        let id = push(b"default", b"job-for-a", 0);
-        assert!(id > 0);
+        assert!(push(b"default", b"job-for-a", 0) > 0);
 
         crate::ns::set(&crate::ns::tests::app("bbbbbbbbbbbbbbbb"));
         assert!(pop(b"default", 30).is_none(), "B does not see A's queue");
         assert_eq!(size(b"default"), 0);
-        assert!(!delete(id), "B cannot ack A's job by id");
-        assert!(!release(id, 0), "nor release it");
+        // The ack side is `a_live_lease_only_works_for_its_own_application`. This test
+        // used to assert it here with the id `push` returned — which is not a lease, so
+        // the assertion held with the application check removed entirely.
 
         crate::ns::set(&crate::ns::tests::app("aaaaaaaaaaaaaaaa"));
         let got = pop(b"default", 30).expect("A still has its job");
         assert_eq!(got.payload, b"job-for-a");
         assert!(delete(got.id), "and can ack it with the lease it was given");
         // Reporting shows the application's own name, not the prefixed one.
+        crate::ns::clear();
+    }
+
+    /// A live lease must only work for the application whose job it is — and a process
+    /// with no application set is not "every application".
+    ///
+    /// Leases are a global counter handed out in sequence, so the value of another
+    /// application's current reservation is easy to guess. The check on the ack path used
+    /// `ns::owns`, which with no application set said yes to every key: a process that
+    /// had not set one could acknowledge or release any application's job. The same kind
+    /// of omission had already produced a queue nothing could drain and a cache flush that
+    /// emptied every site.
+    ///
+    /// With a *real* lease, obtained by the owner's own pop. The older test above presents
+    /// the id `push` returned, which is not a lease at all, so its "cannot ack" holds
+    /// whether or not any application check exists.
+    #[test]
+    fn a_live_lease_only_works_for_its_own_application() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        init(64);
+        let a = crate::ns::tests::app("aaaaaaaaaaaaaaaa");
+        let b = crate::ns::tests::app("bbbbbbbbbbbbbbbb");
+
+        crate::ns::set(&a);
+        assert!(push(b"lease-probe", b"job-for-a", 0) > 0);
+        let lease = pop(b"lease-probe", 30).expect("A reserves its job").id;
+
+        crate::ns::set(&b);
+        assert!(!delete(lease), "another application cannot ack it");
+        assert!(!release(lease, 0), "nor release it");
+
+        crate::ns::clear();
+        assert!(
+            !delete(lease),
+            "a process with no application cannot ack it"
+        );
+        assert!(!release(lease, 0), "nor release it");
+
+        crate::ns::set(&a);
+        assert!(
+            delete(lease),
+            "the owner still can: the job was never touched"
+        );
         crate::ns::clear();
     }
 

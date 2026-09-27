@@ -5,6 +5,26 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Security
+
+- **A process with no application set could acknowledge any application's queue job.**
+  The lease check on `askr_queue_delete` / `askr_queue_release` asked `ns::owns`, which
+  with no application set said yes to every key. Leases are a global counter handed out
+  in sequence, so another application's current reservation is easy to guess, and
+  presenting it acked or released that job. It was the last place where "no application"
+  meant "every application" — the same omission that, elsewhere, had produced a queue
+  nothing could drain and a cache flush that emptied every site.
+
+  Not reachable from a serving process: every request sets an application and sidecars
+  set one at boot, so this needed PHP running outside both. It is closed anyway, because
+  that is exactly the assumption that has failed before. With no application set, a
+  process now owns only the raw space — the one its own `push` and `pop` already use.
+
+  The test that claimed to cover this presented the id `push` returned, which is not a
+  lease, so its "cannot ack" held with the application check removed entirely. It no
+  longer claims to; a new test uses a live lease from the owner's own pop, and fails
+  against the old check.
+
 ### Internal
 
 - **The `$_SERVER` header policy is one table.** What happens to a request header on its

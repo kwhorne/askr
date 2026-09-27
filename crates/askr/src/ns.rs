@@ -172,12 +172,19 @@ pub fn key(key: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
-/// Does this stored key belong to the current application? With none set, everything
-/// does — the raw view.
+/// Does this stored key belong to the current application?
+///
+/// With none set, only keys that carry no application do: the raw space, the same one
+/// [`key`] writes into and a no-application `pop` reads from. It used to be every key.
+/// That was the last place where "no application" meant "every application" — and the
+/// one caller is the queue's lease check, so a process with no application set could
+/// acknowledge or release any application's job by presenting its lease, and leases are
+/// a global counter handed out in sequence. The same kind of omission had already cost
+/// a queue that nothing drained, and a cache flush that emptied every site.
 pub fn owns(stored: &[u8]) -> bool {
     match current() {
         Some(app) => stored.starts_with(&app.prefix_bytes()),
-        None => true,
+        None => split(stored).0.is_none(),
     }
 }
 
@@ -246,7 +253,11 @@ pub(crate) mod tests {
         let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
         clear();
         assert_eq!(&*key(b"user:1"), b"user:1", "no application: the raw table");
-        assert!(owns(b"anything"));
+        assert!(owns(b"anything"), "a raw key belongs to the raw space");
+        assert!(
+            !owns(b"00000000deadbeef\x1fuser:1"),
+            "but an application's key does not belong to a process that has none"
+        );
 
         let a = app("00000000deadbeef");
         set(&a);
