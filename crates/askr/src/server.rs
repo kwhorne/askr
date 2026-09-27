@@ -864,13 +864,15 @@ where
                 let mut request = cgi::build_request(
                     &parts,
                     Vec::new(), // body consumed while streaming; PHP uses $_POST/$_FILES
-                    docroot,
-                    &script,
-                    &script_name,
-                    peer,
-                    config.https,
-                    port,
-                    &config.trusted_proxies,
+                    &cgi::Context {
+                        docroot,
+                        script: &script,
+                        script_name: &script_name,
+                        peer,
+                        https: config.https,
+                        server_port: port,
+                        trusted_proxies: &config.trusted_proxies,
+                    },
                 );
                 request.post_fields = parsed.fields;
                 request.files = parsed.files;
@@ -959,13 +961,15 @@ where
         let request = cgi::build_request(
             &parts,
             body_bytes,
-            docroot,
-            &script,
-            &script_name,
-            peer,
-            config.https,
-            port,
-            &config.trusted_proxies,
+            &cgi::Context {
+                docroot,
+                script: &script,
+                script_name: &script_name,
+                peer,
+                https: config.https,
+                server_port: port,
+                trusted_proxies: &config.trusted_proxies,
+            },
         );
         (request, crate::upload::TempFiles::default())
     };
@@ -1655,13 +1659,15 @@ async fn esi_fragment(
     let request = cgi::build_request(
         &parts,
         Vec::new(),
-        docroot,
-        &script,
-        &script_name,
-        peer,
-        config.https,
-        config.listen.port(),
-        &config.trusted_proxies,
+        &cgi::Context {
+            docroot,
+            script: &script,
+            script_name: &script_name,
+            peer,
+            https: config.https,
+            server_port: config.listen.port(),
+            trusted_proxies: &config.trusted_proxies,
+        },
     );
     match rt.php.handle(request).await {
         Ok(Reply::Buffered(resp)) if resp.status == 200 => {
@@ -2344,13 +2350,15 @@ async fn refresh_entry(
     let request = cgi::build_request(
         &parts,
         Vec::new(),
-        docroot,
-        &script,
-        &script_name,
-        peer,
-        config.https,
-        port,
-        &config.trusted_proxies,
+        &cgi::Context {
+            docroot,
+            script: &script,
+            script_name: &script_name,
+            peer,
+            https: config.https,
+            server_port: port,
+            trusted_proxies: &config.trusted_proxies,
+        },
     );
     // Only a buffered response is cacheable; a streaming one is skipped.
     if let Ok(Reply::Buffered(resp)) = rt.php.handle(request).await {

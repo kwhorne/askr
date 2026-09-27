@@ -82,19 +82,115 @@ fn warn_untrusted_forwarded_for(peer: SocketAddr) {
     }
 }
 
+/// Everything about the connection and the routing that the `$_SERVER` map needs,
+/// besides the request itself.
+///
+/// These used to be seven positional arguments — two `&Path`s, a `&str`, a peer, a bool, a
+/// port and a proxy list — at four call sites, which is how one of them could pass the
+/// port where another passed the listen port and nothing would say so.
+pub struct Context<'a> {
+    pub docroot: &'a Path,
+    pub script: &'a Path,
+    pub script_name: &'a str,
+    pub peer: SocketAddr,
+    pub https: bool,
+    pub server_port: u16,
+    /// Peers whose forwarding headers are believed — see [`crate::server::client_ip_from`].
+    pub trusted_proxies: &'a [crate::server::Cidr],
+}
+
+/// What happens to one request header on its way into `$_SERVER`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// Becomes `HTTP_*`; repeated fields are one value joined with `join` — `"; "` for
+    /// Cookie (RFC 9113 §8.2.3), `", "` for everything else (RFC 9110 §5.3). Pushing each
+    /// occurrence separately made duplicate keys, and PHP kept whichever came last.
+    Pass { join: &'static str },
+    /// Kept out of the `HTTP_*` space, for the reason the [`Rule`] gives.
+    Drop(Rule),
+    /// X-Forwarded-For from a trusted proxy: replaced by the one client Askr resolved.
+    ///
+    /// One value, the one REMOTE_ADDR carries. A chain would hand the leftmost entry — the
+    /// part any upstream hop can forge — to any application that trusts every proxy.
+    ForwardedFor,
+}
+
+/// Why a header does not become `HTTP_*` as sent.
+///
+/// Every rule here was added after something went wrong, and the reason lives with the
+/// rule rather than scattered through the loop that applies it, so the whole policy can
+/// be read — and tested — in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rule {
+    /// `Content-Type` and `Content-Length` are CGI variables without the `HTTP_` prefix,
+    /// set from the request itself; the header form would be a second, disagreeing copy.
+    ContentMeta,
+    /// httpoxy (CVE-2016-5385 et al.): a client-supplied `Proxy:` must never become
+    /// `HTTP_PROXY`, which many HTTP clients (Guzzle, libcurl via getenv) read to route
+    /// outbound requests.
+    Httpoxy,
+    /// HTTP_HOST is set from the effective host, which also covers HTTP/2, where the
+    /// authority is in the URI rather than a header. Letting `Host:` through as well made
+    /// a second HTTP_HOST that the join turned into `host, host:port` — a framework 400
+    /// on every HTTP/1.x request in 1.5.1.
+    AuthoritativeHost,
+    /// X-Forwarded-For from a peer not in `trusted_proxies` is not evidence of anything.
+    /// Removing it can break a deployment that kept its proxy trust in the application,
+    /// so the first one per process is logged by name.
+    UntrustedForwardedFor,
+    /// Every other forwarding claim from an untrusted peer — `X-Real-IP`,
+    /// `X-Forwarded-Host`/`-Proto`/`-Port`/`-Prefix`, RFC 7239 `Forwarded` — goes too.
+    /// Not only the address: `X-Forwarded-Host` from a peer nobody vouched for is how a
+    /// password reset link gets pointed at an attacker's domain by an application that
+    /// trusts every proxy. From a trusted proxy they pass: that proxy's own statements.
+    UntrustedForwarding,
+    /// Underscores collapse into the same key as dashes, so `X_Forwarded_For` and
+    /// `X-Forwarded-For` both become HTTP_X_FORWARDED_FOR and which wins depends on
+    /// iteration order — a bypass for anything filtering the dashed spelling. nginx's
+    /// `underscores_in_headers off` is the same default.
+    Underscore,
+}
+
+/// The whole header policy, in order.
+///
+/// `name` is lowercase: `HeaderName::as_str` is documented to always return lower case,
+/// which is what lets this be a `match` rather than a chain of case-insensitive compares.
+/// Order matters where rules overlap — X-Forwarded-For is decided before the generic
+/// forwarding rule, and both before the underscore rule.
+fn header_policy(name: &str, peer_trusted: bool) -> Disposition {
+    use Disposition::{Drop, ForwardedFor, Pass};
+    match name {
+        "content-type" | "content-length" => Drop(Rule::ContentMeta),
+        "proxy" => Drop(Rule::Httpoxy),
+        "host" => Drop(Rule::AuthoritativeHost),
+        "x-forwarded-for" if peer_trusted => ForwardedFor,
+        "x-forwarded-for" => Drop(Rule::UntrustedForwardedFor),
+        n if !peer_trusted && is_forwarding_claim(n) => Drop(Rule::UntrustedForwarding),
+        n if n.contains('_') => Drop(Rule::Underscore),
+        "cookie" => Pass { join: "; " },
+        _ => Pass { join: ", " },
+    }
+}
+
+/// A header a proxy uses to say something about the original request.
+fn is_forwarding_claim(name: &str) -> bool {
+    const PREFIX: &str = "x-forwarded-";
+    name == "x-real-ip"
+        || name == "forwarded"
+        || (name.len() > PREFIX.len() && name.starts_with(PREFIX))
+}
+
 /// Build an [`askr_php::Request`] for the front controller.
-#[allow(clippy::too_many_arguments)]
-pub fn build_request(
-    parts: &Parts,
-    body: Vec<u8>,
-    docroot: &Path,
-    script: &Path,
-    script_name: &str,
-    peer: SocketAddr,
-    https: bool,
-    server_port: u16,
-    trusted_proxies: &[crate::server::Cidr],
-) -> Request {
+pub fn build_request(parts: &Parts, body: Vec<u8>, ctx: &Context) -> Request {
+    let Context {
+        docroot,
+        script,
+        script_name,
+        peer,
+        https,
+        server_port,
+        trusted_proxies,
+    } = *ctx;
     let method = parts.method.as_str().to_string();
     let path = parts.uri.path().to_string();
     let query = parts.uri.query().map(|q| q.to_string()).unwrap_or_default();
@@ -195,95 +291,31 @@ pub fn build_request(
         server_vars.push(("CONTENT_LENGTH".into(), body.len().to_string()));
     }
 
-    // All request headers become HTTP_* (dashes -> underscores, upper-cased).
+    // Every request header becomes HTTP_* (dashes to underscores, upper-cased) unless
+    // `header_policy` says otherwise; the reasons are on each `Rule`.
     for (name, value) in parts.headers.iter() {
         let key = name.as_str();
-        if key.eq_ignore_ascii_case("content-type") || key.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        // httpoxy (CVE-2016-5385 et al.): a client-supplied `Proxy:` header must
-        // never become `HTTP_PROXY`, which many HTTP clients (Guzzle, libcurl via
-        // getenv) read to route outbound requests. Drop it unconditionally.
-        if key.eq_ignore_ascii_case("proxy") {
-            continue;
-        }
-        // HTTP_HOST is authoritative from effective_host above (which also covers the
-        // HTTP/2 case, where the host is the URI authority and not a header). Letting
-        // the Host header through here would add a second HTTP_HOST that the merge
-        // below joins into `host, host:port` — invalid, and a framework 400.
-        if key.eq_ignore_ascii_case("host") {
-            continue;
-        }
-        // Client-address headers: Askr has already decided who the client is, and PHP
-        // must not be able to derive a different answer from the raw header.
-        //
-        // REMOTE_ADDR alone was not enough. An application with `trustProxies(at: '*')`
-        // — common in containers — reads X-Forwarded-For itself, trusts every hop, and
-        // takes the leftmost entry. Behind a proxy that appends, the chain is
-        // `forged, client`, so the app lands on `forged` whatever REMOTE_ADDR says; with
-        // no proxy at all, a client simply sends the header and is believed. Either way
-        // an IP allowlist that waives 2FA for known addresses can be walked past.
-        //
-        // So the header is rewritten the way Apache's mod_remoteip does: from a peer in
-        // `trusted_proxies` it is collapsed to the client Askr resolved (below, after the
-        // loop), and from any other peer it is removed, because an unvouched
-        // X-Forwarded-For is not evidence of anything. X-Real-IP is the same claim in a
-        // different header and is removed from an untrusted peer for the same reason;
-        // from a trusted one it passes, since it is that proxy's own statement.
-        if key.eq_ignore_ascii_case("x-forwarded-for") {
-            if peer_trusted {
+        let join = match header_policy(key, peer_trusted) {
+            Disposition::Pass { join } => join,
+            Disposition::ForwardedFor => {
                 saw_forwarded_for = true;
-            } else {
+                continue;
+            }
+            Disposition::Drop(Rule::UntrustedForwardedFor) => {
                 warn_untrusted_forwarded_for(peer);
+                continue;
             }
-            continue;
-        }
-        // Every other forwarding claim from an untrusted peer goes too, not only the
-        // address. `X-Forwarded-Host` from a peer nobody vouched for is how a password
-        // reset link gets pointed at an attacker's domain by any application that trusts
-        // all proxies, and `-Proto`/`-Port`/`-Prefix` and RFC 7239 `Forwarded` are the
-        // same kind of statement. Without this, the natural advice — "Askr has cleaned
-        // X-Forwarded-For, so `trustProxies(at: '*')` is safe now" — would have opened
-        // that hole instead of closing one. From a trusted proxy they pass unchanged:
-        // they are that proxy's own statements.
-        if !peer_trusted
-            && (key.eq_ignore_ascii_case("x-real-ip")
-                || key.eq_ignore_ascii_case("forwarded")
-                || key.len() > "x-forwarded-".len()
-                    && key[.."x-forwarded-".len()].eq_ignore_ascii_case("x-forwarded-"))
-        {
-            continue;
-        }
-        // Underscores collapse into the same $_SERVER key as dashes, so
-        // `X_Forwarded_For:` and `X-Forwarded-For:` both become
-        // HTTP_X_FORWARDED_FOR — and which one wins depends on header iteration
-        // order. Anything that filters the dashed spelling (a WAF, a proxy that
-        // rewrites X-Forwarded-For, Laravel's TrustProxies reading $_SERVER) is
-        // then bypassed by sending the underscored one. This is why nginx ships
-        // `underscores_in_headers off` as its default, and it is the same default
-        // here: an underscore in a header name is dropped rather than merged.
-        if key.contains('_') {
-            continue;
-        }
-        if let Ok(v) = value.to_str() {
-            let upper = key.to_ascii_uppercase().replace('-', "_");
-            let name = format!("HTTP_{upper}");
-            // A repeated field is one value, joined: "; " for Cookie (RFC 9113
-            // §8.2.3), ", " for everything else (RFC 9110 §5.3). Pushing each
-            // occurrence separately produced duplicate keys, and the PHP array built
-            // from this list kept whichever came last.
-            if let Some(existing) = server_vars.iter_mut().find(|(k, _)| *k == name) {
-                existing
-                    .1
-                    .push_str(if name == "HTTP_COOKIE" { "; " } else { ", " });
-                existing.1.push_str(v);
-            } else {
-                server_vars.push((name, v.to_string()));
-            }
+            Disposition::Drop(_) => continue,
+        };
+        let Ok(v) = value.to_str() else { continue };
+        let name = format!("HTTP_{}", key.to_ascii_uppercase().replace('-', "_"));
+        if let Some(existing) = server_vars.iter_mut().find(|(k, _)| *k == name) {
+            existing.1.push_str(join);
+            existing.1.push_str(v);
+        } else {
+            server_vars.push((name, v.to_string()));
         }
     }
-    // One value, and it is the one REMOTE_ADDR carries. A chain would hand the leftmost
-    // — the part any upstream hop can forge — back to any app that trusts every proxy.
     if saw_forwarded_for {
         server_vars.push(("HTTP_X_FORWARDED_FOR".into(), client.to_string()));
     }
@@ -344,13 +376,15 @@ mod tests {
         let req = build_request(
             &parts,
             Vec::new(),
-            Path::new("/srv"),
-            Path::new("/srv/index.php"),
-            "/index.php",
-            peer,
-            false,
-            80,
-            &[],
+            &Context {
+                docroot: Path::new("/srv"),
+                script: Path::new("/srv/index.php"),
+                script_name: "/index.php",
+                peer,
+                https: false,
+                server_port: 80,
+                trusted_proxies: &[],
+            },
         );
         assert_eq!(
             req.cookie.as_deref(),
@@ -388,13 +422,15 @@ mod tests {
             let req = build_request(
                 parts,
                 Vec::new(),
-                Path::new("/srv"),
-                Path::new("/srv/index.php"),
-                "/index.php",
-                peer,
-                false,
-                8080,
-                &[],
+                &Context {
+                    docroot: Path::new("/srv"),
+                    script: Path::new("/srv/index.php"),
+                    script_name: "/index.php",
+                    peer,
+                    https: false,
+                    server_port: 8080,
+                    trusted_proxies: &[],
+                },
             );
             let one = |name: &str| -> String {
                 let all: Vec<&str> = req
@@ -455,13 +491,15 @@ mod tests {
             let req = build_request(
                 &parts,
                 Vec::new(),
-                Path::new("/srv"),
-                Path::new("/srv/index.php"),
-                "/index.php",
-                peer,
-                false,
-                80,
-                trusted,
+                &Context {
+                    docroot: Path::new("/srv"),
+                    script: Path::new("/srv/index.php"),
+                    script_name: "/index.php",
+                    peer,
+                    https: false,
+                    server_port: 80,
+                    trusted_proxies: trusted,
+                },
             );
             let get = |k: &str| {
                 req.server_vars
@@ -532,13 +570,15 @@ mod tests {
             build_request(
                 &parts,
                 Vec::new(),
-                Path::new("/srv"),
-                Path::new("/srv/index.php"),
-                "/index.php",
-                peer,
-                false,
-                80,
-                t,
+                &Context {
+                    docroot: Path::new("/srv"),
+                    script: Path::new("/srv/index.php"),
+                    script_name: "/index.php",
+                    peer,
+                    https: false,
+                    server_port: 80,
+                    trusted_proxies: t,
+                },
             )
             .server_vars
         };
@@ -625,6 +665,62 @@ mod tests {
         assert!(get(&v, "HTTP_X_FORWARDED_FOR").is_empty());
     }
 
+    /// The header policy, as a table: every rule, for a trusted and an untrusted peer.
+    ///
+    /// This is the thing the refactor was for. The rules used to be eight `if` branches in
+    /// the loop that applied them, several added as fixes of earlier fixes, and the only
+    /// way to know what happened to a header was to trace it through all of them. Now a
+    /// change to what reaches PHP is a change to this table, and shows up here.
+    #[test]
+    fn the_header_policy_as_a_table() {
+        use Disposition::{Drop, ForwardedFor, Pass};
+        let comma = Pass { join: ", " };
+        #[rustfmt::skip]
+        let table: &[(&str, Disposition, Disposition)] = &[
+            // header               from a trusted proxy                 from anyone else
+            ("accept",              comma,                               comma),
+            ("cookie",              Pass { join: "; " },                 Pass { join: "; " }),
+            ("content-type",        Drop(Rule::ContentMeta),             Drop(Rule::ContentMeta)),
+            ("content-length",      Drop(Rule::ContentMeta),             Drop(Rule::ContentMeta)),
+            ("proxy",               Drop(Rule::Httpoxy),                 Drop(Rule::Httpoxy)),
+            ("host",                Drop(Rule::AuthoritativeHost),       Drop(Rule::AuthoritativeHost)),
+            ("x-forwarded-for",     ForwardedFor,                        Drop(Rule::UntrustedForwardedFor)),
+            ("x-real-ip",           comma,                               Drop(Rule::UntrustedForwarding)),
+            ("x-forwarded-host",    comma,                               Drop(Rule::UntrustedForwarding)),
+            ("x-forwarded-proto",   comma,                               Drop(Rule::UntrustedForwarding)),
+            ("forwarded",           comma,                               Drop(Rule::UntrustedForwarding)),
+            // Exactly the prefix, with nothing after it, is not a forwarding header.
+            ("x-forwarded-",        comma,                               comma),
+            // Underscores are refused either way — after the forwarding rules, so an
+            // underscored spelling of a forwarding header is still refused as one.
+            ("x_forwarded_for",     Drop(Rule::Underscore),              Drop(Rule::Underscore)),
+            ("x_custom",            Drop(Rule::Underscore),              Drop(Rule::Underscore)),
+        ];
+        for &(name, trusted, untrusted) in table {
+            assert_eq!(
+                header_policy(name, true),
+                trusted,
+                "{name} from a trusted proxy"
+            );
+            assert_eq!(
+                header_policy(name, false),
+                untrusted,
+                "{name} from anyone else"
+            );
+        }
+    }
+
+    /// The policy matches on lowercase names, relying on `HeaderName::as_str` always
+    /// returning lower case. Pin that, so an http-crate change fails here and not by
+    /// letting `Host:` through as a second HTTP_HOST.
+    #[test]
+    fn header_names_reach_the_policy_in_lower_case() {
+        for spelled in ["Host", "X-Forwarded-For", "COOKIE", "X-Real-IP"] {
+            let n = hyper::header::HeaderName::from_bytes(spelled.as_bytes()).unwrap();
+            assert_eq!(n.as_str(), spelled.to_ascii_lowercase());
+        }
+    }
+
     #[test]
     fn strips_the_port_without_shredding_an_ipv6_literal() {
         assert_eq!(host_without_port("example.com:8080"), "example.com");
@@ -653,13 +749,15 @@ mod tests {
         let req = build_request(
             &parts,
             Vec::new(),
-            Path::new("/srv"),
-            Path::new("/srv/index.php"),
-            "/index.php",
-            peer,
-            false,
-            80,
-            &[crate::server::parse_cidr("127.0.0.1").unwrap()],
+            &Context {
+                docroot: Path::new("/srv"),
+                script: Path::new("/srv/index.php"),
+                script_name: "/index.php",
+                peer,
+                https: false,
+                server_port: 80,
+                trusted_proxies: &[crate::server::parse_cidr("127.0.0.1").unwrap()],
+            },
         );
         let xff: Vec<&str> = req
             .server_vars
@@ -685,13 +783,15 @@ mod tests {
         let req = build_request(
             &parts,
             Vec::new(),
-            Path::new("/srv"),
-            Path::new("/srv/index.php"),
-            "/index.php",
-            peer,
-            false,
-            80,
-            &[],
+            &Context {
+                docroot: Path::new("/srv"),
+                script: Path::new("/srv/index.php"),
+                script_name: "/index.php",
+                peer,
+                https: false,
+                server_port: 80,
+                trusted_proxies: &[],
+            },
         );
         // The httpoxy header must NOT reach PHP as HTTP_PROXY…
         assert!(!req.server_vars.iter().any(|(k, _)| k == "HTTP_PROXY"));

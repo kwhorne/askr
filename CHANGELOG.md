@@ -5,6 +5,22 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Internal
+
+- **The `$_SERVER` header policy is one table.** What happens to a request header on its
+  way into PHP used to be eight `if` branches in the loop that applied them — `Proxy`,
+  `Host`, forwarding headers from trusted and untrusted peers, underscores, the join
+  separator — several added as fixes of earlier fixes, so knowing what reached PHP meant
+  tracing a header through all of them. It is now `header_policy()`: one `match`, each
+  rule carrying the incident that produced it, and a test that states the whole table
+  for a trusted and an untrusted peer. `build_request` takes a `Context` instead of seven
+  positional arguments.
+
+  No behaviour change, and shown rather than claimed: the old and new builders were run
+  side by side over 20,000 generated requests — every header combination, trusted and
+  untrusted peers, IPv6, the edge cases — and produced identical output, and the
+  comparison was confirmed to catch a one-token deviation before it was trusted.
+
 ## 1.7.2 — 2026-09-27
 
 **One site's `cache:clear` no longer sends every other site's pages cold.** A fix for
