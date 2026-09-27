@@ -5,6 +5,59 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **One site's `cache:clear` sent every other site's pages cold.** `askr_cache_flush()` —
+  what Laravel's `Cache::flush()` and `artisan cache:clear` reach through the AskrStore
+  driver — emptied the kv cache for the calling application only, as it has since 1.5.1,
+  and then emptied the **response cache for every application** in the instance. Response
+  cache entries did not record whose they were, so they could not be flushed any other
+  way. `docs/HOSTING.md` listed it as a caveat; nothing fixed it.
+
+  Each entry now carries its application, and the flush takes only the caller's pages.
+  Verified end to end over `[[site]]` — site B's page is still a `HIT` after site A's
+  flush, and was a `MISS` before — and through `c_flush` itself in a unit test, since the
+  fault was never in either cache's own flush but in which one the bridge called.
+
+### Changed
+
+- **A cache flush with no application set is refused** instead of emptying every
+  application's cache. "No application" used to mean "all of them" for a flush — the
+  widest operation in the cache, reached by omission. A serving process always has one
+  (every request sets it; sidecars set it at boot), so getting there means PHP ran
+  outside either; it is logged once per process. Emptying everything is now test-only:
+  nothing in production calls it, and a function nothing in production calls is one that
+  something eventually calls by mistake.
+
+- **A persisted response cache starts cold once.** Entries gained an application field,
+  so the dump format is version 2 and a version-1 dump is refused rather than read with
+  the wrong layout (only if `[cache] persist` is set).
+
+### Internal
+
+- **Application identity is a type.** Shared memory is namespaced per application, and
+  every fault in this area so far came from that identity being a loose string code had
+  to remember to carry: sidecars took the wrong one (1.5.1–1.6.x), `by_queue` dropped it
+  (two applications' `mail` lanes reported as one), the backlog classifier compared
+  display names (a dead queue reported as busy). `ns::App` can only be made from a docroot
+  or parsed from a stored key, and one `ns::split()` returns the application and the name
+  together, replacing a `strip` + `namespace_of` pair whose failure mode was always
+  calling only `strip`. The reporting scans hand the application back typed.
+
+- The kv cache, queue and response-cache tests share one lock. A response-cache entry now
+  records its application, so a test that flushes one cache and checks the other has to
+  exclude both sets of tests at once.
+
+### Not changed, and worth knowing
+
+- **The L2 SQL cache (`sql-backend`, `ASKR_CACHE_DB`) is not namespaced at all.** Keys go
+  to the table as the application wrote them, and its flush is `DELETE FROM askr_cache`,
+  so in a `[[site]]` instance with L2 on, applications share one cache. It was left alone
+  on purpose: L2 exists to be shared across *nodes*, and the namespace is a hash of the
+  docroot path — the same application on two nodes at different paths would stop sharing.
+  Fixing it wants an application id that is configured rather than derived, which is a
+  design decision, not a refactor.
+
 ## 1.7.1 — 2026-09-25
 
 **Behind a reverse proxy, PHP was told the proxy was the client.** `trusted_proxies`

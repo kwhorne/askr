@@ -188,9 +188,9 @@ fn hash_q(q: &[u8]) -> u64 {
 
 /// Per-queue liveness, as the reporting side sees it.
 pub struct LaneStats {
-    /// The namespace the lane was claimed under — which application's worker polled it.
-    /// `None` for a lane claimed with no namespace set.
-    pub app: Option<String>,
+    /// The application whose worker claimed the lane; `None` for one claimed with no
+    /// application set.
+    pub app: Option<crate::ns::App>,
     pub name: String,
     /// Unix ms a worker last asked this lane for work; 0 = never.
     pub last_polled_ms: u64,
@@ -342,9 +342,10 @@ pub fn lanes() -> Vec<LaneStats> {
             // has no namespace of its own, and filtering here would have hidden exactly
             // the lane that mattered: the one a sidecar polls under an application the
             // jobs were never pushed to. The application is carried alongside instead.
+            let (app, name) = crate::ns::split(stored);
             out.push(LaneStats {
-                app: crate::ns::namespace_of(stored).map(str::to_string),
-                name: String::from_utf8_lossy(crate::ns::strip(stored)).into_owned(),
+                app,
+                name: String::from_utf8_lossy(name).into_owned(),
                 last_polled_ms: (*l).last_polled_ms.load(Ordering::Relaxed),
                 last_drained_ms: (*l).last_drained_ms.load(Ordering::Relaxed),
             });
@@ -691,7 +692,7 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
         // Once per process: this is per push, and a busy app would drown the log.
         if !NO_RING_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             tracing::error!(
-                queue = %String::from_utf8_lossy(crate::ns::strip(queue)),
+                queue = %String::from_utf8_lossy(crate::ns::split(queue).1),
                 "queue push DISCARDED — no shared-memory ring is mapped. Start the server \
                  with --queue-slots (or [queue] slots) or jobs pushed from PHP go nowhere: \
                  no exception, no retry, no mail."
@@ -775,7 +776,7 @@ pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
             .is_ok()
     {
         tracing::error!(
-            queue = %String::from_utf8_lossy(crate::ns::strip(queue)),
+            queue = %String::from_utf8_lossy(crate::ns::split(queue).1),
             slots,
             "queue push DISCARDED — every slot is occupied. The job is gone: no \
              exception, no retry. Raise --queue-slots (or [queue] slots), or find out \
@@ -1042,12 +1043,12 @@ pub fn counts(queue: &[u8]) -> Counts {
 /// namespaced to one application cannot pop another's jobs, and with the namespace
 /// stripped the two are indistinguishable in every report. That is how a queue nothing
 /// could ever consume was reported as a queue that was merely behind.
-pub fn by_queue_with_app() -> Vec<(Option<String>, String, Counts)> {
+pub fn by_queue_with_app() -> Vec<(Option<crate::ns::App>, String, Counts)> {
     let Some((p, slots)) = base() else {
         return Vec::new();
     };
     let now = now_ms();
-    let mut out: std::collections::HashMap<(Option<String>, String), Counts> =
+    let mut out: std::collections::HashMap<(Option<crate::ns::App>, String), Counts> =
         std::collections::HashMap::new();
     for idx in 0..slots {
         let e = unsafe { p.add(idx) };
@@ -1058,8 +1059,8 @@ pub fn by_queue_with_app() -> Vec<(Option<String>, String, Counts)> {
             }
             let n = (ptr::read(ptr::addr_of!((*e).name_len)) as usize).min(QUEUE_NAME_MAX);
             let stored = std::slice::from_raw_parts(ptr::addr_of!((*e).name) as *const u8, n);
-            let app = crate::ns::namespace_of(stored).map(str::to_string);
-            let name = String::from_utf8_lossy(crate::ns::strip(stored)).into_owned();
+            let (app, name) = crate::ns::split(stored);
+            let name = String::from_utf8_lossy(name).into_owned();
             let avail = r_u64(ptr::addr_of!((*e).available_at));
             let reserved = r_u64(ptr::addr_of!((*e).reserved_until));
             let created = r_u64(ptr::addr_of!((*e).created_at));
@@ -1077,7 +1078,7 @@ pub fn by_queue_with_app() -> Vec<(Option<String>, String, Counts)> {
             }
         }
     }
-    let mut v: Vec<(Option<String>, String, Counts)> = out
+    let mut v: Vec<(Option<crate::ns::App>, String, Counts)> = out
         .into_iter()
         .map(|((app, name), c)| (app, name, c))
         .collect();
@@ -1435,7 +1436,7 @@ mod tests {
     fn absurd_delays_and_visibilities_saturate_instead_of_wrapping() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         init(64);
-        crate::ns::set("");
+        crate::ns::clear();
 
         let never = push(b"sat", b"delayed forever", u64::MAX);
         assert!(never > 0, "push must not panic");
@@ -1463,7 +1464,7 @@ mod tests {
     fn a_stale_lease_cannot_ack_or_release_a_job_someone_else_now_holds() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         init(64);
-        crate::ns::set("");
+        crate::ns::clear();
 
         assert!(push(b"lease", b"once-only", 0) > 0);
         // Visibility 0: the lease lapses immediately, standing in for a slow worker.
@@ -1495,7 +1496,7 @@ mod tests {
     #[test]
     fn a_persistent_ring_survives_a_remap_and_a_mismatch_is_recreated() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        crate::ns::set("");
+        crate::ns::clear();
         let name = format!("askr-test-{}", std::process::id());
         unlink_for_tests(&name);
 
@@ -1549,7 +1550,7 @@ mod tests {
     #[test]
     fn a_ring_from_an_older_layout_version_is_recreated_empty() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        crate::ns::set("");
+        crate::ns::clear();
         let name = format!("askr-oldver-{}", std::process::id());
         unlink_for_tests(&name);
 
@@ -1595,22 +1596,22 @@ mod tests {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         init(64);
 
-        crate::ns::set("aaaaaaaaaaaaaaaa");
+        crate::ns::set(&crate::ns::tests::app("aaaaaaaaaaaaaaaa"));
         let id = push(b"default", b"job-for-a", 0);
         assert!(id > 0);
 
-        crate::ns::set("bbbbbbbbbbbbbbbb");
+        crate::ns::set(&crate::ns::tests::app("bbbbbbbbbbbbbbbb"));
         assert!(pop(b"default", 30).is_none(), "B does not see A's queue");
         assert_eq!(size(b"default"), 0);
         assert!(!delete(id), "B cannot ack A's job by id");
         assert!(!release(id, 0), "nor release it");
 
-        crate::ns::set("aaaaaaaaaaaaaaaa");
+        crate::ns::set(&crate::ns::tests::app("aaaaaaaaaaaaaaaa"));
         let got = pop(b"default", 30).expect("A still has its job");
         assert_eq!(got.payload, b"job-for-a");
         assert!(delete(got.id), "and can ack it with the lease it was given");
         // Reporting shows the application's own name, not the prefixed one.
-        crate::ns::set("");
+        crate::ns::clear();
     }
 
     #[test]

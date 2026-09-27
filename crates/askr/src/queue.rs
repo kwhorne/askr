@@ -48,7 +48,7 @@ pub fn stats() -> (usize, usize, u64) {
 /// backend has no such thing — its rows live in a table keyed by queue name, shared by
 /// whatever connects to it — so it reports `None`, which reads as "one application" and
 /// is the truth there.
-pub fn by_queue_with_app() -> Vec<(Option<String>, String, crate::squeue::Counts)> {
+pub fn by_queue_with_app() -> Vec<(Option<crate::ns::App>, String, crate::squeue::Counts)> {
     #[cfg(feature = "sql-backend")]
     if crate::squeue_sql::enabled() {
         return crate::squeue_sql::by_queue()
@@ -108,7 +108,7 @@ pub enum LaneFault {
     /// of the top-level `root`, and a site with its own docroot is a different
     /// application. It is not a backlog, it is an unreachable one, and it used to report
     /// as `NotDraining` with the advice to add workers — advice that cannot work.
-    WrongApplication { polled_by: Vec<String> },
+    WrongApplication { polled_by: Vec<crate::ns::App> },
     /// Workers are polling and jobs are waiting anyway. The lane is saturated, or jobs
     /// keep being released back. More workers, or a look at what is failing.
     NotDraining,
@@ -129,8 +129,8 @@ impl LaneFault {
 #[derive(Debug)]
 pub struct LaneWarning {
     pub queue: String,
-    /// The application whose namespace the waiting jobs were pushed under.
-    pub app: Option<String>,
+    /// The application the waiting jobs were pushed under.
+    pub app: Option<crate::ns::App>,
     pub fault: LaneFault,
     pub pending: u64,
     pub oldest_pending_secs: u64,
@@ -174,7 +174,7 @@ pub fn warnings(now_ms: u64) -> Vec<LaneWarning> {
 /// scan twice.
 pub fn warnings_from(
     now_ms: u64,
-    occupied: &[(Option<String>, String, crate::squeue::Counts)],
+    occupied: &[(Option<crate::ns::App>, String, crate::squeue::Counts)],
     lanes: &[crate::squeue::LaneStats],
 ) -> Vec<LaneWarning> {
     let mut out = Vec::new();
@@ -200,19 +200,19 @@ pub fn warnings_from(
         // queue name under a different application? Then the jobs are not merely
         // unattended, they are unreachable, and saying "check the queue name" would send
         // the operator after a name that is already correct.
-        let others: Vec<String> = if unattended {
+        let others: Vec<crate::ns::App> = if unattended {
             lanes
                 .iter()
                 .filter(|l| &l.name == name && &l.app != app)
                 .filter(|l| matches!(age_secs(now_ms, l.last_polled_ms), Some(s) if s <= POLL_STALE_SECS))
-                .filter_map(|l| l.app.clone())
+                .filter_map(|l| l.app)
                 .collect()
         } else {
             Vec::new()
         };
         out.push(LaneWarning {
             queue: name.clone(),
-            app: app.clone(),
+            app: *app,
             fault: if !others.is_empty() {
                 LaneFault::WrongApplication { polled_by: others }
             } else if unattended {
@@ -268,7 +268,7 @@ mod tests {
 
     fn lane_in(app: &str, name: &str, polled_ms: u64, drained_ms: u64) -> LaneStats {
         LaneStats {
-            app: Some(app.into()),
+            app: Some(crate::ns::tests::app(app)),
             name: name.into(),
             last_polled_ms: polled_ms,
             last_drained_ms: drained_ms,
@@ -279,9 +279,13 @@ mod tests {
         lane_in(APP, name, polled_ms, drained_ms)
     }
 
-    fn backlog(name: &str, pending: u64, oldest_ms: u64) -> (Option<String>, String, Counts) {
+    fn backlog(
+        name: &str,
+        pending: u64,
+        oldest_ms: u64,
+    ) -> (Option<crate::ns::App>, String, Counts) {
         (
-            Some(APP.into()),
+            Some(crate::ns::tests::app(APP)),
             name.into(),
             Counts {
                 pending,
@@ -353,14 +357,14 @@ mod tests {
         assert_eq!(
             w[0].fault,
             LaneFault::WrongApplication {
-                polled_by: vec![OTHER.into()]
+                polled_by: vec![crate::ns::tests::app(OTHER)]
             },
             "a lane polled by another application is unreachable, not slow"
         );
         assert_eq!(w[0].fault.kind(), "queue_wrong_application");
         assert_eq!(
-            w[0].app.as_deref(),
-            Some(APP),
+            w[0].app,
+            Some(crate::ns::tests::app(APP)),
             "the warning names whose jobs"
         );
         assert_eq!(
@@ -381,7 +385,7 @@ mod tests {
                 backlog("mail", 5, NOW - 1_000),
                 // OTHER's has been sitting for ten minutes.
                 (
-                    Some(OTHER.into()),
+                    Some(crate::ns::tests::app(OTHER)),
                     "mail".into(),
                     Counts {
                         pending: 3,
@@ -401,11 +405,11 @@ mod tests {
             1,
             "only the unserved application is flagged: {w:?}"
         );
-        assert_eq!(w[0].app.as_deref(), Some(OTHER));
+        assert_eq!(w[0].app, Some(crate::ns::tests::app(OTHER)));
         assert_eq!(
             w[0].fault,
             LaneFault::WrongApplication {
-                polled_by: vec![APP.into()]
+                polled_by: vec![crate::ns::tests::app(APP)]
             }
         );
     }

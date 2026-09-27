@@ -248,10 +248,16 @@ while two domains serving one docroot are one application and share, as they sho
 | Response cache entries | ✓ keyed on `Host` | |
 | Response cache **tags** (`askr_cache_forget_tag`) | ✓ | |
 | KV cache, sessions, locks, counters (`askr_cache_*`) | ✓ | |
-| `askr_cache_flush()` | ✓ flushes only the caller's application | response cache is flushed whole |
+| `askr_cache_flush()` | ✓ flushes only the caller's application — kv cache and cached pages both (response cache since 1.7.2) | |
 | Job queue (`askr_queue_*`) | ✓ names, pops and acks | |
 | Broadcasting (SSE, Pusher) | | ✓ one secret per instance, so one application |
 | Rate limiting, metrics, admin plane | | ✓ operational, per instance |
+
+The response-cache half of that row was, until 1.7.2, a documented caveat: entries did not
+record which application stored them, so `askr_cache_flush()` — what Laravel's
+`Cache::flush()` and `artisan cache:clear` reach — emptied every site's cached pages while
+the kv flush beside it stayed scoped. Each entry now carries its application. A flush with
+no application set at all is refused rather than taken to mean "everyone".
 
 Two consequences worth knowing:
 

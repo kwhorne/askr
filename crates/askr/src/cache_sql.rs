@@ -252,14 +252,21 @@ pub fn touch(key: &[u8], ttl: u64) -> bool {
 }
 pub fn flush() {
     let _ = with_conn(do_flush);
-    if l1() {
-        crate::cache::flush();
-    }
+    flush_l1();
 }
 pub fn forget_tag(tag: &[u8]) {
     let _ = with_conn(|c| do_forget_tag(c, tag));
+    flush_l1(); // L1 has no tag map — coarse but safe
+}
+/// The L1 front, for this application — the scope `cache::flush_app` has had since 1.5.1.
+///
+/// Note the asymmetry, which predates this: the L2 table itself is not namespaced (see the
+/// module docs), so `do_flush` above empties it for every application sharing it.
+fn flush_l1() {
     if l1() {
-        crate::cache::flush(); // L1 has no tag map — coarse but safe
+        if let Some(app) = crate::ns::current() {
+            crate::cache::flush_app(&app);
+        }
     }
 }
 

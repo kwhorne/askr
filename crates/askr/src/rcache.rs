@@ -55,6 +55,14 @@ struct Entry {
     // only when the origin fails (5xx / handler error).
     status: u32,
     ntags: u32,
+    /// The application whose response this is (its hex id), or zeros for none.
+    ///
+    /// A field rather than a prefix on the key, unlike the kv cache: this key is the URL,
+    /// which PURGE and BAN match against, and prefixing it would break them. Without it an
+    /// entry could not say whose it was, so `askr_cache_flush()` — what Laravel's
+    /// `Cache::flush()` and `artisan cache:clear` reach — emptied every application's
+    /// cached pages, while the kv flush beside it had been scoped since 1.5.1.
+    app: [u8; 16],
     // The full cache key, kept so PURGE/BAN can match entries by URL. Keys longer
     // than KEY_MAX are truncated (pathological; a truncated key simply won't match
     // a purge, so it expires normally).
@@ -600,6 +608,7 @@ pub fn store(
     // `stale-if-error` grace, in seconds past the fresh deadline (0 = off).
     sie: u64,
     tags: &[Vec<u8>],
+    app: Option<&crate::ns::App>,
 ) -> bool {
     let Some((p, slots)) = base() else {
         return false;
@@ -672,6 +681,7 @@ pub fn store(
                     &th,
                     &tg,
                     key,
+                    app,
                 )
             };
             return true;
@@ -703,6 +713,7 @@ pub fn store(
             &th,
             &tg,
             key,
+            app,
         )
     };
     true
@@ -722,7 +733,13 @@ unsafe fn write_entry(
     th: &[u64; MAX_TAGS],
     tg: &[u64; MAX_TAGS],
     key: &[u8],
+    app: Option<&crate::ns::App>,
 ) {
+    let mut app_bytes = [0u8; 16];
+    if let Some(a) = app {
+        app_bytes.copy_from_slice(a.as_str().as_bytes());
+    }
+    ptr::write(ptr::addr_of_mut!((*e).app), app_bytes);
     ptr::write(ptr::addr_of_mut!((*e).state), 1);
     ptr::write(ptr::addr_of_mut!((*e).key_hash), h);
     ptr::write(ptr::addr_of_mut!((*e).expires_at), expires);
@@ -756,7 +773,16 @@ unsafe fn write_entry(
 }
 
 /// Empty the cache (keeps tag generations).
-pub fn flush() {
+/// Drop every cached response, for every application.
+///
+/// Test-only: no production path empties every application at once, and a function
+/// that nothing in production calls is one that something eventually calls by mistake.
+///
+/// Named for what it does. It used to be `flush()`, and `askr_cache_flush()` called it,
+/// so one application clearing its cache cleared everyone's; an operation this wide has
+/// to be asked for by name rather than reached by default.
+#[cfg(test)]
+pub(crate) fn flush_all() {
     let Some((p, slots)) = base() else {
         return;
     };
@@ -764,6 +790,23 @@ pub fn flush() {
         let e = unsafe { p.add(idx) };
         let _g = Slot::lock(e);
         unsafe { ptr::write(ptr::addr_of_mut!((*e).state), 0) };
+    }
+}
+
+/// Drop the cached responses `app` stored, and nobody else's.
+pub fn flush_app(app: &crate::ns::App) {
+    let Some((p, slots)) = base() else {
+        return;
+    };
+    let want = app.as_str().as_bytes();
+    for idx in 0..slots {
+        let e = unsafe { p.add(idx) };
+        let _g = Slot::lock(e);
+        unsafe {
+            if ptr::read(ptr::addr_of!((*e).app)) == *want {
+                ptr::write(ptr::addr_of_mut!((*e).state), 0);
+            }
+        }
     }
 }
 
@@ -811,7 +854,9 @@ struct DumpHeader {
 }
 
 const DUMP_MAGIC: [u8; 8] = *b"ASKRRC01";
-const DUMP_VERSION: u32 = 1;
+/// 2 added `Entry::app`. A version-1 dump is refused rather than read with the old layout
+/// (its `entry_size` would not match either); the cache starts cold once after upgrade.
+const DUMP_VERSION: u32 = 2;
 
 /// Write the response cache and its tag generations to `path`.
 ///
@@ -968,7 +1013,11 @@ mod tests {
 
     /// These tests share one process-wide region (and both `init` it), so run them
     /// one at a time — parallel probing/eviction across them is a flake source.
-    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ///
+    /// The same lock the kv cache and queue tests hold, not one of its own: an entry now
+    /// records its application, so a test that flushes one cache and checks the other has
+    /// to exclude both sets of tests at once. Two locks would let them interleave.
+    use crate::ns::tests::GUARD as TEST_GUARD;
 
     #[test]
     fn store_get_and_tag_invalidation() {
@@ -985,7 +1034,8 @@ mod tests {
             60,
             0,
             0,
-            &[b"posts".to_vec()]
+            &[b"posts".to_vec()],
+            None
         ));
 
         let hit = get(b"GET|/posts").expect("hit");
@@ -1007,19 +1057,40 @@ mod tests {
             60,
             0,
             0,
-            &[b"posts".to_vec()]
+            &[b"posts".to_vec()],
+            None
         ));
         assert_eq!(get(b"GET|/posts").unwrap().body, b"v2");
 
         // An untagged entry is unaffected by tag bumps.
-        assert!(store(b"GET|/about", 200, &hdrs, b"about", 0, 0, 0, &[]));
+        assert!(store(
+            b"GET|/about",
+            200,
+            &hdrs,
+            b"about",
+            0,
+            0,
+            0,
+            &[],
+            None
+        ));
         forget_tag(b"posts");
         assert_eq!(get(b"GET|/about").unwrap().body, b"about");
 
         // Stale-while-revalidate: 1s fresh, +5s stale window. Fresh immediately;
         // past the fresh deadline it is served STALE (not a miss) until the hard
         // deadline.
-        assert!(store(b"GET|/swr", 200, &hdrs, b"swrbody", 1, 10, 0, &[]));
+        assert!(store(
+            b"GET|/swr",
+            200,
+            &hdrs,
+            b"swrbody",
+            1,
+            10,
+            0,
+            &[],
+            None
+        ));
         assert!(!get(b"GET|/swr").unwrap().stale);
         // Sleep past the 1s fresh deadline (with margin for the second boundary),
         // staying inside the 10s stale window.
@@ -1037,14 +1108,14 @@ mod tests {
     fn a_response_with_too_many_tags_is_not_cached() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         init(64);
-        flush();
+        flush_all();
         let h = vec![("Content-Type".to_string(), "text/html".to_string())];
 
         let many: Vec<Vec<u8>> = (0..MAX_TAGS + 1)
             .map(|i| format!("post:{i}").into_bytes())
             .collect();
         assert!(
-            !store(b"GET|/many", 200, &h, b"body", 60, 0, 0, &many),
+            !store(b"GET|/many", 200, &h, b"body", 60, 0, 0, &many, None),
             "more tags than an entry holds must be refused"
         );
         assert!(get(b"GET|/many").is_none(), "and nothing may be stored");
@@ -1053,7 +1124,17 @@ mod tests {
         let exact: Vec<Vec<u8>> = (0..MAX_TAGS)
             .map(|i| format!("post:{i}").into_bytes())
             .collect();
-        assert!(store(b"GET|/exact", 200, &h, b"body", 60, 0, 0, &exact));
+        assert!(store(
+            b"GET|/exact",
+            200,
+            &h,
+            b"body",
+            60,
+            0,
+            0,
+            &exact,
+            None
+        ));
         assert!(get(b"GET|/exact").is_some());
         forget_tag(format!("post:{}", MAX_TAGS - 1).as_bytes());
         assert!(
@@ -1080,12 +1161,32 @@ mod tests {
     fn purge_and_ban_invalidate_by_url() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         init(256);
-        flush();
+        flush_all();
         let h = vec![("Content-Type".to_string(), "text/html".to_string())];
         // Two encoding variants of one URL, plus neighbours that must survive.
         let k = |pq: &str, enc: &str| format!("GET\0site.no\0{pq}\0{enc}\0").into_bytes();
-        assert!(store(&k("/posts/1", "id"), 200, &h, b"a", 60, 0, 0, &[]));
-        assert!(store(&k("/posts/1", "gzip"), 200, &h, b"b", 60, 0, 0, &[]));
+        assert!(store(
+            &k("/posts/1", "id"),
+            200,
+            &h,
+            b"a",
+            60,
+            0,
+            0,
+            &[],
+            None
+        ));
+        assert!(store(
+            &k("/posts/1", "gzip"),
+            200,
+            &h,
+            b"b",
+            60,
+            0,
+            0,
+            &[],
+            None
+        ));
         assert!(store(
             &k("/posts/1?page=2", "id"),
             200,
@@ -1094,10 +1195,31 @@ mod tests {
             60,
             0,
             0,
-            &[]
+            &[],
+            None
         ));
-        assert!(store(&k("/posts/12", "id"), 200, &h, b"d", 60, 0, 0, &[]));
-        assert!(store(&k("/about", "id"), 200, &h, b"e", 60, 0, 0, &[]));
+        assert!(store(
+            &k("/posts/12", "id"),
+            200,
+            &h,
+            b"d",
+            60,
+            0,
+            0,
+            &[],
+            None
+        ));
+        assert!(store(
+            &k("/about", "id"),
+            200,
+            &h,
+            b"e",
+            60,
+            0,
+            0,
+            &[],
+            None
+        ));
 
         // PURGE /posts/1 drops both encodings *and* the query variant, but must not
         // touch /posts/12 (prefix boundary) or /about.
@@ -1113,7 +1235,7 @@ mod tests {
 
         // Host scoping: another vhost's identical URL is untouched.
         let other = b"GET\0other.no\0/about\0id\0".to_vec();
-        assert!(store(&other, 200, &h, b"x", 60, 0, 0, &[]));
+        assert!(store(&other, 200, &h, b"x", 60, 0, 0, &[], None));
         assert_eq!(purge_url("site.no", "/about", None), 1);
         assert!(get(&other).is_some(), "other host must survive");
 
@@ -1126,7 +1248,8 @@ mod tests {
             60,
             0,
             0,
-            &[]
+            &[],
+            None
         ));
         assert!(store(
             &k("/cat/tech/go", "id"),
@@ -1136,7 +1259,8 @@ mod tests {
             60,
             0,
             0,
-            &[]
+            &[],
+            None
         ));
         assert!(store(
             &k("/cat/food/pizza", "id"),
@@ -1146,7 +1270,8 @@ mod tests {
             60,
             0,
             0,
-            &[]
+            &[],
+            None
         ));
         assert_eq!(ban_glob("site.no", "/cat/tech/*"), 2);
         assert!(get(&k("/cat/tech/rust", "id")).is_none());
@@ -1161,7 +1286,17 @@ mod tests {
         let hdrs = vec![("Content-Type".to_string(), "text/html".to_string())];
 
         // 1s fresh, no swr window, but a long stale-if-error grace.
-        assert!(store(b"GET|/sie", 200, &hdrs, b"siebody", 1, 0, 3600, &[]));
+        assert!(store(
+            b"GET|/sie",
+            200,
+            &hdrs,
+            b"siebody",
+            1,
+            0,
+            3600,
+            &[],
+            None
+        ));
         // Fresh: a normal hit, and not an error-only entry.
         let fresh = get(b"GET|/sie").expect("fresh hit");
         assert!(!fresh.stale && !fresh.error_only);
@@ -1180,7 +1315,7 @@ mod tests {
         assert_eq!(fb.body, b"siebody");
 
         // Without stale-if-error, an expired entry is simply gone.
-        assert!(store(b"GET|/plain", 200, &hdrs, b"x", 1, 0, 0, &[]));
+        assert!(store(b"GET|/plain", 200, &hdrs, b"x", 1, 0, 0, &[], None));
         std::thread::sleep(std::time::Duration::from_millis(2100));
         assert!(get(b"GET|/plain").is_none());
         assert!(stale_on_error(b"GET|/plain").is_none());

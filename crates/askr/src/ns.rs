@@ -33,107 +33,172 @@ pub const SEP: u8 = 0x1f;
 /// Sixteen hex digits plus the separator.
 pub const PREFIX_LEN: usize = 17;
 
-static CURRENT: RwLock<String> = RwLock::new(String::new());
-static MEMO: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
-
-/// The namespace for an application rooted at `docroot`.
+/// One application's identity in shared memory: sixteen lowercase hex digits, derived
+/// from its docroot.
 ///
-/// Canonicalised first, so `/var/www/app/public` and `/var/www/app/public/` — or a
-/// symlink to either — agree, then hashed to sixteen hex digits. Memoised: this is on
-/// the request path, and canonicalisation is a syscall.
-pub fn for_docroot(docroot: &Path) -> String {
-    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(ns) = memo.lock().ok().and_then(|m| m.get(docroot).cloned()) {
-        return ns;
+/// A type rather than a `String` on purpose. Every fault in this area so far came from
+/// identity being a loose string that code had to remember to carry: sidecars took the
+/// wrong one (1.5.1–1.6.x, a queue nothing could drain), `by_queue` dropped it (two
+/// applications' `mail` lanes reported as one), and the backlog classifier compared
+/// display names (a dead queue reported as merely busy). An `App` can only be made from
+/// a docroot or parsed from a stored key, so it cannot hold a stray string, and APIs that
+/// report on shared memory hand it back typed rather than leaving it to be stripped off.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct App([u8; PREFIX_LEN - 1]);
+
+impl App {
+    /// The application rooted at `docroot`.
+    ///
+    /// Canonicalised first, so `/var/www/app/public` and `/var/www/app/public/` — or a
+    /// symlink to either — agree, then hashed. Memoised: this is on the request path, and
+    /// canonicalisation is a syscall.
+    pub fn for_docroot(docroot: &Path) -> App {
+        let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(app) = memo.lock().ok().and_then(|m| m.get(docroot).copied()) {
+            return app;
+        }
+        let canonical = std::fs::canonicalize(docroot).unwrap_or_else(|_| docroot.to_path_buf());
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        canonical.as_os_str().hash(&mut h);
+        let hex = format!("{:016x}", h.finish());
+        let app = App::parse(&hex).expect("sixteen hex digits");
+        if let Ok(mut m) = memo.lock() {
+            m.insert(docroot.to_path_buf(), app);
+        }
+        app
     }
-    let canonical = std::fs::canonicalize(docroot).unwrap_or_else(|_| docroot.to_path_buf());
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    canonical.as_os_str().hash(&mut h);
-    let ns = format!("{:016x}", h.finish());
-    if let Ok(mut m) = memo.lock() {
-        m.insert(docroot.to_path_buf(), ns.clone());
+
+    /// Exactly sixteen hex digits, as written into a stored key or passed across the PHP
+    /// boundary. Anything else is not an application.
+    pub fn parse(s: &str) -> Option<App> {
+        let b = s.as_bytes();
+        if b.len() != PREFIX_LEN - 1 || !b.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let mut out = [0u8; PREFIX_LEN - 1];
+        for (o, c) in out.iter_mut().zip(b) {
+            *o = c.to_ascii_lowercase();
+        }
+        Some(App(out))
     }
-    ns
+
+    pub fn as_str(&self) -> &str {
+        // Only ever built from ASCII hex digits.
+        std::str::from_utf8(&self.0).expect("hex is ASCII")
+    }
+
+    /// `hex` + [`SEP`], the bytes a stored key starts with.
+    pub(crate) fn prefix_bytes(&self) -> [u8; PREFIX_LEN] {
+        let mut p = [SEP; PREFIX_LEN];
+        p[..PREFIX_LEN - 1].copy_from_slice(&self.0);
+        p
+    }
 }
 
-/// Make `ns` the namespace for shared-memory operations on this thread's PHP.
-pub fn set(ns: &str) {
+impl std::fmt::Display for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "App({})", self.as_str())
+    }
+}
+
+/// The application whose shared memory this process's PHP is talking to.
+///
+/// Ambient, because the PHP extension functions (`askr_cache_get('k')`, …) carry no
+/// application argument, and the one thread running PHP serves one request at a time. It
+/// is set as each request is handed to PHP, and once at boot for sidecars. Everything on
+/// the Rust side that can be told the application explicitly is — the response cache,
+/// the reporting scans — so this is the bridge's context, not a convenience for Rust.
+static CURRENT: RwLock<Option<App>> = RwLock::new(None);
+static MEMO: OnceLock<Mutex<HashMap<PathBuf, App>>> = OnceLock::new();
+
+/// Shorthand for [`App::for_docroot`].
+pub fn for_docroot(docroot: &Path) -> App {
+    App::for_docroot(docroot)
+}
+
+/// Make `app` the application for shared-memory operations on this thread's PHP.
+pub fn set(app: &App) {
     if let Ok(mut cur) = CURRENT.write() {
-        if cur.as_str() != ns {
-            cur.clear();
-            cur.push_str(ns);
+        *cur = Some(*app);
+    }
+}
+
+/// [`set`] from the text form a request carries across the `askr_php` boundary, which
+/// cannot name this crate's types.
+///
+/// That text is always written by [`App`]'s `Display`, so a value that does not parse is
+/// a bug, not input. It is logged as one, and the thread falls back to no application
+/// rather than keeping whichever application the previous request had — which would
+/// silently read and write another application's keys.
+pub fn set_from_request(text: &str) {
+    match App::parse(text) {
+        Some(app) => set(&app),
+        None => {
+            tracing::error!(namespace = %text, "request carries a malformed application id; serving it with none");
+            clear();
         }
     }
 }
 
-/// The namespace in force, empty when none has been set.
-pub fn current() -> String {
-    CURRENT.read().map(|c| c.clone()).unwrap_or_default()
+/// No application: the raw table. For tests and tooling; a serving process always has one.
+pub fn clear() {
+    if let Ok(mut cur) = CURRENT.write() {
+        *cur = None;
+    }
 }
 
-/// `key`, prefixed with the current namespace — or unchanged when none is set, so a
+/// The application in force, if any.
+pub fn current() -> Option<App> {
+    CURRENT.read().ok().and_then(|c| *c)
+}
+
+/// `key`, prefixed with the current application — or unchanged when none is set, so a
 /// process that never called [`set`] (tests, tooling) sees the raw table.
 pub fn key(key: &[u8]) -> Cow<'_, [u8]> {
-    let cur = CURRENT.read();
-    match cur.as_deref() {
-        Ok(ns) if !ns.is_empty() => {
-            let mut out = Vec::with_capacity(ns.len() + 1 + key.len());
-            out.extend_from_slice(ns.as_bytes());
-            out.push(SEP);
+    match current() {
+        Some(app) => {
+            let mut out = Vec::with_capacity(PREFIX_LEN + key.len());
+            out.extend_from_slice(&app.prefix_bytes());
             out.extend_from_slice(key);
             Cow::Owned(out)
         }
-        _ => Cow::Borrowed(key),
+        None => Cow::Borrowed(key),
     }
 }
 
-/// The current namespace's prefix bytes (`ns` + [`SEP`]), empty when none is set.
-pub fn prefix() -> Vec<u8> {
-    let mut p = current().into_bytes();
-    if !p.is_empty() {
-        p.push(SEP);
-    }
-    p
-}
-
-/// Does this stored key belong to the current namespace? With no namespace set,
-/// everything does — the raw view.
+/// Does this stored key belong to the current application? With none set, everything
+/// does — the raw view.
 pub fn owns(stored: &[u8]) -> bool {
-    let p = prefix();
-    p.is_empty() || stored.starts_with(&p)
+    match current() {
+        Some(app) => stored.starts_with(&app.prefix_bytes()),
+        None => true,
+    }
 }
 
-/// The namespace a stored key carries, or `None` when it has no prefix.
+/// A stored key taken apart: the application it belongs to, and the name a person would
+/// recognise.
 ///
-/// The counterpart to [`strip`]. Reporting code needs both: the bare name is what a
-/// person recognises, and the namespace is what says *whose* it is. Showing only the
-/// bare name is how two applications' `mail` queues looked like one — which is exactly
-/// how a queue nothing could ever drain read as a queue that was merely behind.
-pub fn namespace_of(stored: &[u8]) -> Option<&str> {
-    match stored.get(PREFIX_LEN - 1) {
-        Some(&SEP)
-            if stored[..PREFIX_LEN - 1]
-                .iter()
-                .all(|b| b.is_ascii_hexdigit()) =>
+/// One call for both halves, replacing a pair (`namespace_of` + `strip`) that callers had
+/// to remember to use together — and the failure was always using only `strip`, which is
+/// how two applications' `mail` queues were reported as one. A key without a namespace
+/// comes back as `(None, key)`, and a raw key that merely contains [`SEP`] is not mistaken
+/// for a namespaced one.
+pub fn split(stored: &[u8]) -> (Option<App>, &[u8]) {
+    if stored.get(PREFIX_LEN - 1) == Some(&SEP) {
+        if let Some(app) = std::str::from_utf8(&stored[..PREFIX_LEN - 1])
+            .ok()
+            .and_then(App::parse)
         {
-            std::str::from_utf8(&stored[..PREFIX_LEN - 1]).ok()
+            return (Some(app), &stored[PREFIX_LEN..]);
         }
-        _ => None,
     }
-}
-
-/// A stored key without its namespace, for anything that shows keys to people.
-pub fn strip(stored: &[u8]) -> &[u8] {
-    match stored.get(PREFIX_LEN - 1) {
-        Some(&SEP)
-            if stored[..PREFIX_LEN - 1]
-                .iter()
-                .all(|b| b.is_ascii_hexdigit()) =>
-        {
-            &stored[PREFIX_LEN..]
-        }
-        _ => stored,
-    }
+    (None, stored)
 }
 
 #[cfg(test)]
@@ -143,35 +208,65 @@ pub(crate) mod tests {
     /// Tests share the process-global namespace, so they serialise on this.
     pub(crate) static GUARD: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn a_docroot_maps_to_one_stable_namespace_and_different_roots_differ() {
-        let a = for_docroot(Path::new("/var/www/one/public"));
-        let b = for_docroot(Path::new("/var/www/two/public"));
-        assert_eq!(a.len(), 16);
-        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(a, for_docroot(Path::new("/var/www/one/public")), "stable");
-        assert_ne!(a, b, "two applications, two namespaces");
+    /// A fixed application for tests. Panics on a malformed literal, which is a test bug.
+    pub(crate) fn app(hex: &str) -> App {
+        App::parse(hex).unwrap_or_else(|| panic!("not an app: {hex:?}"))
     }
 
     #[test]
-    fn a_key_is_prefixed_only_while_a_namespace_is_set() {
+    fn a_docroot_maps_to_one_stable_application_and_different_roots_differ() {
+        let a = for_docroot(Path::new("/var/www/one/public"));
+        let b = for_docroot(Path::new("/var/www/two/public"));
+        assert_eq!(a.as_str().len(), 16);
+        assert!(a.as_str().bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a, for_docroot(Path::new("/var/www/one/public")), "stable");
+        assert_ne!(a, b, "two applications, two identities");
+    }
+
+    #[test]
+    fn only_sixteen_hex_digits_are_an_application() {
+        assert!(App::parse("00000000deadbeef").is_some());
+        assert_eq!(
+            App::parse("00000000DEADBEEF"),
+            App::parse("00000000deadbeef")
+        );
+        for bad in [
+            "",
+            "deadbeef",
+            "00000000deadbeef0",
+            "zzzzzzzzzzzzzzzz",
+            "0000000 deadbeef",
+        ] {
+            assert!(App::parse(bad).is_none(), "{bad:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn a_key_is_prefixed_only_while_an_application_is_set() {
         let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        set("");
-        assert_eq!(&*key(b"user:1"), b"user:1", "no namespace: the raw table");
+        clear();
+        assert_eq!(&*key(b"user:1"), b"user:1", "no application: the raw table");
         assert!(owns(b"anything"));
 
-        set("00000000deadbeef");
+        let a = app("00000000deadbeef");
+        set(&a);
         let k = key(b"user:1");
         assert_eq!(k.len(), PREFIX_LEN + 6);
         assert!(k.starts_with(b"00000000deadbeef\x1f"));
-        assert_eq!(strip(&k), b"user:1", "strip undoes key");
+        assert_eq!(
+            split(&k),
+            (Some(a), &b"user:1"[..]),
+            "split undoes key, both halves"
+        );
         assert!(owns(&k));
         assert!(
             !owns(b"11111111deadbeef\x1fuser:1"),
-            "another namespace's key"
+            "another application's key"
         );
         // A raw key that merely contains the separator is not a namespaced one.
-        assert_eq!(strip(b"odd\x1fkey"), b"odd\x1fkey");
-        set("");
+        assert_eq!(split(b"odd\x1fkey"), (None, &b"odd\x1fkey"[..]));
+        // Nor is sixteen bytes that are not hex, followed by the separator.
+        assert_eq!(split(b"zzzzzzzzzzzzzzzz\x1fk").0, None);
+        clear();
     }
 }

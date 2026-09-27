@@ -329,7 +329,7 @@ fn status_json(info: &Info) -> String {
             format!(
                 r#"{{"queue":{name},"app":{app},"pending":{p},"delayed":{d},"reserved":{r},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
                 name = json_string(name),
-                app = app.as_deref().map_or("null".into(), json_string),
+                app = app.map_or("null".into(), |a| json_string(a.as_str())),
                 p = c.pending,
                 d = c.delayed,
                 r = c.reserved,
@@ -349,7 +349,7 @@ fn status_json(info: &Info) -> String {
             format!(
                 r#"{{"queue":{name},"app":{app},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
                 name = json_string(&l.name),
-                app = l.app.as_deref().map_or("null".into(), json_string),
+                app = l.app.map_or("null".into(), |a| json_string(a.as_str())),
                 lp = stamp(l.last_polled_ms),
                 ld = stamp(l.last_drained_ms),
             )
@@ -370,11 +370,11 @@ fn status_json(info: &Info) -> String {
                 r#"{{"kind":"{kind}","queue":{q},"app":{app},"polled_by":[{polled}],"pending":{p},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld},"detail":{detail}}}"#,
                 kind = w.fault.kind(),
                 q = json_string(&w.queue),
-                app = w.app.as_deref().map_or("null".into(), json_string),
+                app = w.app.map_or("null".into(), |a| json_string(a.as_str())),
                 polled = match &w.fault {
                     crate::queue::LaneFault::WrongApplication { polled_by } => polled_by
                         .iter()
-                        .map(|a| json_string(a))
+                        .map(|a| json_string(a.as_str()))
                         .collect::<Vec<_>>()
                         .join(","),
                     _ => String::new(),
@@ -760,7 +760,7 @@ fn prometheus() -> Response<Full<Bytes>> {
         );
         for (app, name, c) in &occupied {
             let q = label_value(name);
-            let a = label_value(app.as_deref().unwrap_or(""));
+            let a = label_value(app.as_ref().map_or("", |a| a.as_str()));
             let age = if c.oldest_pending_created_ms > 0 {
                 now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
             } else {
@@ -777,7 +777,7 @@ fn prometheus() -> Response<Full<Bytes>> {
         // uses `absent()` or the unattended gauge instead.
         for l in &lanes {
             let q = label_value(&l.name);
-            let a = label_value(l.app.as_deref().unwrap_or(""));
+            let a = label_value(l.app.as_ref().map_or("", |a| a.as_str()));
             if l.last_polled_ms > 0 {
                 let _ = writeln!(
                     s,
@@ -796,7 +796,7 @@ fn prometheus() -> Response<Full<Bytes>> {
         let warned = crate::queue::warnings_from(now_ms, &occupied, &lanes);
         for (app, name, _) in &occupied {
             let q = label_value(name);
-            let a = label_value(app.as_deref().unwrap_or(""));
+            let a = label_value(app.as_ref().map_or("", |a| a.as_str()));
             let fault = warned
                 .iter()
                 .find(|w| &w.queue == name && &w.app == app)

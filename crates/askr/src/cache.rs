@@ -695,6 +695,7 @@ impl<const V: usize> Region<V> {
         delta
     }
 
+    #[cfg(test)]
     fn flush(&self) {
         let Some((p, slots)) = self.base() else {
             return;
@@ -824,19 +825,43 @@ pub fn increment(key: &[u8], delta: i64, ttl: u64) -> i64 {
     SMALL.increment(&key, h, delta, ttl)
 }
 
-/// Empty the current namespace — or, with none set, both regions entirely.
+/// Empty `app`'s part of the kv cache and leave every other application's alone.
 ///
-/// `askr_cache_flush()` used to zero the whole table. In an instance hosting several
-/// applications that let any one of them log every other's users out. It now sweeps
-/// the slots whose key carries this application's prefix and leaves the rest.
-pub fn flush() {
-    let prefix = crate::ns::prefix();
-    if prefix.is_empty() {
-        SMALL.flush();
-        LARGE.flush();
-    } else {
-        SMALL.flush_prefix(&prefix);
-        LARGE.flush_prefix(&prefix);
+/// `askr_cache_flush()` used to zero the whole table, which in an instance hosting several
+/// applications let any one of them log every other's users out.
+pub fn flush_app(app: &crate::ns::App) {
+    let prefix = app.prefix_bytes();
+    SMALL.flush_prefix(&prefix);
+    LARGE.flush_prefix(&prefix);
+}
+
+/// Empty the kv cache for every application.
+///
+/// Test-only: no production path empties every application at once, and a function
+/// that nothing in production calls is one that something eventually calls by mistake.
+///
+/// Named for what it does. This used to be what `flush()` did whenever no application
+/// happened to be set — the widest operation in the cache, reached by omission. Now it
+/// has to be asked for.
+#[cfg(test)]
+pub(crate) fn flush_all() {
+    SMALL.flush();
+    LARGE.flush();
+}
+
+/// Say, once per process, that a flush arrived with no application set, and was refused.
+///
+/// A serving process always has one: every request sets it, and sidecars set it at boot.
+/// Reaching this means PHP ran outside that — and emptying every application's cache is
+/// the wrong way to find out.
+fn refuse_flush_without_app() {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "askr_cache_flush() was called with no application set, and refused: without \
+             one it would have emptied every application's cache in this instance. \
+             (Logged once per process.)"
+        );
     }
 }
 
@@ -921,8 +946,16 @@ extern "C" fn c_touch(key: *const c_char, klen: usize, ttl: c_long) -> c_int {
 
 extern "C" fn c_flush() {
     crate::ffi::guard("cache::flush", (), || {
-        flush();
-        crate::rcache::flush(); // askr_cache_flush() clears both caches
+        // Both caches, for this application only. The response cache used to be emptied
+        // for everyone here, beside a kv flush that had been scoped since 1.5.1, so one
+        // site's `artisan cache:clear` sent every other site's pages cold.
+        match crate::ns::current() {
+            Some(app) => {
+                flush_app(&app);
+                crate::rcache::flush_app(&app);
+            }
+            None => refuse_flush_without_app(),
+        }
     })
 }
 
@@ -1199,6 +1232,116 @@ mod tests {
         println!();
     }
 
+    /// `askr_cache_flush()` must empty this application's caches and nobody else's.
+    ///
+    /// It is what Laravel's `Cache::flush()` and `artisan cache:clear` reach through the
+    /// AskrStore driver. The kv flush beside it had been scoped to the application since
+    /// 1.5.1, but the response-cache flush next to it was not: in a `[[site]]` instance one
+    /// site's `cache:clear` sent every other site's pages cold. Entries could not be scoped
+    /// because they did not record whose they were; now they do.
+    ///
+    /// Through `c_flush` itself, the function PHP calls, because the bug was never in either
+    /// cache's own flush — it was in which one the bridge chose to call.
+    #[test]
+    fn a_cache_flush_leaves_other_applications_pages_alone() {
+        let _g = guard();
+        init(256, 64);
+        crate::rcache::init(64);
+        let a = crate::ns::tests::app("aaaaaaaaaaaaaaaa");
+        let b = crate::ns::tests::app("bbbbbbbbbbbbbbbb");
+        let hdrs = vec![("Content-Type".to_string(), "text/html".to_string())];
+        assert!(crate::rcache::store(
+            b"GET|a.test|/",
+            200,
+            &hdrs,
+            b"A",
+            60,
+            0,
+            0,
+            &[],
+            Some(&a)
+        ));
+        assert!(crate::rcache::store(
+            b"GET|b.test|/",
+            200,
+            &hdrs,
+            b"B",
+            60,
+            0,
+            0,
+            &[],
+            Some(&b)
+        ));
+        crate::ns::set(&a);
+        assert!(set(b"flush-probe", b"from-a", 0));
+        crate::ns::set(&b);
+        assert!(set(b"flush-probe", b"from-b", 0));
+
+        // A clears its cache.
+        crate::ns::set(&a);
+        c_flush();
+
+        assert!(
+            crate::rcache::get(b"GET|a.test|/").is_none(),
+            "A's page is gone"
+        );
+        assert!(
+            crate::rcache::get(b"GET|b.test|/").is_some(),
+            "B's page must survive A's cache:clear"
+        );
+        assert_eq!(get(b"flush-probe"), None, "A's kv entry is gone");
+        crate::ns::set(&b);
+        assert_eq!(
+            get(b"flush-probe").as_deref(),
+            Some(&b"from-b"[..]),
+            "B's kv survives"
+        );
+        crate::ns::clear();
+    }
+
+    /// With no application set, a flush refuses instead of emptying everyone's cache.
+    ///
+    /// "No application" used to mean "every application" for a flush: the widest
+    /// operation in the cache, reached by omission. A serving process always has one, so
+    /// getting here means PHP ran outside a request or a sidecar — and wiping every site's
+    /// sessions is the wrong way to find that out.
+    #[test]
+    fn a_cache_flush_with_no_application_empties_nothing() {
+        let _g = guard();
+        init(256, 64);
+        crate::rcache::init(64);
+        let a = crate::ns::tests::app("aaaaaaaaaaaaaaaa");
+        let hdrs = vec![("Content-Type".to_string(), "text/html".to_string())];
+        assert!(crate::rcache::store(
+            b"GET|a.test|/nobody",
+            200,
+            &hdrs,
+            b"A",
+            60,
+            0,
+            0,
+            &[],
+            Some(&a)
+        ));
+        crate::ns::set(&a);
+        assert!(set(b"survivor", b"kept", 0));
+
+        crate::ns::clear();
+        c_flush();
+
+        assert!(
+            crate::rcache::get(b"GET|a.test|/nobody").is_some(),
+            "page kept"
+        );
+        crate::ns::set(&a);
+        assert_eq!(
+            get(b"survivor").as_deref(),
+            Some(&b"kept"[..]),
+            "session kept"
+        );
+        crate::ns::clear();
+    }
+
     /// Two applications in one instance used to share one key space: either could
     /// read the other's sessions by key, and `askr_cache_flush()` from one logged the
     /// other's users out. The namespace is set per request from the docroot; here it is
@@ -1207,12 +1350,12 @@ mod tests {
     fn two_namespaces_do_not_see_each_other_and_flush_is_scoped() {
         let _g = guard();
         init(256, 64);
-        flush();
+        flush_all();
 
-        crate::ns::set("aaaaaaaaaaaaaaaa");
+        crate::ns::set(&crate::ns::tests::app("aaaaaaaaaaaaaaaa"));
         assert!(set(b"sess:1", b"alice", 0));
         assert!(set(b"shared-name", b"from-a", 0));
-        crate::ns::set("bbbbbbbbbbbbbbbb");
+        crate::ns::set(&crate::ns::tests::app("bbbbbbbbbbbbbbbb"));
         assert!(set(b"shared-name", b"from-b", 0));
 
         assert_eq!(get(b"sess:1"), None, "B cannot read A's session");
@@ -1220,9 +1363,9 @@ mod tests {
         assert!(!delete(b"sess:1"), "nor delete it");
 
         // B flushes: only B goes.
-        flush();
+        flush_app(&crate::ns::tests::app("bbbbbbbbbbbbbbbb"));
         assert_eq!(get(b"shared-name"), None);
-        crate::ns::set("aaaaaaaaaaaaaaaa");
+        crate::ns::set(&crate::ns::tests::app("aaaaaaaaaaaaaaaa"));
         assert_eq!(
             get(b"sess:1").as_deref(),
             Some(&b"alice"[..]),
@@ -1230,17 +1373,17 @@ mod tests {
         );
         assert_eq!(get(b"shared-name").as_deref(), Some(&b"from-a"[..]));
 
-        // No namespace: the raw table, and flush() means everything.
-        crate::ns::set("");
+        // No application: the raw table. Emptying everything is asked for by name.
+        crate::ns::clear();
         assert_eq!(
             get(b"sess:1"),
             None,
             "the raw view has no un-prefixed sess:1"
         );
-        flush();
-        crate::ns::set("aaaaaaaaaaaaaaaa");
+        flush_all();
+        crate::ns::set(&crate::ns::tests::app("aaaaaaaaaaaaaaaa"));
         assert_eq!(get(b"sess:1"), None);
-        crate::ns::set("");
+        crate::ns::clear();
     }
 
     /// `delta` is a PHP integer. `cur + delta` wrapped in release builds, so two
@@ -1250,7 +1393,7 @@ mod tests {
     fn a_counter_saturates_instead_of_wrapping() {
         let _g = guard();
         init(256, 64);
-        crate::ns::set("");
+        crate::ns::clear();
         delete(b"ctr:sat");
         assert_eq!(increment(b"ctr:sat", i64::MAX, 0), i64::MAX);
         assert_eq!(increment(b"ctr:sat", i64::MAX, 0), i64::MAX, "stays pinned");
@@ -1349,7 +1492,7 @@ mod tests {
         // too large for any region
         assert!(!set(b"huge", &vec![0u8; VAL_LARGE + 1], 0));
 
-        flush();
+        flush_all();
         assert_eq!(get(b"name"), None);
         assert_eq!(get(b"session:abc"), None);
 
@@ -1399,7 +1542,7 @@ mod tests {
         assert_eq!(get(&k1).as_deref(), Some(&b"A2"[..]));
         // …and B is still intact after reuse.
         assert_eq!(get(&k2).as_deref(), Some(&b"B"[..]));
-        flush();
+        flush_all();
     }
 
     // Stress: hammer the shared-memory table from many threads to shake out
@@ -1409,7 +1552,7 @@ mod tests {
     fn concurrent_stress_no_corruption() {
         let _g = guard();
         init(1024, 64);
-        flush();
+        flush_all();
 
         // 1) Atomic increment under contention: N threads × M bumps of one counter
         //    must total exactly N*M (the slot lock serialises read-modify-write).
@@ -1458,6 +1601,6 @@ mod tests {
             Some(&b"PIN"[..]),
             "a pinned key was corrupted by unrelated churn"
         );
-        flush();
+        flush_all();
     }
 }

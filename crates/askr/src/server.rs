@@ -1946,7 +1946,7 @@ fn maybe_store(
     accept_encoding: &str,
     vary_ua: bool,
     rule: Option<&crate::config::CacheRule>,
-    namespace: &str,
+    app: &crate::ns::App,
     // The request that produced `resp`, for the values of the headers it varies on.
     request_headers: &hyper::HeaderMap,
 ) {
@@ -2053,26 +2053,44 @@ fn maybe_store(
     let tags: Vec<Vec<u8>> = tags
         .into_iter()
         .map(|t| {
-            let mut k = Vec::with_capacity(namespace.len() + 1 + t.len());
-            if !namespace.is_empty() {
-                k.extend_from_slice(namespace.as_bytes());
-                k.push(crate::ns::SEP);
-            }
+            let mut k = Vec::with_capacity(crate::ns::PREFIX_LEN + t.len());
+            k.extend_from_slice(app.as_str().as_bytes());
+            k.push(crate::ns::SEP);
             k.extend_from_slice(&t);
             k
         })
         .collect();
     match &app_vary {
         None => {
-            rcache::store(key, resp.status, &stored, &body, ttl, swr, sie, &tags);
+            rcache::store(
+                key,
+                resp.status,
+                &stored,
+                &body,
+                ttl,
+                swr,
+                sie,
+                &tags,
+                Some(app),
+            );
         }
         Some(names) => {
             // Same lifetimes and tags for the index as for the entry, so it lives as
             // long as any variant can and `forget_tag` takes it down with them.
             let index_headers = [(VARY_INDEX_HEADER.to_string(), names.clone())];
-            rcache::store(key, 0, &index_headers, b"", ttl, swr, sie, &tags);
+            rcache::store(key, 0, &index_headers, b"", ttl, swr, sie, &tags, Some(app));
             let sk = secondary_key(key, names, request_headers);
-            rcache::store(&sk, resp.status, &stored, &body, ttl, swr, sie, &tags);
+            rcache::store(
+                &sk,
+                resp.status,
+                &stored,
+                &body,
+                ttl,
+                swr,
+                sie,
+                &tags,
+                Some(app),
+            );
         }
     }
 }

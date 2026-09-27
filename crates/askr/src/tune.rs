@@ -136,7 +136,7 @@ fn measure(
             server_vars: server_vars.clone(),
             post_fields: Vec::new(),
             files: Vec::new(),
-            namespace: crate::ns::for_docroot(script.parent().unwrap_or(&script)),
+            namespace: crate::ns::for_docroot(script.parent().unwrap_or(&script)).to_string(),
         };
 
         // One warm-up request first: the first run pays for OPcache filling and

@@ -76,7 +76,7 @@ impl Php {
                 tracing::info!(version = %php.php_version(), "embedded PHP ready (per-request)");
 
                 while let Some(job) = rx.blocking_recv() {
-                    crate::ns::set(&job.req.namespace);
+                    crate::ns::set_from_request(&job.req.namespace);
                     let res = php
                         .handle(&job.req)
                         .map(Reply::Buffered)
@@ -294,7 +294,7 @@ impl WorkerBridge {
             Some(job) => {
                 // Before the request is visible to PHP: every askr_cache_*/askr_queue_*
                 // call it makes goes to this application's namespace.
-                crate::ns::set(&job.req.namespace);
+                crate::ns::set_from_request(&job.req.namespace);
                 load_request(&job.req);
                 self.pending = Some(job.reply);
                 self.stream = None;

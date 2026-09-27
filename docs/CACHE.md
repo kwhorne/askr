@@ -38,7 +38,7 @@ Askr (web workers, the worker loop, and queue/scheduler sidecars):
 | `askr_cache_delete(string $key): bool` | `true` if it existed. |
 | `askr_cache_increment(string $key, int $delta = 1, int $ttl = 0): int` | Atomic add; returns the new value. |
 | `askr_cache_touch(string $key, int $ttl = 0): bool` | Atomically refresh a key's TTL without rewriting its value (`false` if absent). |
-| `askr_cache_flush(): void` | Empty the table. |
+| `askr_cache_flush(): void` | Empty the calling application's entries — here and in the [response cache](FEATURES.md#1-response-cache-with-instant-tag-invalidation) — and nobody else's. |
 
 ```php
 askr_cache_set('greeting', 'hello', 60);
@@ -178,7 +178,8 @@ which routes deserve it.
 - **Namespaced per application (1.5.1).** Keys are prefixed with a namespace derived
   from the docroot before they reach the table, so two applications hosted in one
   instance (`[[site]]`) cannot read each other's keys — or sessions, which are keys —
-  and `askr_cache_flush()` empties only the caller's application. Two domains serving
+  and `askr_cache_flush()` empties only the caller's application — in the response cache
+  too, since 1.7.2, where it used to empty every application's pages. Two domains serving
   one docroot share, as one application should. The prefix is 17 bytes, so the
   effective maximum key length is 233. See [Hosting](HOSTING.md#what-sites-share-and-what-they-dont).
 - **Not persistent:** the table lives in RAM and is empty on restart.

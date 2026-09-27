@@ -2045,6 +2045,74 @@ fn a_framework_accepts_every_request_askr_builds() {
     }
 }
 
+/// One site's `cache:clear` must not send another site's pages cold.
+///
+/// `askr_cache_flush()` — what Laravel's `Cache::flush()` and `artisan cache:clear` reach —
+/// emptied the response cache for every application in the instance, beside a kv flush
+/// that had been scoped since 1.5.1. Response-cache entries now record whose they are.
+///
+/// End to end over `[[site]]`, because the unit test stores entries with the application
+/// given directly, and the thing that has actually gone wrong in this area is the wiring:
+/// which application a request, a stored page or a sidecar ends up attributed to.
+#[test]
+fn one_sites_cache_flush_leaves_another_sites_pages_cached() {
+    let dir = unique_dir("rcacheflush");
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    std::fs::write(
+        dir.join("b/index.php"),
+        "<?php header('Askr-Cache: 300'); echo 'b ' . bin2hex(random_bytes(4));",
+    )
+    .unwrap();
+    let a_app = r#"<?php
+if (isset($_GET['flush'])) { askr_cache_flush(); echo 'flushed'; exit; }
+header('Askr-Cache: 300');
+echo 'a ' . bin2hex(random_bytes(4));
+"#;
+    let s = Server::start_in(
+        dir.clone(),
+        &[("index.php", a_app)],
+        &format!(
+            "[server]\nlisten = \"127.0.0.1:{{PORT}}\"\nroot = \"{{ROOT}}\"\n\n\
+             [[site]]\nhosts = [\"b.test\"]\nroot = \"{}\"\n\n\
+             [cache]\nslots = 64\nresponse_slots = 64\n",
+            dir.join("b").to_str().unwrap()
+        ),
+    );
+    let at = |host: &str, path: &str| request(s.port, "GET", path, &[("Host", host)]);
+
+    // Warm both sites' pages.
+    let a1 = at("a.test", "/");
+    let a2 = at("a.test", "/");
+    let b1 = at("b.test", "/");
+    let b2 = at("b.test", "/");
+    assert_eq!(
+        a2.cache_state(),
+        "HIT",
+        "site A cached; log:\n{}",
+        s.log_contents()
+    );
+    assert_eq!(b2.cache_state(), "HIT", "site B cached");
+    assert_eq!(a1.body, a2.body);
+    assert_eq!(b1.body, b2.body);
+
+    // Site A clears its cache.
+    assert_eq!(at("a.test", "/?flush=1").body.trim(), "flushed");
+
+    let a3 = at("a.test", "/");
+    let b3 = at("b.test", "/");
+    assert_eq!(
+        a3.cache_state(),
+        "MISS",
+        "A's own pages are gone, as they should be"
+    );
+    assert_eq!(
+        b3.cache_state(),
+        "HIT",
+        "site B's page must still be cached after site A's cache:clear"
+    );
+    assert_eq!(b3.body, b1.body, "and it is the same page");
+}
+
 /// `--config` is the whole configuration, and must say so rather than ignore flags.
 ///
 /// The file/CLI split is an either/or, not a merge: with `--config` given, every other
