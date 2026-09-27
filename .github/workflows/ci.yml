@@ -132,3 +132,24 @@ jobs:
           vendor/php-build/install/bin/php-config --version | grep -q '^8\.5'
           # PHP 8.5 compiles OPcache into libphp (no opcache.so) — check the symbol.
           nm -D vendor/php-build/install/lib/libphp.so | grep -qi 'accel_startup\|zend_accel'
+
+      # Put Laravel itself in the loop. Until this, the laravel-profile libphp was built and
+      # checked for symbols, and nothing ever served a Laravel request with it — so a fault
+      # only a framework notices went straight to production: in 1.5.1 every HTTP/1.x
+      # request to a Laravel app answered 400 (Symfony refused a `host, host:port`
+      # HTTP_HOST) while the whole suite passed. This builds Askr against this libphp,
+      # creates a fresh app, and probes it over HTTP/1.0, 1.1 and 2 — the host Laravel
+      # sees, the authority over HTTP/2, and request()->ip() behind a trusted proxy.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+
+      # Only for composer. The app runs on the embedded libphp above, so match its version.
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.5'
+          coverage: none
+
+      - name: Build askr against the laravel-profile libphp
+        run: cargo build --bin askr
+
+      - name: Serve a real Laravel app
+        run: ./scripts/laravel-smoke.sh --binary target/debug/askr --create

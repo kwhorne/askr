@@ -79,6 +79,19 @@ fn request_timed(
     body: &str,
     read_timeout: Duration,
 ) -> Resp {
+    request_proto(port, "HTTP/1.1", method, path, extra, body, read_timeout)
+}
+
+/// [`request_timed`] with the request-line version chosen, so HTTP/1.0 is testable too.
+fn request_proto(
+    port: u16,
+    version: &str,
+    method: &str,
+    path: &str,
+    extra: &[(&str, &str)],
+    body: &str,
+    read_timeout: Duration,
+) -> Resp {
     let dead = || Resp {
         status: 0,
         headers: Vec::new(),
@@ -98,7 +111,7 @@ fn request_timed(
         .find(|(k, _)| k.eq_ignore_ascii_case("host"))
         .map(|(_, v)| v.to_string())
         .unwrap_or_else(|| format!("127.0.0.1:{port}"));
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    let mut req = format!("{method} {path} {version}\r\nHost: {host}\r\nConnection: close\r\n");
     for (k, v) in extra {
         if !k.eq_ignore_ascii_case("host") {
             req.push_str(&format!("{k}: {v}\r\n"));
@@ -146,6 +159,73 @@ fn request_timed(
 
 fn get(port: u16, path: &str) -> Resp {
     request(port, "GET", path, &[])
+}
+
+/// One HTTP/2 request over cleartext (h2c with prior knowledge), which Askr's plain
+/// listener accepts.
+///
+/// The raw client above speaks HTTP/1.x, and for a long time that was every client this
+/// suite had — which is exactly how three HTTP/2-only faults shipped: no Host header, so
+/// HTTP_HOST fell back to `localhost` (1.4.7); one `cookie` field per cookie, of which PHP
+/// got the first (1.5.1); and the authority living in the URI rather than in a header. The
+/// server-side HTTP/2 path is the same code whether the bytes arrived over TLS or not, so
+/// h2c exercises it without a certificate. Uses hyper, which Askr already depends on.
+///
+/// Headers are sent one field per entry — a repeated `cookie` goes as two fields, the way
+/// browsers send it — and there is no `host`; the authority comes from the URI.
+fn request_h2(port: u16, path: &str, headers: &[(&str, &str)]) -> Resp {
+    let dead = || Resp {
+        status: 0,
+        headers: Vec::new(),
+        body: String::new(),
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return dead(),
+    };
+    let exchange = async {
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        let (mut send, conn) =
+            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .ok()?;
+        tokio::spawn(conn);
+        let mut req = hyper::Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{port}{path}"));
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let req = req
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .ok()?;
+        let resp = send.send_request(req).await.ok()?;
+        let status = resp.status().as_u16();
+        let hdrs = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .ok()?
+            .to_bytes();
+        Some(Resp {
+            status,
+            headers: hdrs,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
+    };
+    rt.block_on(async { tokio::time::timeout(Duration::from_secs(15), exchange).await })
+        .ok()
+        .flatten()
+        .unwrap_or_else(dead)
 }
 
 // --- server harness ------------------------------------------------------
@@ -1846,6 +1926,123 @@ root = "{ROOT}"
         "the removal is logged:\n{}",
         open.log_contents()
     );
+}
+
+/// Every request Askr builds must be one a framework accepts — in both modes, over every
+/// protocol.
+///
+/// The PHP behind most of this suite echoes a string and never looks at `$_SERVER`, and
+/// that is how the request-shape faults got out: a `host, host:port` HTTP_HOST that made
+/// every Laravel request a 400 while every test passed; a `localhost` HTTP_HOST over
+/// HTTP/2; a cookie lost over HTTP/2. The fixture here applies the framework's own rules —
+/// its host check is Symfony's `Request::getHost()` verbatim — and answers 400 with what it
+/// found, exactly as a Laravel app would have failed in production.
+///
+/// Matrix: per-request and worker mode (one map-building function feeds both, and this is
+/// how that stays true), times HTTP/1.0, HTTP/1.1 and HTTP/2. Over HTTP/2 the two cookies go
+/// as two `cookie` fields and there is no Host header, which is what a browser sends.
+#[test]
+fn a_framework_accepts_every_request_askr_builds() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let check = fixtures.join("framework_check.php");
+    let worker = fixtures.join("framework_worker.php");
+    let front = format!("<?php require '{}';", check.display());
+
+    for mode in ["per-request", "worker"] {
+        let worker_section = if mode == "worker" {
+            format!("\n[worker]\nscript = \"{}\"\n", worker.display())
+        } else {
+            String::new()
+        };
+        let s = Server::start(
+            &format!("framework-{mode}"),
+            &[("index.php", &front)],
+            &format!(
+                "[server]\nlisten = \"127.0.0.1:{{PORT}}\"\nroot = \"{{ROOT}}\"\n{worker_section}"
+            ),
+        );
+        let port = s.port;
+        let host = format!("askr.test:{port}");
+
+        let h10 = request_proto(
+            port,
+            "HTTP/1.0",
+            "GET",
+            "/up?probe=1",
+            &[
+                ("Host", &host),
+                ("Cookie", "laravel_session=a; XSRF-TOKEN=b"),
+            ],
+            "",
+            Duration::from_secs(15),
+        );
+        let h11 = request_proto(
+            port,
+            "HTTP/1.1",
+            "GET",
+            "/up?probe=1",
+            &[
+                ("Host", &host),
+                ("Cookie", "laravel_session=a; XSRF-TOKEN=b"),
+            ],
+            "",
+            Duration::from_secs(15),
+        );
+        let h2 = request_h2(
+            port,
+            "/up?probe=1",
+            &[("cookie", "laravel_session=a"), ("cookie", "XSRF-TOKEN=b")],
+        );
+
+        for (label, r, want_proto, want_host, want_name) in [
+            (
+                "HTTP/1.0",
+                &h10,
+                "HTTP/1.0",
+                host.clone(),
+                "askr.test".to_string(),
+            ),
+            (
+                "HTTP/1.1",
+                &h11,
+                "HTTP/1.1",
+                host.clone(),
+                "askr.test".to_string(),
+            ),
+            (
+                "HTTP/2",
+                &h2,
+                "HTTP/2.0",
+                format!("127.0.0.1:{port}"),
+                "127.0.0.1".to_string(),
+            ),
+        ] {
+            assert_eq!(
+                r.status,
+                200,
+                "{mode} over {label}: a framework would refuse this request — {}\nlog:\n{}",
+                r.body,
+                s.log_contents()
+            );
+            let v: serde_json::Value = serde_json::from_str(&r.body)
+                .unwrap_or_else(|e| panic!("{mode} over {label}: not JSON ({e}): {}", r.body));
+            assert_eq!(v["protocol"], want_proto, "{mode} over {label}");
+            assert_eq!(
+                v["host"], want_host,
+                "{mode} over {label}: HTTP_HOST is the authority as the client sent it"
+            );
+            assert_eq!(
+                v["server_name"], want_name,
+                "{mode} over {label}: SERVER_NAME is that without the port"
+            );
+            assert_eq!(
+                v["cookies"],
+                serde_json::json!(["laravel_session", "XSRF-TOKEN"]),
+                "{mode} over {label}: both cookies arrive, however many fields carried them"
+            );
+            assert_eq!(v["uri"], "/up?probe=1", "{mode} over {label}");
+        }
+    }
 }
 
 /// `--config` is the whole configuration, and must say so rather than ignore flags.
