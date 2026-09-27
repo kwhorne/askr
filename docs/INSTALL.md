@@ -397,7 +397,7 @@ QUEUE_CONNECTION=askr
 BROADCAST_CONNECTION=askr
 ```
 
-Version the package with the server: `askr-laravel` `1.4.x` goes with an Askr `1.4.x`
+Version the package with the server: `askr-laravel` `1.7.x` goes with an Askr `1.7.x`
 server. Full walkthrough, including the queue and scheduler sidecars:
 **[LARAVEL.md](LARAVEL.md)**.
 

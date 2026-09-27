@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check every Markdown link in the repo: the file exists, and the #anchor exists in it.
+Then check every version pin in the docs agrees with Cargo.toml — see version_pins.py.
 
 Broken anchors are invisible on GitHub — the link renders fine and quietly lands at the
 top of the page. One had been sitting in docs/DOCKER.md pointing at a section that was
@@ -60,7 +61,20 @@ def main() -> int:
     for b in broken:
         print(f"broken: {b}")
     print(f"{len(files)} files checked, {len(broken)} broken link(s)")
-    return 1 if broken else 0
+
+    # Every place the release number is written down must agree with Cargo.toml. The
+    # patterns live in version_pins.py, shared with bump-version.py, so the checker and
+    # the tool that fixes what it finds cannot keep different lists.
+    import version_pins
+
+    version = version_pins.cargo_version()
+    stale = version_pins.scan(version)
+    for f, n, found, want, text in stale:
+        print(f"stale version: {f}:{n}: {found} (want {want}) — {text}")
+    print(f"version pins checked against Cargo.toml {version}: {len(stale)} stale")
+    if stale:
+        print("fix with: python3 scripts/bump-version.py " + version)
+    return 1 if broken or stale else 0
 
 
 if __name__ == "__main__":

@@ -56,27 +56,26 @@ meaning, stop and reconsider the design instead.
 
 ## 2. Bump the version
 
-Five places, and they must agree:
-
 ```bash
-V=1.4.0
-
-sed -i '' "s/^version = \".*\"/version = \"$V\"/" Cargo.toml
-cargo build --bin askr                  # refreshes Cargo.lock
-sed -i '' "s/ASKR_VERSION=[0-9.]*/ASKR_VERSION=$V/g" Dockerfile
+python3 scripts/bump-version.py 1.8.0
 ```
 
-Then by hand: `README.md` (badge line, `VER=` in the install snippet, the
-"What works today" heading, and a **new roadmap row**), `docs/README.md` (same),
-and any doc that pins a version — `docs/ADMIN.md`, `docs/DOCKER.md`, `docs/UBUNTU.md`,
-`docs/BENCHMARKS.md`, `docs/UPGRADING.md`.
+Sets the workspace version in `Cargo.toml`, refreshes `Cargo.lock` (offline, workspace
+members only), and rewrites every version pin in the docs, the `Dockerfile` and the
+examples — exact pins (`VER=v1.8.0`, `askr:1.8.0`) to the new version, moving tags
+(`askr:1.8`, `` `:1.8` ``, `1.8.x`) to its MAJOR.MINOR. History is left alone:
+`CHANGELOG.md`, and the version-by-version notes in `docs/UPGRADING.md`.
 
-```bash
-grep -rn "1\.3\.0" README.md docs/*.md Cargo.toml Dockerfile | grep -v CHANGELOG
-```
+It finishes by running the same scan `check-docs.py` runs in CI, and the two share one
+table of patterns (`scripts/version_pins.py`), so "bumped" and "checked" cannot mean
+different things — and a pin that drifts later fails the `docs links` job instead of
+misleading a reader.
 
-...should come back empty for the *previous* version, except in `CHANGELOG.md` and the
-version-by-version notes in `docs/UPGRADING.md`, where history belongs.
+This replaced a `sed` for two files, then a grep for the *previous* version and an edit
+per line. That grep cannot see a moving tag once the patch number has moved on:
+`examples/docker/quickstart.yml` kept saying `:1.6` through two releases after it, and the
+sentence pairing `askr-laravel` with a server version said `1.4.x` through three minors.
+Both were found the first time the scan ran.
 
 ## 3. Write the changelog
 
@@ -136,31 +135,38 @@ for w in CI Release Docker "Split askr-laravel"; do
 done
 ```
 
-## 8. Verify the artefacts exist
+## 8. Verify the release from outside
 
 Green is a claim; these are facts.
 
 ```bash
-gh release view "v$V" --json assets --jq '.assets | length'      # expect 12
-
-# Every tarball must carry a signature that verifies against the committed key. The
-# release workflow already checks this before publishing; check it again from outside.
-for a in $(gh release view "v$V" --json assets --jq '.assets[].name' | grep '\.tar\.gz$'); do
-  gh release download "v$V" -p "$a" -p "$a.minisig" -D /tmp/relsig --clobber
-  rsign verify -p keys/release.pub -x "/tmp/relsig/$a.minisig" "/tmp/relsig/$a" \
-    && echo "$a signed ok"
-done
-rm -rf /tmp/relsig
-
-# And the provenance attestation binds it to this workflow and commit.
-gh attestation verify "/tmp/relsig/$a" --repo kwhorne/askr 2>/dev/null || true
-
-MIN=${V%.*}
-for t in "$V" "$MIN" latest "$V-full" "$MIN-full" full; do
-  docker manifest inspect "ghcr.io/kwhorne/askr:$t" >/dev/null 2>&1 \
-    && echo "askr:$t ok" || echo "askr:$t MISSING"
-done
+scripts/verify-release.sh "v$V" --laravel ~/code/laravel12
 ```
+
+One command for what used to be a page of steps: the release has its 12 assets; every
+tarball's minisign signature verifies against `keys/release.pub`, its `.sha256` matches,
+and its SLSA provenance names this tag and the tag's commit; all six image tags exist for
+amd64 and arm64, and the moving tags point here when they should; Packagist serves the
+Laravel package at this version; and the **published image** — not the local build —
+serves a request a framework accepts over HTTP/1.0, HTTP/1.1 and HTTP/2, in both
+per-request and worker mode. `--laravel` adds a real application on the published image
+(`scripts/laravel-smoke.sh`, which CI also runs against every change).
+
+It exits `0` verified, `1` something is wrong, `2` something could not be checked — the
+same three-way split as `publish-laravel-package.sh`, for the same reason.
+
+The script encodes the mistakes the hand-run version made. The old snippet here deleted
+its download directory *before* running `gh attestation verify` on a file inside it, and
+`|| true` hid that — so the documented provenance step never verified anything. Run by
+hand, the digest once went to a Python check as an argument where it read an environment
+variable, and every tarball reported "provenance MISSING"; and `:latest` was once read
+from a stale local image and reported the previous release. So provenance is matched on
+the file's own digest among the attested subjects, and tags are compared by registry
+manifest, never by what `docker run` has cached.
+
+It has been run against a release known to be broken, which is the test of a verifier
+that matters: against v1.5.1 it reports the HTTP/1.x `Invalid Host` 400 in both modes —
+and, correctly, that v1.5.1 was never published to Packagist.
 
 ## 9. Verify the Laravel package actually published
 
@@ -201,20 +207,16 @@ green.
 
 ## 10. Verify like a user, not like an author
 
-The point of the whole exercise. Install from the registries, not from disk:
+Step 8 already served requests from the published image. What it cannot know is what
+*this* release claims, so exercise that too — against the published image, not the local
+build. Several genuine bugs this project has shipped were only visible that way, and one
+"bug" turned out to be a missing `--admin` in a healthcheck.
+
+The image's entrypoint is the launcher, so a command starts at the subcommand:
 
 ```bash
-docker run --rm "ghcr.io/kwhorne/askr:$V" askr --version
-
-rsync -a --exclude vendor --exclude node_modules ~/code/laravel12/ /tmp/relcheck/
-cd /tmp/relcheck && composer require "kwhorne/askr-laravel:^${V%.*}" --no-interaction
-php -r 'require "vendor/autoload.php"; var_dump(class_exists("Askr\\Laravel\\AskrServiceProvider"));'
-cd - && rm -rf /tmp/relcheck
+docker run --rm "ghcr.io/kwhorne/askr:$V" --version      # not: … askr --version
 ```
-
-Then exercise whatever the release actually claims, against the **published image** —
-not the local build. Several genuine bugs this project has shipped were only visible
-that way, and one "bug" turned out to be a missing `--admin` in a healthcheck.
 
 ---
 
@@ -229,6 +231,10 @@ Worth reading once; each line is a real incident.
   Harmless, but it makes `git log` lie about what a release contained.
 - **A doc claimed a security property the code hadn't had for two versions.**
   Version-bumping is a good moment to grep docs for claims, not just numbers.
+- **A release that broke every Laravel app passed CI.** 1.5.1 answered 400 to all
+  HTTP/1.x requests, and the suite was green because no test did what a framework does
+  with a request. The e2e suite now runs a fixture that applies Symfony's own host check
+  over HTTP/1.0, 1.1 and 2, and CI serves a real Laravel app on every change.
 - **A test harness lied twice in one afternoon**: `composer --no-scripts` skipped package
   discovery, and a probe file 404'd because of our own (correct) security fix. Read the
   failure before believing the feature is broken.
