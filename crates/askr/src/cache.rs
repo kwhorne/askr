@@ -963,7 +963,7 @@ extern "C" fn c_flush() {
 extern "C" fn c_forget_tag(tag: *const c_char, tlen: usize) {
     crate::ffi::guard("cache::forget_tag", (), || {
         let tag = unsafe { crate::ffi::bytes(tag, tlen) };
-        // Tags are stored namespaced (see server::maybe_store), so an application can
+        // Tags are stored namespaced (see server::cache_policy::maybe_store), so an application can
         // only invalidate pages its own responses tagged.
         crate::rcache::forget_tag(&crate::ns::key(tag));
     })

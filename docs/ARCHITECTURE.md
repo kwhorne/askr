@@ -148,7 +148,9 @@ crates/askr/src/
   main.rs      CLI + master/supervisor (fork, signals, reaping, reload)
   worker.rs    one worker: shared listener + tokio runtime + interpreter
   php.rs       interpreter pinned to a thread; per-request + worker modes
-  server.rs    hyper front: TLS, HTTP/1.1+2, static files, dispatch, drain
+  server/      hyper front: TLS, HTTP/1.1+2, dispatch, drain (mod.rs), plus
+               trust.rs (client IP / trusted proxies), statics.rs (static files),
+               cache_policy.rs (response-cache keys, Vary, SWR, purge), esi.rs, sse.rs
   cgi.rs       HTTP request → CGI $_SERVER mapping
   tls.rs       rustls acceptor (PEM or self-signed)
   config.rs    typed askr.toml + validation

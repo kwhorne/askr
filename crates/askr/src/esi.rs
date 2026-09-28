@@ -18,7 +18,7 @@
 //! gets its own TTL, tags and invalidation.
 //!
 //! This module is the pure part: turning a body into a plan of literals and includes.
-//! Fetching the fragments lives in `server.rs`, where the cache and PHP are.
+//! Fetching the fragments lives in `server/esi.rs`, where the cache and PHP are.
 
 /// One piece of a planned response.
 #[derive(Debug, PartialEq, Eq)]

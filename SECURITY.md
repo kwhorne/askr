@@ -90,6 +90,6 @@ Askr's whole hot path is memory-safe Rust; a few areas warrant extra scrutiny:
   [docs/ADMIN.md](docs/ADMIN.md)). Reports about it escaping that assumption are
   in scope.
 - **Request handling** — the CGI `$_SERVER` mapping, request body limits, and
-  path handling for static files (`cgi.rs`, `server.rs`).
+  path handling for static files (`cgi.rs`, `server/statics.rs`).
 - **The worker lifecycle** — `fork`/signal handling and per-request state reset
   in worker mode (state bleed between requests is a security concern).
