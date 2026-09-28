@@ -277,23 +277,14 @@ fn bearer_ok(req: &Request<hyper::body::Incoming>, token: &str) -> bool {
 
 fn status_json(info: &Info) -> String {
     let s = crate::supervisor::status();
-    let mut rss_total = 0u64;
-    let workers = s
+    let workers: Vec<WorkerDoc> = s
         .pids
         .iter()
-        .map(|&p| {
-            let rss = crate::metrics::rss_kb(p).unwrap_or(0);
-            rss_total += rss;
-            format!(r#"{{"pid":{p},"rss_kb":{rss}}}"#)
+        .map(|&pid| WorkerDoc {
+            pid,
+            rss_kb: crate::metrics::rss_kb(pid).unwrap_or(0),
         })
-        .collect::<Vec<_>>()
-        .join(",");
-    let pids = s
-        .pids
-        .iter()
-        .map(|p| p.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect();
     // Per-queue, because the aggregate hides the failure that matters. "queue_ready: 1"
     // is true whether the job is on a queue a worker polls or one nobody listens to, and
     // that ambiguity is what let a site's password-reset mail stop without anyone
@@ -306,56 +297,45 @@ fn status_json(info: &Info) -> String {
     // merely busy without knowing Askr's thresholds. `null` means never, which is not
     // the same as "a long time ago" and must not render as a duration.
     let lanes = crate::queue::lanes();
-    let stamp = |ms: u64| -> String {
-        if ms == 0 {
-            "null".into()
-        } else {
-            (now_ms.saturating_sub(ms) / 1000).to_string()
-        }
-    };
+    let ago = |ms: u64| (ms != 0).then(|| now_ms.saturating_sub(ms) / 1000);
+    let app_id = |a: &Option<crate::ns::App>| a.map(|a| a.to_string());
     let occupied = crate::queue::by_queue_with_app();
     let queues = occupied
         .iter()
         .map(|(app, name, c)| {
-            let age = if c.oldest_pending_created_ms > 0 {
-                now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
-            } else {
-                0
-            };
             // Matched on the namespaced identity, not the display name. A lane polled by
             // another application's worker cannot yield these jobs, and reporting its
             // poll time here is what made an unreachable queue look attended.
             let lane = lanes.iter().find(|l| &l.name == name && &l.app == app);
-            format!(
-                r#"{{"queue":{name},"app":{app},"pending":{p},"delayed":{d},"reserved":{r},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
-                name = json_string(name),
-                app = app.map_or("null".into(), |a| json_string(a.as_str())),
-                p = c.pending,
-                d = c.delayed,
-                r = c.reserved,
-                lp = lane.map_or("null".into(), |l| stamp(l.last_polled_ms)),
-                ld = lane.map_or("null".into(), |l| stamp(l.last_drained_ms)),
-            )
+            QueueDoc {
+                queue: name.clone(),
+                app: app_id(app),
+                pending: c.pending,
+                delayed: c.delayed,
+                reserved: c.reserved,
+                oldest_pending_secs: if c.oldest_pending_created_ms > 0 {
+                    now_ms.saturating_sub(c.oldest_pending_created_ms) / 1000
+                } else {
+                    0
+                },
+                last_polled_secs: lane.and_then(|l| ago(l.last_polled_ms)),
+                last_drained_secs: lane.and_then(|l| ago(l.last_drained_ms)),
+            }
         })
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect();
     // Lanes a worker has polled but which hold nothing right now. Healthy, and worth
     // reporting: it is the evidence that a worker is attached to that name at all, which
     // is what makes an unattended lane elsewhere diagnosable rather than ambiguous.
-    let idle = lanes
+    let queues_idle = lanes
         .iter()
         .filter(|l| !occupied.iter().any(|(a, n, _)| n == &l.name && a == &l.app))
-        .map(|l| {
-            format!(
-                r#"{{"queue":{name},"app":{app},"last_polled_secs":{lp},"last_drained_secs":{ld}}}"#,
-                name = json_string(&l.name),
-                app = l.app.map_or("null".into(), |a| json_string(a.as_str())),
-                lp = stamp(l.last_polled_ms),
-                ld = stamp(l.last_drained_ms),
-            )
+        .map(|l| IdleLaneDoc {
+            queue: l.name.clone(),
+            app: app_id(&l.app),
+            last_polled_secs: ago(l.last_polled_ms),
+            last_drained_secs: ago(l.last_drained_ms),
         })
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect();
     // What is actually wrong, named, with the numbers that justify it.
     //
     // This is the field the Félagi outage needed and did not have: Askr held every
@@ -365,43 +345,40 @@ fn status_json(info: &Info) -> String {
     // Askr had already reached. Empty array means nothing is wrong.
     let warnings = crate::queue::warnings_from(now_ms, &occupied, &lanes)
         .into_iter()
-        .map(|w| {
-            format!(
-                r#"{{"kind":"{kind}","queue":{q},"app":{app},"polled_by":[{polled}],"pending":{p},"oldest_pending_secs":{age},"last_polled_secs":{lp},"last_drained_secs":{ld},"detail":{detail}}}"#,
-                kind = w.fault.kind(),
-                q = json_string(&w.queue),
-                app = w.app.map_or("null".into(), |a| json_string(a.as_str())),
-                polled = match &w.fault {
-                    crate::queue::LaneFault::WrongApplication { polled_by } => polled_by
-                        .iter()
-                        .map(|a| json_string(a.as_str()))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    _ => String::new(),
-                },
-                p = w.pending,
-                age = w.oldest_pending_secs,
-                lp = w.last_polled_secs.map_or("null".into(), |s| s.to_string()),
-                ld = w.last_drained_secs.map_or("null".into(), |s| s.to_string()),
-                detail = json_string(match w.fault {
-                    crate::queue::LaneFault::WrongApplication { .. } =>
-                        "these jobs were pushed by one application and the only workers \
-                         polling this queue name belong to another, so no worker can ever \
-                         see them — set [queue] root (and [scheduler] root) to the docroot \
-                         of the application that dispatches them. Adding workers cannot \
-                         help",
-                    crate::queue::LaneFault::Unattended =>
-                        "no worker is asking this queue for jobs — check the queue name a \
-                         worker polls (ASKR_QUEUE) against the one the app dispatches to",
-                    crate::queue::LaneFault::NotDraining =>
-                        "workers poll this queue and the backlog is still growing — raise \
-                         the queue worker count, or check what is failing and releasing \
-                         jobs back",
-                }),
-            )
+        .map(|w| WarningDoc {
+            kind: w.fault.kind(),
+            queue: w.queue,
+            app: app_id(&w.app),
+            polled_by: match &w.fault {
+                crate::queue::LaneFault::WrongApplication { polled_by } => {
+                    polled_by.iter().map(|a| a.to_string()).collect()
+                }
+                _ => Vec::new(),
+            },
+            pending: w.pending,
+            oldest_pending_secs: w.oldest_pending_secs,
+            last_polled_secs: w.last_polled_secs,
+            last_drained_secs: w.last_drained_secs,
+            detail: match w.fault {
+                crate::queue::LaneFault::WrongApplication { .. } => {
+                    "these jobs were pushed by one application and the only workers \
+                     polling this queue name belong to another, so no worker can ever \
+                     see them — set [queue] root (and [scheduler] root) to the docroot \
+                     of the application that dispatches them. Adding workers cannot \
+                     help"
+                }
+                crate::queue::LaneFault::Unattended => {
+                    "no worker is asking this queue for jobs — check the queue name a \
+                     worker polls (ASKR_QUEUE) against the one the app dispatches to"
+                }
+                crate::queue::LaneFault::NotDraining => {
+                    "workers poll this queue and the backlog is still growing — raise \
+                     the queue worker count, or check what is failing and releasing \
+                     jobs back"
+                }
+            },
         })
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect();
     // Intent beside achievement. `configured`/`required` are what the operator asked
     // for; `workers`/`seccomp`/`landlock` are counted by the workers that applied it.
     // A fleet where `workers` exceeds `seccomp` or `landlock` is serving partly
@@ -417,37 +394,38 @@ fn status_json(info: &Info) -> String {
             ),
             None => (0, 0, 0, 0),
         };
-        format!(
-            r#"{{"configured":{c},"required":{r},"workers":{w},"seccomp":{sc},"landlock":{ll},"landlock_abi":{abi}}}"#,
-            c = info.sandbox,
-            r = info.sandbox_required,
-        )
+        SandboxDoc {
+            configured: info.sandbox,
+            required: info.sandbox_required,
+            workers: w,
+            seccomp: sc,
+            landlock: ll,
+            landlock_abi: abi,
+        }
     };
-    format!(
-        r#"{{"version":"{ver}","listen":"{listen}","mode":"{mode}","uptime_secs":{up},"workers_configured":{wc},"workers_alive":{wa},"respawns":{rs},"rss_kb_total":{rss},"queue_workers":{qw},"queue_ready":{qr},"queue_total":{qt},"queue_oldest_secs":{qo},"queues":[{queues}],"queues_idle":[{idle}],"warnings":[{warnings}],"rollout":"{ro}","sandbox":{sandbox},"workers":[{workers}],"pids":[{pids}]}}"#,
-        ver = env!("CARGO_PKG_VERSION"),
-        listen = info.server_listen,
-        mode = info.mode,
-        up = s.uptime_secs,
-        wc = s.workers_configured,
-        wa = s.workers_alive,
-        rs = s.respawns,
-        rss = rss_total,
-        qw = s.queue_workers,
-        qr = s.queue_ready,
-        qt = s.queue_total,
-        qo = s.queue_oldest_secs,
-        idle = idle,
-        warnings = warnings,
-        ro = s.rollout,
-    )
+    to_json(&StatusDoc {
+        version: env!("CARGO_PKG_VERSION"),
+        listen: info.server_listen.to_string(),
+        mode: info.mode,
+        uptime_secs: s.uptime_secs,
+        workers_configured: s.workers_configured,
+        workers_alive: s.workers_alive,
+        respawns: s.respawns,
+        rss_kb_total: workers.iter().map(|w| w.rss_kb).sum(),
+        queue_workers: s.queue_workers,
+        queue_ready: s.queue_ready,
+        queue_total: s.queue_total,
+        queue_oldest_secs: s.queue_oldest_secs,
+        queues,
+        queues_idle,
+        warnings,
+        rollout: s.rollout,
+        sandbox,
+        pids: s.pids,
+        workers,
+    })
 }
 
-/// Quote a string for JSON.
-///
-/// Queue names come from the application, so they are the one field here that is not
-/// machine-generated — everything else in this document is a number or a fixed word. An
-/// app is free to name a queue `say "hi"`, and a hand-built document has to survive it.
 /// Escape a Prometheus label value: backslash, double quote and newline, and nothing
 /// else (the exposition format defines only those three).
 ///
@@ -463,24 +441,6 @@ fn label_value(s: &str) -> String {
             c => out.push(c),
         }
     }
-    out
-}
-
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
     out
 }
 
@@ -502,37 +462,37 @@ fn metrics_json() -> String {
     };
     let php_pct = php.saturating_mul(100).checked_div(total).unwrap_or(0);
     let st: Vec<u64> = (0..5).map(|i| m.status[i].load(Relaxed)).collect();
-    let buckets = m.bucket_counts();
-    let bounds = crate::metrics::BUCKET_BOUNDS_MS;
-    let bounds_s = bounds
-        .iter()
-        .map(|b| b.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let counts_s = buckets
-        .iter()
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let (chits, cmisses, ccoalesced) = crate::rcache::stats();
-    let ctotal = chits + cmisses;
-    let chit_pct = chits.saturating_mul(100).checked_div(ctotal).unwrap_or(0);
-    format!(
-        r#"{{"requests":{req},"errors":{err},"bytes_out":{bytes},"avg_total_ms":{att:.2},"avg_php_ms":{aph:.2},"php_pct":{php_pct},"io_pct":{io_pct},"slowest_ms":{slow:.2},"cache":{{"hits":{chits},"misses":{cmisses},"coalesced":{ccoalesced},"hit_pct":{chit_pct}}},"status":{{"1xx":{s1},"2xx":{s2},"3xx":{s3},"4xx":{s4},"5xx":{s5}}},"histogram":{{"bounds_ms":[{bounds_s}],"counts":[{counts_s}]}}}}"#,
-        req = req,
-        err = m.errors.load(Relaxed),
-        bytes = m.bytes_out.load(Relaxed),
-        att = avg_total_ms,
-        aph = avg_php_ms,
-        php_pct = php_pct,
-        io_pct = 100 - php_pct,
-        slow = m.slowest_us.load(Relaxed) as f64 / 1000.0,
-        s1 = st[0],
-        s2 = st[1],
-        s3 = st[2],
-        s4 = st[3],
-        s5 = st[4],
-    )
+    let (hits, misses, coalesced) = crate::rcache::stats();
+    to_json(&MetricsDoc {
+        requests: req,
+        errors: m.errors.load(Relaxed),
+        bytes_out: m.bytes_out.load(Relaxed),
+        avg_total_ms: two_dp(avg_total_ms),
+        avg_php_ms: two_dp(avg_php_ms),
+        php_pct,
+        io_pct: 100 - php_pct,
+        slowest_ms: two_dp(m.slowest_us.load(Relaxed) as f64 / 1000.0),
+        cache: CacheDoc {
+            hits,
+            misses,
+            coalesced,
+            hit_pct: hits
+                .saturating_mul(100)
+                .checked_div(hits + misses)
+                .unwrap_or(0),
+        },
+        status: StatusCountsDoc {
+            s1: st[0],
+            s2: st[1],
+            s3: st[2],
+            s4: st[3],
+            s5: st[4],
+        },
+        histogram: HistogramDoc {
+            bounds_ms: crate::metrics::BUCKET_BOUNDS_MS.to_vec(),
+            counts: m.bucket_counts().to_vec(),
+        },
+    })
 }
 
 /// Paths served without a bearer token when `ASKR_ADMIN_TOKEN` is set.
@@ -575,16 +535,172 @@ fn healthz() -> Response<Full<Bytes>> {
 }
 
 fn errors_json(info: &Info) -> String {
-    let Some(dir) = &info.record_dir else {
-        return r#"{"enabled":false,"errors":[]}"#.to_string();
+    let (enabled, errors) = match &info.record_dir {
+        Some(dir) => (
+            true,
+            crate::record::list(dir)
+                .into_iter()
+                .take(20)
+                .map(|(id, status)| ErrorDoc { id, status })
+                .collect(),
+        ),
+        None => (false, Vec::new()),
     };
-    let items = crate::record::list(dir)
-        .into_iter()
-        .take(20)
-        .map(|(id, status)| format!(r#"{{"id":"{id}","status":{status}}}"#))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(r#"{{"enabled":true,"errors":[{items}]}}"#)
+    to_json(&ErrorsDoc { enabled, errors })
+}
+
+// --- JSON documents -----------------------------------------------------------------------
+//
+// The admin API's documents, as types. They used to be nine hand-written `format!`
+// templates with their own escaping, and five string fields — `version`, `listen`, `mode`,
+// `rollout`, `errors[].id` — went in with none at all, safe only because today's values
+// happen to be fixed words. Every change to a document was an edit to a raw string with
+// `{{` doubling and hand-placed commas. Field order is declaration order, so each document
+// reads exactly as it did.
+
+#[derive(serde::Serialize)]
+struct StatusDoc {
+    version: &'static str,
+    listen: String,
+    mode: &'static str,
+    uptime_secs: u64,
+    workers_configured: usize,
+    workers_alive: usize,
+    respawns: usize,
+    rss_kb_total: u64,
+    queue_workers: usize,
+    queue_ready: usize,
+    queue_total: usize,
+    queue_oldest_secs: u64,
+    queues: Vec<QueueDoc>,
+    queues_idle: Vec<IdleLaneDoc>,
+    warnings: Vec<WarningDoc>,
+    rollout: &'static str,
+    sandbox: SandboxDoc,
+    workers: Vec<WorkerDoc>,
+    pids: Vec<i32>,
+}
+
+#[derive(serde::Serialize)]
+struct QueueDoc {
+    queue: String,
+    app: Option<String>,
+    pending: u64,
+    delayed: u64,
+    reserved: u64,
+    oldest_pending_secs: u64,
+    /// `null` means never — not "a long time ago".
+    last_polled_secs: Option<u64>,
+    last_drained_secs: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct IdleLaneDoc {
+    queue: String,
+    app: Option<String>,
+    last_polled_secs: Option<u64>,
+    last_drained_secs: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct WarningDoc {
+    /// Stable; switch on this. `detail` is prose and is not.
+    kind: &'static str,
+    queue: String,
+    app: Option<String>,
+    polled_by: Vec<String>,
+    pending: u64,
+    oldest_pending_secs: u64,
+    last_polled_secs: Option<u64>,
+    last_drained_secs: Option<u64>,
+    detail: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct SandboxDoc {
+    configured: bool,
+    required: bool,
+    workers: u64,
+    seccomp: u64,
+    landlock: u64,
+    landlock_abi: u64,
+}
+
+#[derive(serde::Serialize)]
+struct WorkerDoc {
+    pid: i32,
+    rss_kb: u64,
+}
+
+#[derive(serde::Serialize)]
+struct MetricsDoc {
+    requests: u64,
+    errors: u64,
+    bytes_out: u64,
+    avg_total_ms: f64,
+    avg_php_ms: f64,
+    php_pct: u64,
+    io_pct: u64,
+    slowest_ms: f64,
+    cache: CacheDoc,
+    status: StatusCountsDoc,
+    histogram: HistogramDoc,
+}
+
+#[derive(serde::Serialize)]
+struct CacheDoc {
+    hits: u64,
+    misses: u64,
+    coalesced: u64,
+    hit_pct: u64,
+}
+
+#[derive(serde::Serialize)]
+struct StatusCountsDoc {
+    #[serde(rename = "1xx")]
+    s1: u64,
+    #[serde(rename = "2xx")]
+    s2: u64,
+    #[serde(rename = "3xx")]
+    s3: u64,
+    #[serde(rename = "4xx")]
+    s4: u64,
+    #[serde(rename = "5xx")]
+    s5: u64,
+}
+
+#[derive(serde::Serialize)]
+struct HistogramDoc {
+    bounds_ms: Vec<u64>,
+    counts: Vec<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct ErrorsDoc {
+    enabled: bool,
+    errors: Vec<ErrorDoc>,
+}
+
+#[derive(serde::Serialize)]
+struct ErrorDoc {
+    id: String,
+    status: u16,
+}
+
+/// Serialise an admin document. These types cannot fail to serialise — no maps with
+/// non-string keys, and serde_json writes a non-finite float as `null` — so the fallback
+/// is unreachable, and an empty object is a safer answer than a panic in the admin thread.
+fn to_json<T: serde::Serialize>(doc: &T) -> String {
+    serde_json::to_string(doc).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Two decimal places, as the dashboard has always shown these.
+///
+/// Parsed back from the same `{:.2}` formatting the hand-built document used, so the
+/// value is exactly the one it wrote rather than a rounding that agrees most of the
+/// time. serde would otherwise print every digit of the average.
+fn two_dp(x: f64) -> f64 {
+    format!("{x:.2}").parse().unwrap_or(0.0)
 }
 
 fn push_counter(s: &mut String, name: &str, help: &str, val: &str) {
@@ -974,9 +1090,6 @@ refresh(); setInterval(refresh, 2000);
 #[cfg(test)]
 mod tests {
 
-    /// Queue names come from the application, and they are the only field in the status
-    /// document that isn't machine-generated. A name with a quote in it would otherwise
-    /// produce a document that parses as something else — or not at all.
     /// DNS rebinding is the attack this stops, and the reason it needs stopping at
     /// `Host` rather than at `Origin`: after the rebind the browser believes the
     /// request is same-origin and says so, or says nothing at all.
@@ -1056,23 +1169,52 @@ mod tests {
         assert!(!browser_says_cross_site(&own_dashboard));
     }
 
+    /// Queue names come from the application, and a name with a quote, a backslash or a
+    /// control character in it must come back out of the status document unchanged.
+    ///
+    /// Through the real document rather than an escaping helper: the helper was correct,
+    /// and five other string fields went into the same hand-built document with no
+    /// escaping at all. What matters is what a dashboard parses.
     #[test]
-    fn queue_names_are_escaped_in_json() {
-        assert_eq!(json_string("mail"), "\"mail\"");
-        assert_eq!(json_string("say \"hi\""), "\"say \\\"hi\\\"\"");
-        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
-        assert_eq!(json_string("line\nbreak"), "\"line\\nbreak\"");
-        assert_eq!(json_string("bell\u{7}"), "\"bell\\u0007\"");
+    fn a_hostile_queue_name_survives_the_status_document() {
+        let _g = crate::ns::tests::GUARD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::squeue::init(64);
+        crate::ns::clear();
+        let hostile = "say \"hi\" \\ tab\there\nline\u{7}";
+        assert!(crate::squeue::push(hostile.as_bytes(), b"{}", 0) > 0);
+        let info = Info {
+            server_listen: "127.0.0.1:8000".parse().unwrap(),
+            mode: "worker",
+            record_dir: None,
+            sandbox: false,
+            sandbox_required: false,
+        };
+        let doc: serde_json::Value =
+            serde_json::from_str(&status_json(&info)).expect("the status document must parse");
+        let names: Vec<&str> = doc["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|q| q["queue"].as_str())
+            .collect();
+        assert!(
+            names.contains(&hostile),
+            "the name round-trips exactly: {names:?}"
+        );
+        while let Some(r) = crate::squeue::pop(hostile.as_bytes(), 30) {
+            crate::squeue::delete(r.id);
+        }
     }
     use super::*;
 
-    /// These responses are built with `format!`, not a serializer. Nothing interpolated
-    /// into them today is attacker- or app-controlled — record ids are
-    /// `"{secs}-{pid}-{seq}"`, the rest are numbers, a socket address and compile-time
-    /// constants — so there is no injection vector to fix. What there *is* is the risk
-    /// that someone later interpolates a string that isn't machine-generated and quietly
-    /// emits broken JSON to every dashboard and scraper. This test is the guard for that:
-    /// it fails the moment the output stops parsing.
+    /// Every admin JSON endpoint must emit a document that parses.
+    ///
+    /// These used to be hand-built with `format!`, where the risk was that someone would
+    /// one day interpolate a string that isn't machine-generated and quietly emit broken
+    /// JSON to every dashboard and scraper. They are serialised from types now, which
+    /// removes that risk by construction; this stays as the guard that says so.
     #[test]
     fn admin_json_endpoints_emit_valid_json() {
         let info = Info {
