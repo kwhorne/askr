@@ -58,7 +58,7 @@ jobs:
 
       # Reads the pinned toolchain + components from rust-toolchain.toml and
       # caches the cargo registry/target keyed on the toolchain + Cargo.lock.
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           # Explicit, not left to the default: v1 defaulted to this, v2 defaults to empty
           # and sets CARGO_BUILD_WARNINGS instead, which cargo honours only from 1.97. The
@@ -146,7 +146,7 @@ jobs:
       # HTTP_HOST) while the whole suite passed. This builds Askr against this libphp,
       # creates a fresh app, and probes it over HTTP/1.0, 1.1 and 2 — the host Laravel
       # sees, the authority over HTTP/2, and request()->ip() behind a trusted proxy.
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           # Explicit, not left to the default: v1 defaulted to this, v2 defaults to empty
           # and sets CARGO_BUILD_WARNINGS instead, which cargo honours only from 1.97. The
