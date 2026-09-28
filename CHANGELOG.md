@@ -5,6 +5,12 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.7.3 — 2026-09-28
+
+**Take this for the TLS fix.** rustls 0.23.45 closes RUSTSEC-2026-0285, which 1.7.2
+shipped with, and the last place where a process with no application set could act on
+another application's data is closed with it. Nothing to configure.
+
 ### Security
 
 - **rustls 0.23.45, for RUSTSEC-2026-0285** (medium, CVSS 5.3). rustls accepted TLS 1.3
@@ -35,7 +41,21 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   longer claims to; a new test uses a live lease from the owner's own pop, and fails
   against the old check.
 
+### Changed
+
+- **brotli 9** (with `alloc-no-stdlib` 3, `alloc-stdlib` 0.3, `brotli-decompressor` 6).
+  A major bump behind `Content-Encoding: br`, so compiling proved nothing about the
+  output: it was run through Askr's own `compress()` on brotli 8 and 9 over five corpora,
+  decompressed and compared. Every round trip exact, and the compressed bytes identical
+  between the two versions.
+
 ### Internal
+
+- **GitHub Actions updated**, each pinned SHA checked against the upstream tag rather
+  than trusted: `setup-rust-toolchain` v2, `setup-qemu-action` 4.4.0,
+  `setup-buildx-action` 4.4.1, `build-push-action` 7.4.0. The docker actions and the
+  release workflow run only on a tag, so no pull-request check exercised them; this
+  release is their first run.
 
 - **CI denies warnings explicitly.** Every `setup-rust-toolchain` step now sets
   `rustflags: "-D warnings"` rather than inheriting it. v1 of the action defaulted to

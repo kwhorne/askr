@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.7.2; ARCH=$(uname -m)
+VER=v1.7.3; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.7.2     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.7.3     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.7` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.7.2-full`) are the same server built with the optional features
+The `-full` tags (`1.7.3-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,18 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.7.3
+
+**Nothing to do — take it for the TLS fix.** rustls 0.23.45 closes RUSTSEC-2026-0285
+(medium): TLS 1.3 handshake messages were accepted at the wrong encryption level. The
+handshake itself stays authenticated, so this is not a way into a connection, but a
+dependency audit of 1.7.2 will flag it and 1.7.3 will not.
+
+One behaviour tightens, and a serving process never reaches it: with no application set,
+a process can no longer acknowledge or release another application's queue job by its
+lease. Every request and every sidecar has an application, so if anything you run notices
+this, PHP was executing outside both — worth a report.
 
 ### To 1.7.2
 
