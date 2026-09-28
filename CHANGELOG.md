@@ -5,6 +5,28 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Internal
+
+- **The admin JSON documents are built from types.** `/api/status`, `/api/metrics` and
+  `/api/errors` were assembled with `format!` and a hand-written string escaper; they are
+  now `serde` structs serialised by `serde_json`. The output is byte-identical — checked
+  by diffing old against new over seven server states, including a queue whose name
+  needs escaping.
+
+- **One builder for the runtime `Config`.** The command line and a config file each
+  built their own `Config`, and a setting added to one had to be remembered in the other.
+  Both now go through `FileConfig::assemble`; the command line describes itself as a
+  config file to get there, and keeps its own validation and error messages. Checked by
+  dumping every resolved value from the old and new binary over 1183 runs (flag
+  combinations, config files, and the failing ones): identical, except that with
+  `--acme` on the command line `https` is set from the start, as `[acme]` in a file
+  already did — before, it was set in the ACME step, which runs before anything reads
+  it.
+
+- **`server.rs` is split up** (3280 lines). The request path stays in `server/mod.rs`;
+  client-IP trust, static files, the HTTP side of the response cache, ESI fetching and
+  SSE each have their own file and their own tests. A move, not a rewrite.
+
 ## 1.7.3 — 2026-09-28
 
 **Take this for the TLS fix.** rustls 0.23.45 closes RUSTSEC-2026-0285, which 1.7.2
