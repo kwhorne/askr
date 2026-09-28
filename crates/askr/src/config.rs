@@ -14,7 +14,6 @@ use crate::server::Config;
 
 /// The on-disk config file (`askr.toml`).
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FileConfig {
     #[serde(default)]
     pub server: ServerSection,
@@ -52,13 +51,16 @@ pub struct FileConfig {
     /// Rate limits: `[[ratelimit]] path = "/api/*" limit = 60`.
     #[serde(default)]
     pub ratelimit: Vec<RateLimitRule>,
+    /// Keys in the file that no section has, one warning each, filled in by
+    /// [`FileConfig::parse`]. Not a key itself.
+    #[serde(skip)]
+    pub unknown_keys: Vec<String>,
 }
 
 /// A virtual host: one or more `hosts` (exact or `*.suffix`) served from `root`
 /// with its own `front` controller. Full dynamic dispatch requires per-request
 /// mode; in worker mode statics are per-site but the booted app is fixed.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct SiteSpec {
     pub hosts: Vec<String>,
     pub root: PathBuf,
@@ -70,7 +72,6 @@ pub struct SiteSpec {
 /// request path + query are preserved; `status` defaults to 308 (permanent, keeps
 /// the method). `from` matches the Host header exactly or as a `*.suffix` glob.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct RedirectRule {
     pub from: String,
     pub to: String,
@@ -93,7 +94,6 @@ fn default_redirect_status() -> u16 {
 /// rejected at config load, so you find out at startup (or from `askr config-check`)
 /// rather than from a rule that silently never matches.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CacheRule {
     /// Path glob, e.g. `/admin/*`. Matched against the request path (no query).
     pub path: String,
@@ -131,7 +131,6 @@ impl CacheRule {
 /// Enforced in the Rust layer before PHP is woken, with token buckets in shared
 /// memory — so the limit applies across the whole worker fleet, not per process.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RateLimitRule {
     /// Path glob, e.g. `/api/*`. Matched against the request path (no query).
     pub path: String,
@@ -157,14 +156,12 @@ fn default_rl_by() -> String {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SidecarSpec {
     /// The command to run (via `sh -c`), e.g. "node bootstrap/ssr/ssr.mjs".
     pub command: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ServerSection {
     /// Address to listen on, e.g. "0.0.0.0:8000".
     pub listen: String,
@@ -244,7 +241,6 @@ pub struct ServerSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorkerSection {
     /// Worker script — boot the app once and serve many (Octane model).
     pub script: Option<PathBuf>,
@@ -258,7 +254,6 @@ pub struct WorkerSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TlsSection {
     pub cert: Option<PathBuf>,
     pub key: Option<PathBuf>,
@@ -273,7 +268,6 @@ pub struct TlsSection {
 /// exclusive. That made real combinations unreachable: `trusted_proxies` is file-only, so
 /// "auto-TLS behind a proxy" could not be expressed at all. Every flag has a twin here.
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AcmeSection {
     /// Obtain and renew a certificate over HTTP-01.
     #[serde(default)]
@@ -299,14 +293,12 @@ pub struct AcmeSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AdminSection {
     /// Admin dashboard/API listen address (e.g. "127.0.0.1:9000"). Off if unset.
     pub listen: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct QueueSection {
     /// Number of queue-worker processes (runs the queue script). 0 = off.
     /// With `workers_max`, this is the floor of an autoscaling range.
@@ -344,7 +336,6 @@ pub struct QueueSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SchedulerSection {
     /// Scheduler runner script (e.g. examples/askr-scheduler.php). Off if unset.
     pub script: Option<PathBuf>,
@@ -354,7 +345,6 @@ pub struct SchedulerSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CacheSection {
     /// Shared kv cache slots (0 = disabled). Each slot is ~4.3 KB.
     #[serde(default)]
@@ -400,7 +390,6 @@ pub struct CacheSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BroadcastSection {
     /// Enable the broadcast ring + SSE endpoint (askr_broadcast()).
     #[serde(default)]
@@ -408,7 +397,6 @@ pub struct BroadcastSection {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReloadSection {
     /// Canary reload: roll one worker and health-check it before the rest.
     #[serde(default)]
@@ -458,14 +446,12 @@ impl Default for ReloadSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RecordSection {
     /// Record failing (5xx) requests into this directory for `askr replay`.
     pub dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PusherSection {
     /// Pusher-compatible WebSocket + HTTP trigger (drop-in Reverb). Rides the
     /// broadcast ring, which is auto-enabled.
@@ -577,9 +563,35 @@ impl FileConfig {
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        let cfg: FileConfig =
-            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
-        Ok(cfg)
+        Self::parse(&text).with_context(|| format!("parsing config {}", path.display()))
+    }
+
+    /// Parse a config document, collecting unknown keys as warnings in
+    /// [`unknown_keys`](Self::unknown_keys) rather than refusing the file.
+    ///
+    /// Up to 1.7.3 an unknown key was an error. That caught typos, but it also meant a
+    /// config using a newer release's key would not load on an older one, so rolling a
+    /// binary back could take a site down over a line nobody needed. A warning keeps the
+    /// typo-catching — it names the key, where it is, and the nearest key that section
+    /// does accept — without making the file unloadable. A key of the wrong *type* is
+    /// still an error: that is a value Askr would otherwise have to guess at.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut unknown = Vec::new();
+        let parsed: std::result::Result<FileConfig, _> =
+            serde_ignored::deserialize(toml::Deserializer::parse(text)?, |path| {
+                unknown.push(unknown_key_warning(&path_segments(&path)));
+            });
+        match parsed {
+            Ok(mut cfg) => {
+                cfg.unknown_keys = unknown;
+                Ok(cfg)
+            }
+            // The unknown key is often *why* the file failed — `lisen = …` is what leaves
+            // `listen` missing — so the error carries them, not just the warnings a file
+            // that loaded would have printed.
+            Err(e) if !unknown.is_empty() => Err(anyhow::Error::new(e).context(unknown.join("\n"))),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Validate and resolve into a runtime [`Config`], checking that paths and
@@ -1044,6 +1056,144 @@ impl FileConfig {
     }
 }
 
+/// A serde path as plain segments: table keys, and array indices as numbers.
+fn path_segments(path: &serde_ignored::Path) -> Vec<String> {
+    fn walk(p: &serde_ignored::Path, out: &mut Vec<String>) {
+        use serde_ignored::Path;
+        match p {
+            Path::Root => {}
+            Path::Seq { parent, index } => {
+                walk(parent, out);
+                out.push(index.to_string());
+            }
+            Path::Map { parent, key } => {
+                walk(parent, out);
+                out.push(key.clone());
+            }
+            Path::Some { parent }
+            | Path::NewtypeStruct { parent }
+            | Path::NewtypeVariant { parent } => walk(parent, out),
+        }
+    }
+    let mut out = Vec::new();
+    walk(path, &mut out);
+    out
+}
+
+/// The warning for one unknown key: where it is, and the key that was probably meant.
+fn unknown_key_warning(segments: &[String]) -> String {
+    let (key, table) = match segments.split_last() {
+        Some((k, t)) => (k.as_str(), t),
+        None => ("", &[][..]),
+    };
+    // `["site", "1"]` is the second `[[site]]`; `["cache", "rule", "0"]` the first
+    // `[[cache.rule]]`; `["server"]` is `[server]`; `[]` the top level.
+    let (names, entry): (Vec<&str>, Option<usize>) = match table.split_last() {
+        Some((last, rest)) if last.parse::<usize>().is_ok() => (
+            rest.iter().map(String::as_str).collect(),
+            last.parse::<usize>().ok(),
+        ),
+        _ => (table.iter().map(String::as_str).collect(), None),
+    };
+    let place = match (names.is_empty(), entry) {
+        (true, _) => "at the top level".to_string(),
+        (false, Some(i)) => format!("in [[{}]] #{}", names.join("."), i + 1),
+        (false, None) => format!("in [{}]", names.join(".")),
+    };
+    let accepted = accepted_keys(&names);
+    let hint = match closest(key, accepted) {
+        Some(m) => format!(" — did you mean `{m}`?"),
+        None if !accepted.is_empty() => format!(". That section accepts: {}.", accepted.join(", ")),
+        None => String::new(),
+    };
+    format!(
+        "unknown config key `{key}` {place} is ignored (a typo, or a key from a newer Askr \
+         than this one){hint}"
+    )
+}
+
+/// The keys a section accepts, read from the section type itself so the list can never
+/// drift from what is actually parsed.
+fn accepted_keys(table: &[&str]) -> &'static [&'static str] {
+    match table {
+        [] => fields_of::<FileConfig>(),
+        ["server"] => fields_of::<ServerSection>(),
+        ["worker"] => fields_of::<WorkerSection>(),
+        ["tls"] => fields_of::<TlsSection>(),
+        ["acme"] => fields_of::<AcmeSection>(),
+        ["admin"] => fields_of::<AdminSection>(),
+        ["queue"] => fields_of::<QueueSection>(),
+        ["scheduler"] => fields_of::<SchedulerSection>(),
+        ["cache"] => fields_of::<CacheSection>(),
+        ["cache", "rule"] => fields_of::<CacheRule>(),
+        ["broadcast"] => fields_of::<BroadcastSection>(),
+        ["reload"] => fields_of::<ReloadSection>(),
+        ["record"] => fields_of::<RecordSection>(),
+        ["pusher"] => fields_of::<PusherSection>(),
+        ["sidecar"] => fields_of::<SidecarSpec>(),
+        ["redirect"] => fields_of::<RedirectRule>(),
+        ["site"] => fields_of::<SiteSpec>(),
+        ["ratelimit"] => fields_of::<RateLimitRule>(),
+        _ => &[],
+    }
+}
+
+/// The accepted key nearest to `key`, if it is near enough to be a typo of it.
+fn closest(key: &str, accepted: &[&'static str]) -> Option<&'static str> {
+    let norm = |s: &str| s.to_ascii_lowercase().replace('-', "_");
+    let key_n = norm(key);
+    // The same words in another order — `max_workers` for `workers_max` — is a slip the
+    // edit distance alone rates as far apart.
+    let words = |s: &str| {
+        let mut w: Vec<String> = s.split('_').map(str::to_string).collect();
+        w.sort();
+        w
+    };
+    if let Some(a) = accepted.iter().find(|a| words(&norm(a)) == words(&key_n)) {
+        return Some(a);
+    }
+    accepted
+        .iter()
+        .map(|a| (strsim::levenshtein(&key_n, &norm(a)), *a))
+        .filter(|(d, _)| *d <= (key.chars().count() / 3).max(1))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, a)| a)
+}
+
+/// The field names a derived `Deserialize` struct accepts.
+///
+/// serde hands them to `Deserializer::deserialize_struct` — they are how it knows which
+/// keys are fields — so a deserializer that records them and stops is all it takes.
+fn fields_of<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
+    struct Probe<'a>(&'a mut &'static [&'static str]);
+    impl<'de> serde::Deserializer<'de> for Probe<'_> {
+        type Error = serde::de::value::Error;
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _: V,
+        ) -> std::result::Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom("probe"))
+        }
+        fn deserialize_struct<V: serde::de::Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> std::result::Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(serde::de::Error::custom("probe"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+            byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map
+            enum identifier ignored_any
+        }
+    }
+    let mut fields: &'static [&'static str] = &[];
+    let _ = T::deserialize(Probe(&mut fields));
+    fields
+}
+
 /// The durable SQL backends this process has selected, by the variable that selects each.
 ///
 /// Empty without the `sql-backend` feature: the variables are then not read at all.
@@ -1214,7 +1364,7 @@ mod tests {
         if !text.contains("listen") {
             text = text.replace("[server]", "[server]\nlisten = \"127.0.0.1:8000\"");
         }
-        let cfg: FileConfig = toml::from_str(&text)?;
+        let cfg = FileConfig::parse(&text)?;
         let out = cfg.resolve(4);
         let _ = std::fs::remove_dir_all(&dir);
         out
@@ -1682,16 +1832,122 @@ trusted_proxies = ["10.0.0.0/8", "::1", "192.168.1.5"]
     }
 
     /// A typo must fail loudly rather than being silently ignored.
+    /// Every config Askr ships, and every `toml` block in the docs, uses only keys Askr
+    /// knows. An unknown key used to stop the server, so a stale one could not survive in
+    /// an example; now it is a warning, and this is what stops it going stale quietly.
     #[test]
-    fn unknown_keys_are_rejected() {
-        let dir = app_dir("typo");
-        let text = format!(
-            "[server]\nlisten = \"127.0.0.1:8000\"\nroot = \"{}\"\nmax_requsts = 100\n",
-            dir.to_str().unwrap()
+    fn shipped_configs_and_doc_snippets_use_only_known_keys() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut sources = vec![
+            root.join("examples/askr.toml"),
+            root.join("examples/docker/askr.toml"),
+        ];
+        for e in std::fs::read_dir(root.join("docs")).unwrap() {
+            sources.push(e.unwrap().path());
+        }
+        sources.push(root.join("README.md"));
+        let mut found = Vec::new();
+        let mut checked = 0;
+        for path in sources
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "toml" || e == "md"))
+        {
+            let text = std::fs::read_to_string(path).unwrap();
+            let blocks: Vec<String> = if path.extension().is_some_and(|e| e == "toml") {
+                vec![text]
+            } else {
+                text.split("```toml\n")
+                    .skip(1)
+                    .filter_map(|b| b.split("```").next())
+                    // A block inside a `> ` quote carries the quote marker on every line.
+                    .map(|b| {
+                        b.lines()
+                            .map(|l| {
+                                l.strip_prefix('>')
+                                    .map_or(l, |l| l.strip_prefix(' ').unwrap_or(l))
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .collect()
+            };
+            for b in blocks {
+                checked += 1;
+                // A snippet is usually a fragment (no `listen`, no `root`), so it may not
+                // parse as a whole file; the unknown keys are collected either way.
+                if let Err(e) = toml::Deserializer::parse(&b) {
+                    found.push(format!("{}: not valid TOML: {e}", path.display()));
+                    continue;
+                }
+                let warnings = match FileConfig::parse(&b) {
+                    Ok(c) => c.unknown_keys,
+                    Err(e) => e
+                        .chain()
+                        .next()
+                        .map(|c| c.to_string())
+                        .filter(|c| c.starts_with("unknown config key"))
+                        .map(|c| c.lines().map(str::to_string).collect())
+                        .unwrap_or_default(),
+                };
+                for w in warnings {
+                    found.push(format!("{}: {w}", path.display()));
+                }
+            }
+        }
+        assert!(
+            checked > 10,
+            "only {checked} configs found — is the path right?"
         );
-        let parsed: Result<FileConfig, _> = toml::from_str(&text);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(parsed.is_err(), "deny_unknown_fields should catch typos");
+        assert!(found.is_empty(), "{}", found.join("\n"));
+    }
+
+    #[test]
+    fn an_unknown_key_is_a_warning_that_names_the_key_it_meant() {
+        let text = "[server]\nlisten = \"127.0.0.1:8000\"\nroot = \"public\"\nmax_requsts = 100\n\
+                    [queue]\nworkers-max = 3\nmax_workers = 3\nshiny_new_thing = true\n\
+                    [[site]]\nhosts = [\"a.test\"]\nroot = \"a\"\n\
+                    [[site]]\nhosts = [\"b.test\"]\nroot = \"b\"\nfrnt = \"x.php\"\n\
+                    [[cache.rule]]\npath = \"/x/*\"\nttl = 5\ntags = []\n\
+                    [sidecars]\ncommand = \"node x\"\n";
+        let cfg = FileConfig::parse(text).expect("unknown keys no longer refuse the file");
+        let w = &cfg.unknown_keys;
+        let find = |needle: &str| {
+            w.iter()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no warning for {needle}: {w:#?}"))
+        };
+        assert!(find("`max_requsts` in [server]").contains("did you mean `max_requests`?"));
+        assert!(find("`workers-max` in [queue]").contains("did you mean `workers_max`?"));
+        assert!(find("`max_workers` in [queue]").contains("did you mean `workers_max`?"));
+        assert!(find("`frnt` in [[site]] #2").contains("did you mean `front`?"));
+        assert!(find("`sidecars` at the top level").contains("did you mean `sidecar`?"));
+        // Nothing near enough to guess at: list what the section does accept instead.
+        let novel = find("`shiny_new_thing` in [queue]");
+        assert!(novel.contains("newer Askr"), "{novel}");
+        assert!(
+            novel.contains("one). That section accepts: workers, workers_max, script"),
+            "{novel}"
+        );
+        assert!(!novel.contains("did you mean"), "{novel}");
+        assert!(find("`tags` in [[cache.rule]] #1").contains("accepts:"));
+        assert_eq!(w.len(), 7, "{w:#?}");
+        // The known keys still took effect.
+        assert_eq!(cfg.server.listen, "127.0.0.1:8000");
+        assert_eq!(cfg.site[1].hosts, ["b.test"]);
+
+        // A clean file has nothing to say, and a key of the wrong type is still an error.
+        let clean = FileConfig::parse("[server]\nlisten = \"x\"\nroot = \"r\"\n").unwrap();
+        assert!(clean.unknown_keys.is_empty(), "{:?}", clean.unknown_keys);
+        assert!(FileConfig::parse("[server]\nlisten = 5\nroot = \"r\"\n").is_err());
+
+        // When the typo is why the file fails, the error says so.
+        let e = FileConfig::parse("[server]\nlisen = \"127.0.0.1:1\"\nroot = \"r\"\n").unwrap_err();
+        let e = format!("{e:#}");
+        assert!(e.contains("missing field `listen`"), "{e}");
+        assert!(
+            e.contains("`lisen` in [server]") && e.contains("did you mean `listen`?"),
+            "{e}"
+        );
     }
 
     #[test]

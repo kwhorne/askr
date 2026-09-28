@@ -117,11 +117,12 @@ See [Deployment](DEPLOYMENT.md#canary-reload-zero-bad-deploy).
   restart.
 - **Docker:** run the previous tag. This is why pinning matters.
 - **Config:** a config written for an older 1.x is still valid on a newer binary, so
-  upgrading never requires touching `askr.toml`. The reverse is not true: unknown keys are
-  rejected, so if you have *added* a key for a newer release — `[queue] root` in 1.7.0,
-  say — a rollback needs that key removed. `askr config-check askr.toml` run against the
-  binary you are about to roll back to tells you in one command, before you stop
-  anything.
+  upgrading never requires touching `askr.toml`. The reverse holds from the release after
+  1.7.3 on: a key the older binary does not know is ignored with a warning, so the file
+  still loads. Rolling back *to 1.7.3 or earlier* is different — those releases refuse an
+  unknown key, so a key added for a newer release (`[queue] root` in 1.7.0, say) has to
+  be removed first. Either way, `askr config-check askr.toml` run against the binary you
+  are about to roll back to tells you in one command, before you stop anything.
 
 Rolling back is a supported operation, not an emergency improvisation. If a downgrade
 ever fails on a config that the newer version accepted, that's a bug worth reporting —
@@ -130,6 +131,26 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To the next release
+
+**An unknown key in `askr.toml` is now a warning, not an error.** The server starts, the
+key is ignored, and the log names it with its location and the key it was probably meant
+to be:
+
+```
+unknown config key `max_workers` in [queue] is ignored (a typo, or a key from a newer
+Askr than this one) — did you mean `workers_max`?
+```
+
+Nothing changes for a config that loads today. What changes is what a mistake costs: a
+typo no longer stops the server, but it also no longer takes effect, so a deploy that
+used to fail loudly now starts without the setting. Keep `askr config-check` in the
+deploy and read its output — it prints the same warnings, before resolving the rest of
+the file.
+
+**Also new: a warning when applications share the SQL backends** (`sql-backend`
+builds only). See [STORAGE_BACKEND.md](STORAGE_BACKEND.md#one-application-per-l2-database).
 
 ### To 1.7.3
 
@@ -727,9 +748,10 @@ Honest list, in rough order of how often it happens:
    any restart hit PHP. Coalescing stops it becoming a stampede, but a big site
    restarting at peak will feel it. Reload rather than restart when you can.
 2. **A config the new version rejects.** Validation gets stricter as it gets better
-   (glob patterns that look like regexes, rules with no effect, unknown keys). This is
-   deliberate — a silently ignored rule is worse — but it means
-   `askr config-check askr.toml` belongs in your deploy script, before the restart.
+   (glob patterns that look like regexes, rules with no effect). This is deliberate — a
+   silently ignored rule is worse — but it means `askr config-check askr.toml` belongs in
+   your deploy script, before the restart. Unknown keys are the exception: they warn
+   rather than refuse, so that check is also where you see them.
 3. **`libphp` and the binary are a matched pair.** A release tarball contains both.
    Don't mix a new `askr` with an old bundled `libphp`; `askr upgrade` and the Docker
    images handle this for you.

@@ -20,8 +20,9 @@ ignored.
 ## `askr.toml` reference
 
 A complete, commented example lives at
-[`examples/askr.toml`](../examples/askr.toml). Unknown keys are rejected, so
-typos fail fast in `config-check`.
+[`examples/askr.toml`](../examples/askr.toml). An unknown key is ignored with a
+warning that names it and the key it was probably meant to be — at startup and in
+`askr config-check`, so run that after editing the file.
 
 ### `[server]`
 

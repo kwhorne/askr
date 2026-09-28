@@ -533,7 +533,11 @@ fn main() -> anyhow::Result<()> {
                     ignored.join(" "),
                     path.display(),
                 );
-                config::FileConfig::load(&path)?.resolve(default_workers())?
+                let file = config::FileConfig::load(&path)?;
+                for w in &file.unknown_keys {
+                    tracing::warn!("{}: {w}", path.display());
+                }
+                file.resolve(default_workers())?
             } else {
                 let max_body_size_n = parse_size(&max_body_size)?;
                 let docroot = resolve_root(root)?;
@@ -668,6 +672,7 @@ fn main() -> anyhow::Result<()> {
                     // The CLI has no `[[site]]` — virtual hosts are config-file only — so
                     // there is exactly one application and the sidecars share its docroot.
                     site: Vec::new(),
+                    unknown_keys: Vec::new(),
                 };
                 file.assemble(config::Checked {
                     listen,
@@ -994,6 +999,11 @@ fn main() -> anyhow::Result<()> {
         }
         Command::ConfigCheck { file } => {
             let raw = config::FileConfig::load(&file)?;
+            // Before resolving, so a typo is reported even when it is also why resolving
+            // fails (`lisen = …` leaves `listen` missing).
+            for w in &raw.unknown_keys {
+                println!("⚠ {w}");
+            }
             let resolved = raw.resolve(default_workers())?;
             println!("✓ config OK: {}", file.display());
             let c = &resolved.config;

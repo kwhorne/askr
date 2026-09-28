@@ -5,6 +5,22 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Changed
+
+- **An unknown key in `askr.toml` is a warning, not an error.** Rejecting it caught
+  typos, but it also meant a config using a newer release's key would not load on an
+  older one, so a rollback could take a site down over a line nobody needed — which is
+  not what [STABILITY.md](docs/STABILITY.md) should be promising. Now the key is ignored
+  and named, at startup and by `askr config-check`, with where it is and the key it was
+  probably meant to be — for `max_requsts` in `[server]`, "did you mean
+  `max_requests`?" — or the keys that section accepts when nothing is close. The
+  suggestions come from the section types themselves, so they cannot drift from what is
+  parsed. When a typo is *why* a file fails (`lisen` leaves `listen` missing), the error
+  says so. A key of the wrong type is still an error. A new test checks the shipped
+  example configs and every `toml` block in the docs for unknown keys, since nothing
+  would stop one going stale any more; it found one quoted block the check had to learn
+  to read, and no stale keys.
+
 ### Added
 
 - **A warning when applications would share the SQL backends.** Shared memory is

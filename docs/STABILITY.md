@@ -35,16 +35,17 @@ master↔worker protocol and may change at any time — don't invoke them direct
 
 ### 2. Configuration file (`askr.toml`)
 
-- Every documented key under `[server]`, `[cache]`, `[tls]`, `[acme]`, `[sidecars]`,
+- Every documented key under `[server]`, `[cache]`, `[tls]`, `[acme]`, `[[sidecar]]`,
   etc.: its name, type, and meaning. See [CONFIGURATION.md](CONFIGURATION.md).
 - A config written for an older Askr still loads on a newer one: keys are only ever
   added, and new ones default to the previous behaviour.
-- **Unknown keys are rejected, not ignored.** A typo fails at startup with the list of
-  keys that section accepts, rather than being silently ignored until someone wonders why
-  the setting had no effect. The cost is that a config using a *newer* release's keys does
-  not load on an older one — so if you add a key and later roll the binary back, remove
-  the key too. `askr config-check` against the version you intend to run catches this
-  before you stop anything.
+- **Unknown keys are a warning, not an error** (since the release after 1.7.3). An
+  unknown key is ignored and named — at startup, and by `askr config-check` — with the
+  key it was probably meant to be (`did you mean workers_max?`), or the list of keys that
+  section accepts. So a config that uses a *newer* release's keys still loads on an older
+  one, and a rollback does not need the file edited. Only warnings, though: a typo'd key
+  has no effect, so read what `config-check` says. A key with the wrong *type* is still an
+  error. Up to 1.7.3 an unknown key was an error, and those releases still refuse it.
 
 ### 3. Environment variables
 
