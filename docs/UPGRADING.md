@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.7.3; ARCH=$(uname -m)
+VER=v1.7.4; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.7.3     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.7.4     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.7` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.7.3-full`) are the same server built with the optional features
+The `-full` tags (`1.7.4-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -117,9 +117,8 @@ See [Deployment](DEPLOYMENT.md#canary-reload-zero-bad-deploy).
   restart.
 - **Docker:** run the previous tag. This is why pinning matters.
 - **Config:** a config written for an older 1.x is still valid on a newer binary, so
-  upgrading never requires touching `askr.toml`. The reverse holds from the release after
-  1.7.3 on: a key the older binary does not know is ignored with a warning, so the file
-  still loads. Rolling back *to 1.7.3 or earlier* is different — those releases refuse an
+  upgrading never requires touching `askr.toml`. The reverse holds from 1.7.4 on: a key
+  the older binary does not know is ignored with a warning, so the file still loads. Rolling back *to 1.7.3 or earlier* is different — those releases refuse an
   unknown key, so a key added for a newer release (`[queue] root` in 1.7.0, say) has to
   be removed first. Either way, `askr config-check askr.toml` run against the binary you
   are about to roll back to tells you in one command, before you stop anything.
@@ -132,7 +131,7 @@ it means we added something that isn't additive.
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
 
-### To the next release
+### To 1.7.4
 
 **An unknown key in `askr.toml` is now a warning, not an error.** The server starts, the
 key is ignored, and the log names it with its location and the key it was probably meant

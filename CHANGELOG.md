@@ -5,6 +5,17 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.7.4 — 2026-09-28
+
+Two things that used to be silent now say so, and one thing that used to be loud is now
+a warning. An unknown key in `askr.toml` no longer stops the server — it is ignored and
+named, with the key it was probably meant to be — so a config written for a newer release
+survives a rollback. An instance that serves more than one application on the durable
+SQL backends is told, at startup, exactly what those applications are sharing. And the
+insides moved: the admin JSON is typed, the command line and the config file build the
+runtime configuration through one function, and `server.rs` is split up — each checked
+against the old code rather than assumed equivalent.
+
 ### Changed
 
 - **An unknown key in `askr.toml` is a warning, not an error.** Rejecting it caught

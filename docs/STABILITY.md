@@ -39,7 +39,7 @@ master↔worker protocol and may change at any time — don't invoke them direct
   etc.: its name, type, and meaning. See [CONFIGURATION.md](CONFIGURATION.md).
 - A config written for an older Askr still loads on a newer one: keys are only ever
   added, and new ones default to the previous behaviour.
-- **Unknown keys are a warning, not an error** (since the release after 1.7.3). An
+- **Unknown keys are a warning, not an error** (since 1.7.4). An
   unknown key is ignored and named — at startup, and by `askr config-check` — with the
   key it was probably meant to be (`did you mean workers_max?`), or the list of keys that
   section accepts. So a config that uses a *newer* release's keys still loads on an older
