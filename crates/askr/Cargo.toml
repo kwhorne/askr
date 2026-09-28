@@ -59,7 +59,7 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 # request — root `http.request` + child `php.execute` — over OTLP/gRPC. Off by
 # default; enable with `--features otel`.
 opentelemetry = { version = "0.32", optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
 
 # Optional HTTP/3 (QUIC) listener via quinn + h3, sharing the rustls (ring) cert.
