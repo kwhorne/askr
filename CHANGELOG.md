@@ -5,6 +5,18 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Added
+
+- **A warning when applications would share the SQL backends.** Shared memory is
+  separated per application; the durable L2 backends (`ASKR_CACHE_DB`, `ASKR_QUEUE_DB`,
+  `ASKR_BROADCAST_DB`, feature `sql-backend`) are not, so on an instance serving more
+  than one application — `[[site]]`, or a `[queue]`/`[scheduler] root` of its own — the
+  applications read each other's cache, run each other's jobs and receive each other's
+  broadcasts whenever they use the same name. Askr now says so at startup, naming the
+  variables that are set and what each one shares, and `askr config-check` prints the same
+  warning. Nothing is refused: an instance that runs like this today keeps running. See
+  [STORAGE_BACKEND.md](docs/STORAGE_BACKEND.md#one-application-per-l2-database).
+
 ### Internal
 
 - **The admin JSON documents are built from types.** `/api/status`, `/api/metrics` and

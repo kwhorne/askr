@@ -28,6 +28,30 @@ Laravel drivers (elyra-11, elyra-12) are **unchanged**; only the backend differs
 L1 and L2 mirror the same semantics on purpose — that is why the contracts are
 written to match `squeue.rs` / `cache.rs`.
 
+### One application per L2 database
+
+With one difference that matters: **L1 is separated per application, L2 is not.** Shared
+memory keys every entry, job and channel by the application it belongs to (derived from
+its docroot). The SQL tables are keyed only by the name PHP chose, so two applications
+that both use the queue `default`, the cache key `config` or the channel `orders` are
+using the same rows:
+
+- **cache** — one application reads another's cached values, and a flush in any of them
+  empties the table for all;
+- **queue** — a queue worker takes jobs another application pushed, and runs them in the
+  wrong application;
+- **broadcast** — an event reaches the other application's subscribers on that channel.
+
+So give each application its own Askr instance and its own database files. Askr warns at
+startup, and `askr config-check` says the same, when an L2 variable is set and the
+instance serves more than one application (`[[site]]`, or a `[queue] root` /
+`[scheduler] root` that differs from `[server] root`). It cannot see the other way to get
+there — two separate instances pointed at the same file — so don't.
+
+Separating L2 per application needs an application id that is the same on every host and
+across deploys, which a hash of a local path is not. Until there is one, this is a
+limitation rather than a bug to be worked around.
+
 ## Queue (elyra-9) — implemented
 
 The durable-queue driver (`crates/askr/src/squeue_sql.rs`, feature `sql-backend`)

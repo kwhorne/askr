@@ -1044,6 +1044,81 @@ impl FileConfig {
     }
 }
 
+/// The durable SQL backends this process has selected, by the variable that selects each.
+///
+/// Empty without the `sql-backend` feature: the variables are then not read at all.
+pub fn l2_backends() -> Vec<&'static str> {
+    #[allow(unused_mut)]
+    let mut on = Vec::new();
+    #[cfg(feature = "sql-backend")]
+    {
+        if crate::cache_sql::enabled() {
+            on.push("ASKR_CACHE_DB");
+        }
+        if crate::squeue_sql::enabled() {
+            on.push("ASKR_QUEUE_DB");
+        }
+        if crate::broadcast_sql::enabled() {
+            on.push("ASKR_BROADCAST_DB");
+        }
+    }
+    on
+}
+
+/// A warning when more than one application would share the durable SQL backends.
+///
+/// Shared memory is namespaced per application; the SQL backends are not. Their tables
+/// are keyed by the name PHP chose — a cache key, a queue name, a channel — and nothing
+/// else, so two applications on one instance that both say `default` are talking about
+/// the same row. Namespacing them needs an application id that stays the same across
+/// hosts and deploys, which a hash of a local docroot path is not, so for now the honest
+/// thing is to say so at startup rather than let it be discovered.
+///
+/// `l2` is what [`l2_backends`] returned; it is a parameter so this can be tested without
+/// touching the environment.
+pub fn l2_sharing_warning(config: &Config, l2: &[&str]) -> Option<String> {
+    let mut apps: Vec<&std::path::Path> = vec![
+        &config.docroot,
+        &config.sidecar_docroot,
+        &config.scheduler_docroot,
+    ];
+    apps.extend(config.sites.iter().map(|s| s.docroot.as_path()));
+    apps.sort();
+    apps.dedup();
+    if apps.len() < 2 || l2.is_empty() {
+        return None;
+    }
+    let mut effects = Vec::new();
+    for var in l2 {
+        effects.push(match *var {
+            "ASKR_CACHE_DB" => {
+                "cache keys are shared, so one application reads another's cached values, \
+                 and a cache flush in any of them empties the cache for all"
+            }
+            "ASKR_QUEUE_DB" => {
+                "queue names are shared, so a queue worker takes jobs pushed by another \
+                 application and runs them in the wrong one"
+            }
+            "ASKR_BROADCAST_DB" => {
+                "channel names are shared, so a broadcast reaches the other applications' \
+                 subscribers on the same channel"
+            }
+            _ => continue,
+        });
+    }
+    Some(format!(
+        "{} {} set and this instance serves {} applications ([[site]] / [queue] root / \
+         [scheduler] root), but the SQL backends are not separated per application: {}. \
+         Run each application as its own Askr instance with its own database files, or \
+         leave {} unset to use shared memory, which is separated per application.",
+        l2.join(" and "),
+        if l2.len() == 1 { "is" } else { "are" },
+        apps.len(),
+        effects.join("; "),
+        if l2.len() == 1 { "it" } else { "them" },
+    ))
+}
+
 /// What validation computed on the way to [`FileConfig::assemble`]: the values that had
 /// to be parsed or looked up on disk to be checked at all, handed over rather than
 /// worked out a second time. See `assemble` for which raw fields these stand in for.
@@ -1079,6 +1154,54 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.php"), "<?php\n").unwrap();
         dir
+    }
+
+    /// One application is the normal case and says nothing; a second one — a `[[site]]`,
+    /// or a sidecar rooted elsewhere — with any SQL backend selected says what is shared.
+    #[test]
+    fn two_applications_on_the_sql_backends_are_warned_about() {
+        let one = resolve("one", "[server]\nroot = \"{ROOT}\"\n").unwrap();
+        assert_eq!(
+            l2_sharing_warning(&one.config, &["ASKR_CACHE_DB", "ASKR_QUEUE_DB"]),
+            None
+        );
+
+        let site = app_dir("l2-site");
+        let body = format!(
+            "[server]\nroot = \"{{ROOT}}\"\n[[site]]\nhosts = [\"b.test\"]\nroot = \"{}\"\n",
+            site.display()
+        );
+        let two = resolve("two", &body).unwrap();
+        assert_eq!(
+            l2_sharing_warning(&two.config, &[]),
+            None,
+            "shared memory is separated"
+        );
+        let w = l2_sharing_warning(&two.config, &["ASKR_QUEUE_DB"]).expect("a warning");
+        assert!(w.starts_with("ASKR_QUEUE_DB is set"), "{w}");
+        assert!(w.contains("2 applications"), "{w}");
+        assert!(w.contains("runs them in the wrong one"), "{w}");
+        assert!(w.contains("leave it unset"), "{w}");
+        assert!(!w.contains("cache keys"), "only what is selected: {w}");
+        let all = ["ASKR_CACHE_DB", "ASKR_QUEUE_DB", "ASKR_BROADCAST_DB"];
+        let w = l2_sharing_warning(&two.config, &all).unwrap();
+        assert!(
+            w.starts_with("ASKR_CACHE_DB and ASKR_QUEUE_DB and ASKR_BROADCAST_DB are"),
+            "{w}"
+        );
+        assert!(
+            w.contains("cache flush") && w.contains("subscribers"),
+            "{w}"
+        );
+
+        // No [[site]], but the queue workers belong to a different application.
+        let body = format!(
+            "[server]\nroot = \"{{ROOT}}\"\n[queue]\nroot = \"{}\"\n",
+            site.display()
+        );
+        let sidecar = resolve("sidecar", &body).unwrap();
+        assert!(l2_sharing_warning(&sidecar.config, &["ASKR_CACHE_DB"]).is_some());
+        let _ = std::fs::remove_dir_all(&site);
     }
 
     /// Resolve a config body with `{ROOT}` pointing at a throwaway app.

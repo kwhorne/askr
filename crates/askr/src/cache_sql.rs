@@ -14,6 +14,11 @@
 //! Enabled by setting `ASKR_CACHE_DB` to the database path; unset falls back to
 //! the L1 shared-memory cache. Compiled only with `--features sql-backend`.
 //! Each process opens its own WAL connection.
+//!
+//! Keys are stored as PHP passed them, **not** namespaced per application the way the
+//! L1 cache is, so every application using one database shares one key space. Askr warns
+//! when an instance would do that (`config::l2_sharing_warning`); see
+//! docs/STORAGE_BACKEND.md.
 
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_long};

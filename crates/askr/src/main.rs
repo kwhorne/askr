@@ -682,6 +682,9 @@ fn main() -> anyhow::Result<()> {
                     acme_http: Some(acme_http),
                 })
             };
+            if let Some(w) = config::l2_sharing_warning(&r.config, &config::l2_backends()) {
+                tracing::warn!("{w}");
+            }
             if let Some(base) = &r.app_base {
                 // Exported for the worker script; children inherit it across fork.
                 std::env::set_var("ASKR_APP_BASE", base);
@@ -1029,6 +1032,10 @@ fn main() -> anyhow::Result<()> {
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "off".into())
             );
+            // Read from this shell's environment, which may not be the service's.
+            if let Some(w) = config::l2_sharing_warning(c, &config::l2_backends()) {
+                println!("\n⚠ {w}");
+            }
             Ok(())
         }
         Command::Upgrade {
