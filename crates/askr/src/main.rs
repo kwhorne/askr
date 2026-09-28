@@ -53,7 +53,6 @@ use std::sync::atomic::Ordering;
 
 use clap::{Parser, Subcommand};
 
-use crate::server::Config;
 use crate::supervisor::*;
 use crate::worker::{bind_listener, run_worker};
 
@@ -518,22 +517,7 @@ fn main() -> anyhow::Result<()> {
             traffic_log,
         } => {
             // The config file, when given, is the single source of truth.
-            #[allow(clippy::type_complexity)]
-            let (
-                config,
-                workers,
-                ini,
-                admin_listen,
-                paranoid,
-                sidecars,
-                cache_slots,
-                cache_large_slots,
-                response_cache,
-                cache_persist,
-                cache_persist_key,
-                broadcast,
-                acme_set,
-            ) = if let Some(path) = config_file {
+            let r = if let Some(path) = config_file {
                 // A config file is the WHOLE configuration: every other serve flag is
                 // ignored below, because this is an either/or rather than a merge.
                 // Silently. That cost an afternoon on a real deployment, where
@@ -549,64 +533,9 @@ fn main() -> anyhow::Result<()> {
                     ignored.join(" "),
                     path.display(),
                 );
-                let r = config::FileConfig::load(&path)?.resolve(default_workers())?;
-                if let Some(base) = &r.app_base {
-                    // Exported for the worker script; children inherit it across fork.
-                    std::env::set_var("ASKR_APP_BASE", base);
-                }
-                CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
-                CANARY_WINDOW.store(r.canary_window, Ordering::SeqCst);
-                CANARY_MIN_REQUESTS.store(r.canary_min_requests, Ordering::SeqCst);
-                CANARY_MAX_ERR_RATE
-                    .store((r.canary_max_error_rate * 100.0) as u64, Ordering::SeqCst);
-                CANARY_MAX_LAT_FACTOR.store(
-                    (r.canary_max_latency_factor * 100.0) as u64,
-                    Ordering::SeqCst,
-                );
-                WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
-                WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
-                QUEUE_CAP.store(r.queue_slots, Ordering::SeqCst);
-                squeue::set_persist_name(r.queue_persist.clone());
-                queue::set_stall_secs(r.queue_stall_secs);
-                let sc = Sidecars {
-                    queue: r.queue_workers,
-                    queue_max: r.queue_workers_max.max(r.queue_workers),
-                    queue_script: r.queue_script,
-                    scheduler_script: r.scheduler_script,
-                    commands: r.sidecars,
-                };
-                (
-                    r.config,
-                    r.workers,
-                    r.ini,
-                    r.admin_listen,
-                    r.paranoid,
-                    sc,
-                    r.cache_slots,
-                    r.cache_large_slots,
-                    r.response_cache_slots,
-                    r.cache_persist,
-                    r.cache_persist_key,
-                    r.broadcast,
-                    AcmeSettings {
-                        on: r.acme,
-                        domains: r.acme_domains,
-                        email: r.acme_email,
-                        // The CLI's default lives on the clap attribute; mirror it rather
-                        // than duplicating the literal in config.rs.
-                        dir: r
-                            .acme_dir
-                            .unwrap_or_else(|| PathBuf::from("/var/lib/askr/acme")),
-                        staging: r.acme_staging,
-                        directory: r.acme_directory,
-                        http: r
-                            .acme_http
-                            .unwrap_or_else(|| "0.0.0.0:80".parse().expect("literal addr")),
-                        ca_root: r.acme_ca_root,
-                    },
-                )
+                config::FileConfig::load(&path)?.resolve(default_workers())?
             } else {
-                let max_body_size = parse_size(&max_body_size)?;
+                let max_body_size_n = parse_size(&max_body_size)?;
                 let docroot = resolve_root(root)?;
                 if !docroot.join(&front).is_file() {
                     anyhow::bail!(
@@ -620,8 +549,6 @@ fn main() -> anyhow::Result<()> {
                 if let Some(c) = &tls_cert {
                     anyhow::ensure!(c.is_file(), "TLS cert not found: {}", c.display());
                 }
-                CANARY_ENABLED.store(canary, Ordering::SeqCst);
-                let tls_on = tls_cert.is_some() || tls_self_signed;
                 if let Some(qs) = &queue_script {
                     anyhow::ensure!(qs.is_file(), "queue script not found: {}", qs.display());
                     // See config.rs: workers without slots means the ring is never mapped
@@ -636,91 +563,176 @@ fn main() -> anyhow::Result<()> {
                 if let Some(ss) = &scheduler_script {
                     anyhow::ensure!(ss.is_file(), "scheduler script not found: {}", ss.display());
                 }
-                let cfg = Config {
+                let workers = workers.unwrap_or_else(default_workers).max(1);
+                // The command line, said as a config file, so that it is assembled by the
+                // same code as one (`FileConfig::assemble`). Every section is spelled out
+                // rather than defaulted, so a key added to the file format has to be
+                // decided here too: a flag, or config-file only.
+                let file = config::FileConfig {
+                    server: config::ServerSection {
+                        // Checked above; `assemble` takes the checked values, not these.
+                        listen: listen.to_string(),
+                        root: docroot.clone(),
+                        workers: workers.to_string(),
+                        max_body_size,
+                        front: front.to_string_lossy().into_owned(),
+                        workers_min,
+                        workers_max,
+                        max_requests,
+                        max_rss,
+                        shadow_to,
+                        shadow_sample,
+                        https,
+                        force_https,
+                        http_redirect,
+                        traffic_log,
+                        access_log,
+                        http3,
+                        tls_handshake_timeout,
+                        header_read_timeout,
+                        sandbox,
+                        sandbox_required,
+                        sandbox_write,
+                        // Config-file only.
+                        trusted_proxies: Vec::new(),
+                    },
+                    worker: config::WorkerSection {
+                        script: worker_script,
+                        app_base: None,
+                        ini: ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
+                        paranoid,
+                    },
+                    tls: config::TlsSection {
+                        cert: tls_cert,
+                        key: tls_key,
+                        self_signed: tls_self_signed,
+                    },
+                    acme: config::AcmeSection {
+                        enabled: acme,
+                        domains: acme_domain,
+                        email: acme_email,
+                        dir: Some(acme_dir),
+                        staging: acme_staging,
+                        directory_url: acme_directory,
+                        http: Some(acme_http.to_string()),
+                        ca_root: acme_ca_root,
+                    },
+                    admin: config::AdminSection {
+                        listen: admin.map(|a| a.to_string()),
+                    },
+                    queue: config::QueueSection {
+                        workers: queue,
+                        workers_max: queue_max,
+                        script: queue_script,
+                        slots: queue_slots,
+                        // Config-file only.
+                        persist: None,
+                        stall_secs: 0,
+                        root: None,
+                    },
+                    scheduler: config::SchedulerSection {
+                        script: scheduler_script,
+                        root: None,
+                    },
+                    cache: config::CacheSection {
+                        slots: cache_slots,
+                        large_slots: cache_large_slots,
+                        response_slots: response_cache,
+                        // Config-file only: list- and table-valued, and persistence.
+                        strip_query_params: Vec::new(),
+                        ignore_cookies: Vec::new(),
+                        vary_user_agent: false,
+                        saint_seconds: 0,
+                        rule: Vec::new(),
+                        persist: None,
+                        persist_key: None,
+                    },
+                    broadcast: config::BroadcastSection { enabled: broadcast },
+                    // Only the switch is a flag; the thresholds keep their defaults.
+                    reload: config::ReloadSection {
+                        canary,
+                        ..Default::default()
+                    },
+                    record: config::RecordSection { dir: record_errors },
+                    pusher: config::PusherSection {
+                        enabled: pusher,
+                        secret: pusher_secret.or_else(|| std::env::var("ASKR_PUSHER_SECRET").ok()),
+                    },
+                    sidecar: sidecar
+                        .into_iter()
+                        .map(|command| config::SidecarSpec { command })
+                        .collect(),
+                    // Config-file only (table-valued).
+                    redirect: Vec::new(),
+                    ratelimit: Vec::new(),
                     // The CLI has no `[[site]]` — virtual hosts are config-file only — so
                     // there is exactly one application and the sidecars share its docroot.
+                    site: Vec::new(),
+                };
+                file.assemble(config::Checked {
+                    listen,
                     sidecar_docroot: docroot.clone(),
                     scheduler_docroot: docroot.clone(),
                     docroot,
-                    front_controller: front,
-                    listen,
-                    https: https || tls_on,
-                    worker_script,
-                    max_requests,
-                    max_rss_mb: max_rss,
-                    tls_cert,
-                    tls_key,
-                    tls_self_signed,
-                    max_body_size,
-                    record_dir: record_errors,
-                    pusher,
-                    pusher_secret: pusher_secret
-                        .or_else(|| std::env::var("ASKR_PUSHER_SECRET").ok()),
-                    access_log,
-                    traffic_log,
-                    sandbox: sandbox || sandbox_required || !sandbox_write.is_empty(),
-                    sandbox_required,
-                    sandbox_write,
-                    shadow_to,
-                    shadow_sample,
-                    http3,
-                    tls_handshake_timeout,
-                    header_read_timeout,
-                    force_https,
-                    http_redirect,
-                    redirects: Vec::new(),
+                    front,
                     sites: Vec::new(),
-                    // Cache-key normalisation is config-file only (list-valued).
-                    cache_strip_query: Vec::new(),
-                    cache_ignore_cookies: Vec::new(),
-                    cache_vary_user_agent: false,
-                    cache_saint_seconds: 0,
-                    // Cache rules are config-file only (they're table-valued).
-                    cache_rules: Vec::new(),
-                    // Rate limits and trusted proxies are config-file only.
-                    ratelimits: Vec::new(),
-                    trusted_proxies: Vec::new(),
-                };
-                let w = workers.unwrap_or_else(default_workers).max(1);
-                let wmin = workers_min.unwrap_or(w).max(1);
-                let wmax = workers_max.unwrap_or(w).max(wmin);
-                WORKERS_MIN.store(wmin, Ordering::SeqCst);
-                WORKERS_MAX.store(wmax, Ordering::SeqCst);
-                QUEUE_CAP.store(queue_slots, Ordering::SeqCst);
-                let qw = if queue_script.is_some() { queue } else { 0 };
-                let sc = Sidecars {
-                    queue: qw,
-                    queue_max: queue_max.unwrap_or(qw).max(qw),
-                    queue_script,
-                    scheduler_script,
-                    commands: sidecar,
-                };
-                (
-                    cfg,
-                    w,
-                    ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
-                    admin,
-                    paranoid,
-                    sc,
-                    cache_slots,
-                    cache_large_slots,
-                    response_cache,
-                    // Cache persistence is config-file only.
-                    None,
-                    None,
-                    broadcast,
-                    AcmeSettings {
-                        on: acme,
-                        domains: acme_domain,
-                        email: acme_email,
-                        dir: acme_dir,
-                        staging: acme_staging,
-                        directory: acme_directory,
-                        http: acme_http,
-                        ca_root: acme_ca_root,
-                    },
-                )
+                    workers,
+                    max_body_size: max_body_size_n,
+                    admin_listen: admin,
+                    acme_http: Some(acme_http),
+                })
             };
+            if let Some(base) = &r.app_base {
+                // Exported for the worker script; children inherit it across fork.
+                std::env::set_var("ASKR_APP_BASE", base);
+            }
+            CANARY_ENABLED.store(r.canary_reload, Ordering::SeqCst);
+            CANARY_WINDOW.store(r.canary_window, Ordering::SeqCst);
+            CANARY_MIN_REQUESTS.store(r.canary_min_requests, Ordering::SeqCst);
+            CANARY_MAX_ERR_RATE.store((r.canary_max_error_rate * 100.0) as u64, Ordering::SeqCst);
+            CANARY_MAX_LAT_FACTOR.store(
+                (r.canary_max_latency_factor * 100.0) as u64,
+                Ordering::SeqCst,
+            );
+            WORKERS_MIN.store(r.workers_min, Ordering::SeqCst);
+            WORKERS_MAX.store(r.workers_max, Ordering::SeqCst);
+            QUEUE_CAP.store(r.queue_slots, Ordering::SeqCst);
+            squeue::set_persist_name(r.queue_persist.clone());
+            queue::set_stall_secs(r.queue_stall_secs);
+            let sidecars = Sidecars {
+                queue: r.queue_workers,
+                queue_max: r.queue_workers_max.max(r.queue_workers),
+                queue_script: r.queue_script,
+                scheduler_script: r.scheduler_script,
+                commands: r.sidecars,
+            };
+            let acme_set = AcmeSettings {
+                on: r.acme,
+                domains: r.acme_domains,
+                email: r.acme_email,
+                // The CLI's default lives on the clap attribute and arrives filled in;
+                // only a config file can leave these unset.
+                dir: r
+                    .acme_dir
+                    .unwrap_or_else(|| PathBuf::from("/var/lib/askr/acme")),
+                staging: r.acme_staging,
+                directory: r.acme_directory,
+                http: r
+                    .acme_http
+                    .unwrap_or_else(|| "0.0.0.0:80".parse().expect("literal addr")),
+                ca_root: r.acme_ca_root,
+            };
+            let config = r.config;
+            let workers = r.workers;
+            let ini = r.ini;
+            let admin_listen = r.admin_listen;
+            let paranoid = r.paranoid;
+            let cache_slots = r.cache_slots;
+            let cache_large_slots = r.cache_large_slots;
+            let response_cache = r.response_cache_slots;
+            let cache_persist = r.cache_persist;
+            let cache_persist_key = r.cache_persist_key;
+            let broadcast = r.broadcast;
 
             // Map shared regions before any fork so all workers share them.
             if cache_slots > 0 || cache_large_slots > 0 {
@@ -1031,14 +1043,10 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Default worker count: the container's CPU limit (cgroup) when running in one,
-/// else the host's core count. Without this a `cpus: 2` container on a 64-core
-/// host would fork 64 workers (nproc reads the host, not the cgroup limit).
-/// Auto-TLS settings, from either the command line or `[acme]`.
-///
-/// Collected into a struct rather than eight more elements on an already twelve-wide
-/// tuple. Both sources resolve their defaults here, so `--acme-dir`'s default and
-/// `acme.dir`'s absence mean the same thing in one place.
+/// Auto-TLS settings, from either the command line or `[acme]`, in the shape the ACME
+/// step wants. A config file may leave `dir` and `http` unset; their defaults are filled
+/// in where this is built, so `--acme-dir`'s default and `acme.dir`'s absence mean the
+/// same thing.
 struct AcmeSettings {
     on: bool,
     domains: Vec<String>,
@@ -1083,6 +1091,9 @@ fn ignored_with_config() -> Vec<String> {
     out
 }
 
+/// Default worker count: the container's CPU limit (cgroup) when running in one,
+/// else the host's core count. Without this a `cpus: 2` container on a 64-core
+/// host would fork 64 workers (nproc reads the host, not the cgroup limit).
 fn default_workers() -> usize {
     #[cfg(target_os = "linux")]
     if let Some(n) = cgroup_cpu_limit() {

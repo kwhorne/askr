@@ -528,7 +528,8 @@ fn default_header_read_timeout() -> u64 {
     15
 }
 
-/// The fully-resolved runtime configuration produced from a file.
+/// The fully-resolved startup configuration, from a file or the command line — both
+/// come out of [`FileConfig::assemble`].
 pub struct Resolved {
     pub config: Config,
     pub workers: usize,
@@ -777,7 +778,7 @@ impl FileConfig {
 
         // ACME validation. The failures here are all things that would otherwise surface
         // as a rate-limited rejection from Let's Encrypt minutes later.
-        let acme = self.acme;
+        let acme = &self.acme;
         if acme.enabled {
             anyhow::ensure!(
                 !acme.domains.is_empty(),
@@ -806,11 +807,6 @@ impl FileConfig {
                  silently does nothing is how a site ends up serving plain HTTP)"
             );
         }
-        // ACME counts as TLS: the resolved config has to say the server will speak HTTPS,
-        // even though the certificate doesn't exist yet. Otherwise anything reading it
-        // before the ACME step runs — logging, admin status — reports plain HTTP.
-        let tls_on = static_tls || acme.enabled;
-
         let acme_http = match &acme.http {
             Some(a) => Some(
                 a.parse::<SocketAddr>()
@@ -898,6 +894,55 @@ impl FileConfig {
         if let Some(s) = &self.scheduler.script {
             anyhow::ensure!(s.is_file(), "scheduler.script not found: {}", s.display());
         }
+        Ok(self.assemble(Checked {
+            listen,
+            docroot,
+            front,
+            sidecar_docroot,
+            scheduler_docroot,
+            sites,
+            workers,
+            max_body_size,
+            admin_listen,
+            acme_http,
+        }))
+    }
+
+    /// The one place a runtime [`Config`] — and the rest of [`Resolved`] — is built.
+    ///
+    /// Both ways of configuring `serve` come through here: [`resolve`](Self::resolve) for
+    /// a file, and the command line, which describes itself as a `FileConfig` and calls
+    /// this directly. There used to be two struct literals, one per path, and a setting
+    /// added to one had to be remembered in the other — or, as happened once, put on the
+    /// wrong struct altogether. Now a new field is decided here, once, and the compiler
+    /// asks for it.
+    ///
+    /// Validation is *not* here, because the two paths validate differently and must
+    /// keep saying so in their own terms (`tls.cert not found` is the right message for
+    /// a file and the wrong one for `--tls-cert`). Whatever validation had to compute on
+    /// the way — a canonical path, a parsed address — arrives in `checked`, and the
+    /// matching raw fields of `self` (`server.listen`, `server.root`, `server.workers`,
+    /// `server.front`, `server.max_body_size`, `admin.listen`, `acme.http`) are not read
+    /// again.
+    pub(crate) fn assemble(self, checked: Checked) -> Resolved {
+        let Checked {
+            listen,
+            docroot,
+            front,
+            sidecar_docroot,
+            scheduler_docroot,
+            sites,
+            workers,
+            max_body_size,
+            admin_listen,
+            acme_http,
+        } = checked;
+        let tls_self_signed = self.tls.self_signed;
+        // ACME counts as TLS: the resolved config has to say the server will speak HTTPS,
+        // even though the certificate doesn't exist yet. Otherwise anything reading it
+        // before the ACME step runs — logging, admin status — reports plain HTTP.
+        let tls_on = self.tls.cert.is_some() || tls_self_signed || self.acme.enabled;
+        // Queue workers need a script to run; without one the count means nothing.
         let queue_workers = if self.queue.script.is_some() {
             self.queue.workers
         } else {
@@ -908,8 +953,9 @@ impl FileConfig {
             .workers_max
             .unwrap_or(queue_workers)
             .max(queue_workers);
+        let acme = self.acme;
 
-        Ok(Resolved {
+        Resolved {
             config: Config {
                 docroot,
                 sidecar_docroot,
@@ -994,8 +1040,28 @@ impl FileConfig {
             canary_min_requests: self.reload.canary_min_requests,
             canary_max_error_rate: self.reload.canary_max_error_rate.max(0.0),
             canary_max_latency_factor: self.reload.canary_max_latency_factor.max(1.0),
-        })
+        }
     }
+}
+
+/// What validation computed on the way to [`FileConfig::assemble`]: the values that had
+/// to be parsed or looked up on disk to be checked at all, handed over rather than
+/// worked out a second time. See `assemble` for which raw fields these stand in for.
+pub(crate) struct Checked {
+    pub listen: SocketAddr,
+    /// Canonical, so the per-application namespace (a hash of it) has one spelling.
+    pub docroot: PathBuf,
+    /// Relative to `docroot`, and known to exist there.
+    pub front: PathBuf,
+    /// The application the queue workers and `[[sidecar]]` commands serve.
+    pub sidecar_docroot: PathBuf,
+    /// The application the scheduler runs for.
+    pub scheduler_docroot: PathBuf,
+    pub sites: Vec<crate::server::Site>,
+    pub workers: usize,
+    pub max_body_size: usize,
+    pub admin_listen: Option<SocketAddr>,
+    pub acme_http: Option<SocketAddr>,
 }
 
 #[cfg(test)]
