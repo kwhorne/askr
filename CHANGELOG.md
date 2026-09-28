@@ -7,6 +7,16 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Security
 
+- **rustls 0.23.45, for RUSTSEC-2026-0285** (medium, CVSS 5.3). rustls accepted TLS 1.3
+  handshake messages sent at the wrong encryption level when they followed a
+  key-changing message in the same record — a plaintext `EncryptedExtensions` packed with
+  the `ServerHello`, say — where RFC 8446 §5.1 requires the connection to be torn down.
+  The transcript is still authenticated, so it cannot be used to alter or complete a
+  handshake; the practical effect is that a peer could send what should be encrypted in
+  plaintext and not be refused. 1.7.2 shipped 0.23.44. Askr uses rustls both to terminate
+  TLS and, through `instant-acme`, as an ACME client. Lockfile only: rustls is the one
+  line that moved.
+
 - **A process with no application set could acknowledge any application's queue job.**
   The lease check on `askr_queue_delete` / `askr_queue_release` asked `ns::owns`, which
   with no application set said yes to every key. Leases are a global counter handed out
@@ -26,6 +36,14 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   against the old check.
 
 ### Internal
+
+- **CI denies warnings explicitly.** Every `setup-rust-toolchain` step now sets
+  `rustflags: "-D warnings"` rather than inheriting it. v1 of the action defaulted to
+  that; v2 defaults to empty and sets `CARGO_BUILD_WARNINGS` instead, which cargo honours
+  only from 1.97 — and the toolchain is pinned to 1.95, so the pending v2 bump would have
+  silently stopped `cargo test` and the release builds from failing on a warning. Checked,
+  not assumed: on cargo 1.95 a crate with a warning builds under `CARGO_BUILD_WARNINGS=deny`
+  and fails under `RUSTFLAGS=-D warnings`.
 
 - **The `$_SERVER` header policy is one table.** What happens to a request header on its
   way into PHP used to be eight `if` branches in the loop that applied them — `Proxy`,
