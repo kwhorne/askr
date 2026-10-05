@@ -48,16 +48,18 @@ mod esi;
 mod sse;
 mod statics;
 mod trust;
+pub mod why;
 
 use cache_policy::{
-    cache_rule_for, cached_response, carries_identity, invalidate_request, maybe_store,
-    resolve_cached, response_cache_key, saint_active, saint_mark, spawn_swr_refresh,
-    stale_error_fallback, unix_secs,
+    cache_rule_for, cached_response, carries_identity, identity_reason, invalidate_request,
+    key_display, maybe_store, resolve_cached, response_cache_key, saint_active, saint_mark,
+    spawn_swr_refresh, stale_error_fallback, unix_secs, StoreVerdict,
 };
 use esi::{esi_expand, esi_requested};
 use sse::{sse_response, SseHub};
 use statics::{sanitize, serve_static, static_forbidden};
 use trust::client_ip;
+use why::Step;
 
 pub use trust::{client_ip_from, parse_cidr, peer_is_trusted, Cidr};
 
@@ -534,10 +536,24 @@ where
     let service = service_fn(move |req: Request<Incoming>| {
         let rt = rt.clone();
         async move {
+            let mut req = req;
             let method = req.method().as_str().to_string();
             let path = req.uri().path().to_string();
             let start = Instant::now();
-            let resp = handle(req, rt.clone(), peer).await;
+            // `askr why`: removed from every request, honoured only with the secret.
+            let resp = match why::take_request(req.headers_mut()) {
+                None => handle(req, rt.clone(), peer).await,
+                Some(as_peer) => {
+                    let peer = as_peer.map_or(peer, |ip| SocketAddr::new(ip, peer.port()));
+                    let (resp, steps) = why::traced(handle(req, rt.clone(), peer)).await;
+                    resp.map(|mut r| {
+                        if let Ok(v) = hyper::header::HeaderValue::from_str(&why::encode(&steps)) {
+                            r.headers_mut().insert(why::TRACE_HEADER, v);
+                        }
+                        r
+                    })
+                }
+            };
             if let Ok(r) = &resp {
                 let bytes = r.body().size_hint().exact().unwrap_or(0);
                 rt.log_access(
@@ -591,6 +607,28 @@ where
     let authority = crate::cgi::effective_host(req.headers(), req.uri()).unwrap_or_default();
     let host = crate::cgi::host_without_port(&authority).to_ascii_lowercase();
 
+    why::note(|| {
+        let client = client_ip(&req, peer, &config.trusted_proxies);
+        let forwarded = req.headers().contains_key("x-forwarded-for");
+        let step = Step::new("client", client.to_string());
+        if client != peer.ip() {
+            step.because(format!(
+                "from X-Forwarded-For, believed because the peer {} is in trusted_proxies",
+                peer.ip()
+            ))
+        } else if forwarded && !peer_is_trusted(peer.ip(), &config.trusted_proxies) {
+            step.because(format!(
+                "the connection's own address; X-Forwarded-For is ignored because the \
+                 peer {} is not in trusted_proxies",
+                peer.ip()
+            ))
+        } else if forwarded {
+            step.because("every address in X-Forwarded-For is itself a trusted proxy")
+        } else {
+            step.because("the connection's own address")
+        }
+    });
+
     // Rate limiting: refuse before anything expensive happens — a blocked request
     // never costs a PHP cycle, a cache lookup, or a disk stat.
     if let Some(resp) = ratelimit_check(&req, peer, config) {
@@ -612,6 +650,15 @@ where
     // Host / scheme redirects (www→apex, http→https) — before any dispatch.
     if config.force_https || !config.redirects.is_empty() {
         if let Some(resp) = redirect_target(&req, &host, config, &rt) {
+            why::note(|| {
+                let to = resp
+                    .headers()
+                    .get(hyper::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("?");
+                Step::new("redirect", format!("{} to {to}", resp.status().as_u16()))
+                    .because("force_https or a [[redirect]] rule matched")
+            });
             finish(&rt, &resp, t_start, 0);
             return Ok(resp);
         }
@@ -620,6 +667,23 @@ where
     // Virtual host: this request's docroot + front controller (a matching
     // `[[site]]`, or the default single site).
     let (docroot, front_controller) = config.site_for(&host);
+    why::note(|| {
+        let step = Step::new(
+            "site",
+            format!("{} ({})", docroot.display(), front_controller.display()),
+        );
+        match config
+            .sites
+            .iter()
+            .position(|s| s.hosts.iter().any(|h| host_matches(&host, h)))
+        {
+            Some(i) => step.because(format!("[[site]] #{} matches the host {host:?}", i + 1)),
+            None if config.sites.is_empty() => step.because("[server] root"),
+            None => step.because(format!(
+                "[server] root: no [[site]] lists the host {host:?}"
+            )),
+        }
+    });
 
     // Pusher WebSocket endpoint: /app/{key} (drop-in Reverb, #6).
     if rt.pusher_enabled
@@ -643,6 +707,9 @@ where
     // Reserved SSE endpoint: GET /askr/events?channel=NAME streams broadcast
     // events (see askr_broadcast() in PHP).
     if req.method() == Method::GET && req.uri().path() == "/askr/events" {
+        why::note(|| {
+            Step::new("route", "server-sent events").because("/askr/events is Askr's own")
+        });
         return Ok(sse_response(req.uri().query(), &rt));
     }
 
@@ -654,9 +721,26 @@ where
         let candidate = docroot.join(&rel);
         if let Ok(meta) = tokio::fs::metadata(&candidate).await {
             if meta.is_file() {
+                why::note(|| Step::new("route", format!("static file /{}", rel.display())));
                 return Ok(serve_static(&candidate, &meta, req.method(), req.headers()).await);
             }
         }
+        why::note(|| {
+            Step::new("route", format!("PHP ({})", front_controller.display()))
+                .because(format!("no file /{} in the docroot", rel.display()))
+        });
+    } else {
+        why::note(|| {
+            let step = Step::new("route", format!("PHP ({})", front_controller.display()));
+            if rel.as_os_str().is_empty() {
+                step
+            } else {
+                step.because(format!(
+                    "{} is a source file or a dotfile, which is never served as bytes",
+                    rel.display()
+                ))
+            }
+        });
     }
 
     // --- response cache: read before touching PHP (#1) -----------------
@@ -674,6 +758,38 @@ where
         && matches!(*req.method(), Method::GET | Method::HEAD)
         && (anonymous || rule.is_some_and(|r| r.force));
     let cache_key = cacheable.then(|| response_cache_key(&req, &host, &rt.config));
+    why::note(|| {
+        if !rcache::enabled() {
+            Step::new("cache", "off").because("[cache] response_slots is 0")
+        } else if passed {
+            Step::new("cache", "PASS").because(format!(
+                "[[cache.rule]] path = {:?} says action = \"pass\"",
+                rule.map(|r| r.path.as_str()).unwrap_or("")
+            ))
+        } else if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            Step::new("cache", "not cacheable").because("only GET and HEAD are cached")
+        } else if let Some(key) = &cache_key {
+            let why = match (anonymous, rule) {
+                (true, Some(r)) => {
+                    format!("anonymous, and [[cache.rule]] path = {:?} applies", r.path)
+                }
+                (true, None) => "anonymous".to_string(),
+                (false, r) => format!(
+                    "{}, but [[cache.rule]] path = {:?} says force = true",
+                    identity_reason(&req, &rt.config.cache_ignore_cookies),
+                    r.map(|r| r.path.as_str()).unwrap_or("")
+                ),
+            };
+            Step::new("cache", format!("cacheable as {}", key_display(key))).because(why)
+        } else {
+            Step::new("cache", "not cacheable").because(format!(
+                "{} — a request that carries identity may be shown a personal page. If \
+                 it identifies no one, list it in [cache] ignore_cookies; a \
+                 [[cache.rule]] with force = true caches the path regardless",
+                identity_reason(&req, &rt.config.cache_ignore_cookies)
+            ))
+        }
+    });
     // Own the rule for the rest of the request — `req` is consumed further down.
     let rule = rule.cloned();
 
@@ -705,6 +821,21 @@ where
             // this variant — it would refresh the *wrong* one. A varied entry is served
             // stale through its window and refreshed by the next real request instead.
             let state = if c.stale { "STALE" } else { "HIT" };
+            why::note(|| {
+                let step = Step::new("lookup", state);
+                match (c.stale, varied) {
+                    (true, false) => step.because(
+                        "past its ttl but inside stale-while-revalidate: served now, and \
+                         one background request refreshes it",
+                    ),
+                    (true, true) => step.because(
+                        "past its ttl, inside stale-while-revalidate; a variant is \
+                         refreshed by the next real request, not in the background",
+                    ),
+                    (false, true) => step.because("the variant selected by the response's Vary"),
+                    (false, false) => step.because("served without running PHP"),
+                }
+            });
             #[cfg(feature = "otel")]
             let cache_state = state;
             if c.stale && !varied {
@@ -746,6 +877,12 @@ where
         // backend when the app told us this page may be served on error.
         if saint_active() {
             if let Some(response) = stale_error_fallback(key, req.headers()) {
+                why::note(|| {
+                    Step::new("lookup", "STALE-ERROR").because(
+                        "PHP failed recently (saint mode), and this page may be served \
+                         stale on error",
+                    )
+                });
                 tracing::warn!(
                     path = %req.uri().path(),
                     "saint mode: serving stale-if-error fallback without running PHP"
@@ -766,7 +903,13 @@ where
             }
         }
         match rcache::begin(key) {
-            rcache::Lead::Leader => coalesce_leader = true,
+            rcache::Lead::Leader => {
+                why::note(|| {
+                    Step::new("lookup", "MISS")
+                        .because("nothing fresh under this key, so this request runs PHP")
+                });
+                coalesce_leader = true
+            }
             rcache::Lead::Follower => {
                 // Wait (fail-open) for the leader to fill the cache. While the
                 // leader is still computing, followers only do a cheap atomic
@@ -792,6 +935,12 @@ where
                     }
                 }
                 if let Some(c) = served {
+                    why::note(|| {
+                        Step::new("lookup", "HIT (coalesced)").because(
+                            "another request was already running PHP for this key; this \
+                             one waited for its result",
+                        )
+                    });
                     rcache::note_coalesced();
                     let response = cached_response(c);
                     #[cfg(feature = "otel")]
@@ -970,6 +1119,17 @@ where
         m.inflight.fetch_sub(1, Ordering::Relaxed);
     }
     let php_us = php_start.elapsed().as_micros() as u64;
+    why::note(|| {
+        let outcome = match &php_result {
+            Ok(Reply::Stream { status, .. }) => format!("{status}, streamed"),
+            Ok(Reply::Buffered(r)) => r.status.to_string(),
+            Err(e) => format!("failed: {e}"),
+        };
+        Step::new(
+            "php",
+            format!("{outcome} in {:.1} ms", php_us as f64 / 1000.0),
+        )
+    });
     #[cfg(feature = "otel")]
     otel_phases.push(crate::otel::Phase {
         name: "php.execute",
@@ -990,7 +1150,7 @@ where
             // Cache store: the app opts in per-response with an `Askr-Cache`
             // header (which we consume, never forwarding it to the client).
             if let Some(key) = &cache_key {
-                maybe_store(
+                let verdict = maybe_store(
                     key,
                     &resp,
                     &accept_encoding,
@@ -999,6 +1159,7 @@ where
                     &crate::ns::for_docroot(docroot),
                     &parts.headers,
                 );
+                why::note(|| store_step(&verdict));
             }
             // Fire the shadow mirror off the request path: hash prod's body now,
             // then compare on a background task without touching the client.
@@ -1097,6 +1258,12 @@ where
             if let (Some(dir), Some(req)) = (&config.record_dir, &record_copy) {
                 crate::record::record_failure(dir, req, response.status().as_u16());
             }
+            why::note(|| {
+                Step::new("fallback", "stale-if-error").because(format!(
+                    "PHP answered {}, and a stored copy may be served on error",
+                    response.status().as_u16()
+                ))
+            });
             tracing::warn!(
                 status = response.status().as_u16(),
                 path = %parts.uri.path(),
@@ -1153,6 +1320,54 @@ where
 
     finish(&rt, &response, t_start, php_us);
     Ok(response)
+}
+
+/// The `store` step of `askr why`, from what `maybe_store` reported.
+fn store_step(v: &StoreVerdict) -> Step {
+    match v {
+        StoreVerdict::NotStored(why) => Step::new("store", "not stored").because(why.clone()),
+        StoreVerdict::Stored {
+            ttl,
+            swr,
+            stale_if_error,
+            tags,
+            by_rule,
+            variant_on,
+            dropped_set_cookie,
+        } => {
+            let ttl = if *ttl == 0 {
+                "forever".to_string()
+            } else {
+                format!("{ttl}s")
+            };
+            let mut out = format!("stored for {ttl}");
+            if *swr > 0 {
+                out.push_str(&format!(", stale-while-revalidate {swr}s"));
+            }
+            if *stale_if_error > 0 {
+                out.push_str(&format!(", stale-if-error {stale_if_error}s"));
+            }
+            if *tags > 0 {
+                out.push_str(&format!(", {tags} tag(s)"));
+            }
+            let mut why = vec![if *by_rule {
+                "a [[cache.rule]] gives this path a ttl".to_string()
+            } else {
+                "the response's Askr-Cache header asked for it".to_string()
+            }];
+            if let Some(v) = variant_on {
+                why.push(format!("one copy per value of {v} (the response's Vary)"));
+            }
+            if *dropped_set_cookie {
+                why.push(
+                    "its Set-Cookie is not stored, so a hit never hands one visitor's \
+                     cookie to another"
+                        .to_string(),
+                );
+            }
+            Step::new("store", out).because(why.join("; "))
+        }
+    }
 }
 
 /// Map a hyper protocol version to an OTel `network.protocol.version` value.
@@ -1297,11 +1512,15 @@ fn ratelimit_check<B>(
     if path.starts_with("/askr/") {
         return None;
     }
-    let (idx, rule) = config
+    let Some((idx, rule)) = config
         .ratelimits
         .iter()
         .enumerate()
-        .find(|(_, r)| rcache::glob_match(&r.path, path))?;
+        .find(|(_, r)| rcache::glob_match(&r.path, path))
+    else {
+        why::note(|| Step::new("ratelimit", "none").because("no [[ratelimit]] path matches"));
+        return None;
+    };
 
     // Identity: client IP, a header value, or a cookie value. A request that can't
     // produce the configured identity isn't limited — the rule simply doesn't apply.
@@ -1319,6 +1538,12 @@ fn ratelimit_check<B>(
         String::new()
     };
     if identity.is_empty() {
+        why::note(|| {
+            Step::new("ratelimit", "not limited").because(format!(
+                "[[ratelimit]] path = {:?} counts by {}, which this request does not have",
+                rule.path, rule.by
+            ))
+        });
         return None;
     }
 
@@ -1326,6 +1551,21 @@ fn ratelimit_check<B>(
     // bucket.
     let key = format!("{idx}\0{identity}");
     let v = crate::ratelimit::check(key.as_bytes(), rule.limit, rule.window, rule.burst);
+    why::note(|| {
+        Step::new(
+            "ratelimit",
+            if v.allowed {
+                "allowed"
+            } else {
+                "refused (429)"
+            },
+        )
+        .because(format!(
+            "[[ratelimit]] path = {:?}: {} per {}s by {} = {identity}; {} left (this \
+             request counted)",
+            rule.path, rule.limit, rule.window, rule.by, v.remaining
+        ))
+    });
     if v.allowed {
         return None;
     }

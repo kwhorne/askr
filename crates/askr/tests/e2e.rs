@@ -938,6 +938,162 @@ fn an_app_id_names_the_application_wherever_it_lives() {
     assert_ne!(one, unnamed, "without a name, the docroot names it");
 }
 
+/// `askr why` through a real server: the CLI asks the admin plane, the admin plane sends
+/// the request through the listener, and a worker reports its decisions — cacheable or
+/// not and why, MISS then HIT, stored or not and why, and which address it believed.
+#[test]
+fn askr_why_explains_what_the_server_decided() {
+    let app = r#"<?php
+header('Content-Type: text/plain');
+$uri = strtok($_SERVER['REQUEST_URI'] ?? '/', '?');
+if ($uri === '/headers') {
+    echo json_encode(array_keys(array_filter($_SERVER, fn($k) => str_starts_with($k, 'HTTP_'), ARRAY_FILTER_USE_KEY)));
+    exit;
+}
+if ($uri === '/nocache') { echo "nocache"; exit; }
+header('Askr-Cache: 300, tags=posts');
+setcookie('laravel_session', 'abc');
+echo $uri;
+"#;
+    let s = Server::start(
+        "why",
+        &[("index.php", app)],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+workers = "2"
+trusted_proxies = ["10.0.0.0/8"]
+[admin]
+listen = "127.0.0.1:{ADMIN}"
+[cache]
+response_slots = 64
+ignore_cookies = ["_ga"]
+"#,
+    );
+    s.wait_admin();
+    let why = |args: &[&str]| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+            .arg("why")
+            .args(args)
+            .args(["--admin", &format!("127.0.0.1:{}", s.admin), "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "askr why {args:?}: {}\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            s.log_contents()
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let step = |r: &serde_json::Value, stage: &str| -> (String, String) {
+        let st = r["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["stage"] == stage)
+            .unwrap_or_else(|| panic!("no {stage} step in {r:#}"));
+        (
+            st["outcome"].as_str().unwrap().to_string(),
+            st["why"].as_str().unwrap_or("").to_string(),
+        )
+    };
+
+    let first = why(&["/page"]);
+    assert_eq!(first["status"], 200);
+    assert!(
+        step(&first, "cache")
+            .0
+            .starts_with("cacheable as GET http://localhost/page"),
+        "{first:#}"
+    );
+    assert_eq!(step(&first, "lookup").0, "MISS");
+    let (stored, stored_why) = step(&first, "store");
+    assert!(stored.starts_with("stored for 300s, 1 tag(s)"), "{first:#}");
+    assert!(
+        stored_why.contains("Askr-Cache header") && stored_why.contains("Set-Cookie"),
+        "{first:#}"
+    );
+    assert_eq!(step(&first, "client").0, "127.0.0.1");
+
+    let second = why(&["/page"]);
+    assert_eq!(step(&second, "lookup").0, "HIT", "{second:#}");
+    assert_eq!(second["cache"], "HIT");
+
+    let refused = why(&["/nocache"]);
+    assert!(
+        step(&refused, "store").1.contains("no Askr-Cache header"),
+        "{refused:#}"
+    );
+
+    // A returning visitor: the session cookie makes the request personal; `_ga` does not.
+    let visitor = why(&["/page", "-H", "Cookie: _ga=1; laravel_session=abc"]);
+    let (c, c_why) = step(&visitor, "cache");
+    assert_eq!(c, "not cacheable", "{visitor:#}");
+    assert!(
+        c_why.contains("`laravel_session`") && !c_why.contains("`_ga`"),
+        "{visitor:#}"
+    );
+
+    // Explained as the load balancer, X-Forwarded-For is believed; as itself, it is not.
+    let via_lb = why(&[
+        "/nocache",
+        "--peer",
+        "10.0.0.4",
+        "-H",
+        "X-Forwarded-For: 203.0.113.9",
+    ]);
+    assert_eq!(step(&via_lb, "client").0, "203.0.113.9", "{via_lb:#}");
+    let direct = why(&["/nocache", "-H", "X-Forwarded-For: 203.0.113.9"]);
+    let (ip, ip_why) = step(&direct, "client");
+    assert_eq!(ip, "127.0.0.1");
+    assert!(ip_why.contains("not in trusted_proxies"), "{direct:#}");
+
+    // The trace is the prober's alone: a cached copy never carries it, and a guess at
+    // the header from outside neither explains anything nor reaches PHP.
+    // (`get` sends Host 127.0.0.1:port — another key than the probe's `localhost`.)
+    let stored = get(s.port, "/page");
+    let hit = get(s.port, "/page");
+    assert_eq!((stored.cache_state(), hit.cache_state()), ("MISS", "HIT"));
+    assert!(hit.header("askr-explain-trace").is_none());
+    let guess = request(
+        s.port,
+        "GET",
+        "/headers",
+        &[
+            ("Askr-Explain", "00112233"),
+            ("Askr-Explain-Peer", "10.0.0.4"),
+        ],
+    );
+    assert!(guess.header("askr-explain-trace").is_none());
+    assert!(
+        !guess.body.contains("ASKR_EXPLAIN"),
+        "PHP saw {}",
+        guess.body
+    );
+
+    // And the human form says the same thing in words.
+    let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args([
+            "why",
+            "/nocache",
+            "--admin",
+            &format!("127.0.0.1:{}", s.admin),
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("GET http://localhost/nocache  →  200 (MISS)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("store") && text.contains("not stored"),
+        "{text}"
+    );
+}
+
 /// The bug: the cache key used the raw `Host` header (with port) while routing used
 /// a normalised one, so `PURGE` could never match anything.
 #[test]

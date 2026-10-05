@@ -62,6 +62,73 @@ pub(super) fn carries_identity<B>(req: &Request<B>, ignore_cookies: &[String]) -
     })
 }
 
+/// What makes a request carry identity, in words — for `askr why`. Only meaningful when
+/// [`carries_identity`] is true; that function stays the single definition of the test.
+pub(super) fn identity_reason<B>(req: &Request<B>, ignore_cookies: &[String]) -> String {
+    let h = req.headers();
+    if h.contains_key(hyper::header::AUTHORIZATION) {
+        return "it carries an Authorization header".to_string();
+    }
+    if h.contains_key(hyper::header::PROXY_AUTHORIZATION) {
+        return "it carries a Proxy-Authorization header".to_string();
+    }
+    let names: Vec<String> = h
+        .get_all(hyper::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .map(|c| c.split('=').next().unwrap_or("").trim().to_string())
+        .filter(|n| !n.is_empty() && !ignore_cookies.iter().any(|p| name_matches(p, n)))
+        .collect();
+    match names.as_slice() {
+        [] => "it carries a Cookie header that is not valid text".to_string(),
+        [one] => format!("it carries the cookie `{one}`, which is not in [cache] ignore_cookies"),
+        many => format!(
+            "it carries the cookies {}, which are not in [cache] ignore_cookies",
+            many.iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// A cache key, readable: the parts `response_cache_key` joins with NULs.
+pub(super) fn key_display(key: &[u8]) -> String {
+    let s = String::from_utf8_lossy(key);
+    let p: Vec<&str> = s.split('\0').collect();
+    match p.as_slice() {
+        [method, host, pq, enc, device, scheme] => {
+            let enc = if *enc == "id" { "uncompressed" } else { enc };
+            let mut out = format!("{method} {scheme}://{host}{pq}, {enc}");
+            if !device.is_empty() {
+                let d = if *device == "m" { "mobile" } else { "desktop" };
+                out.push_str(&format!(", device {d}"));
+            }
+            out
+        }
+        _ => s.replace('\0', " "),
+    }
+}
+
+/// What [`maybe_store`] did with a response, and why — for `askr why`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StoreVerdict {
+    Stored {
+        ttl: u64,
+        swr: u64,
+        stale_if_error: u64,
+        tags: usize,
+        /// The ttl came from a `[[cache.rule]]` rather than the app's `Askr-Cache`.
+        by_rule: bool,
+        /// Stored as a variant of these request headers (the app's `Vary`).
+        variant_on: Option<String>,
+        /// The response set a cookie, which the stored copy does not repeat.
+        dropped_set_cookie: bool,
+    },
+    NotStored(String),
+}
+
 /// The first `[[cache.rule]]` whose glob matches this path, if any.
 ///
 /// Rules are the operator's cache policy, applied without touching the app: bypass a
@@ -333,9 +400,12 @@ pub(super) fn maybe_store(
     app: &crate::ns::App,
     // The request that produced `resp`, for the values of the headers it varies on.
     request_headers: &hyper::HeaderMap,
-) {
+) -> StoreVerdict {
     if resp.status != 200 {
-        return;
+        return StoreVerdict::NotStored(format!(
+            "only 200 responses are stored, and this was {}",
+            resp.status
+        ));
     }
     let app_dir = resp
         .headers
@@ -354,8 +424,16 @@ pub(super) fn maybe_store(
         }
         (None, Some(d)) => d,
         // Neither the app nor a rule asked for caching.
-        (None, None) => return,
+        (None, None) => {
+            return StoreVerdict::NotStored(
+                "the response has no Askr-Cache header, and no [[cache.rule]] with a ttl \
+                 matches this path — caching is opt-in, per response or per path"
+                    .to_string(),
+            )
+        }
     };
+    let by_rule = rule.and_then(|r| r.ttl).is_some();
+    let dropped_set_cookie = header_value(&resp.headers, "set-cookie").is_some();
     // The key varies on encoding, and on device class when `vary_user_agent` is on.
     // It cannot represent anything else, and the app's own `Vary` was dropped by
     // `storable_header` rather than honoured — so a localised Laravel app answering
@@ -373,7 +451,10 @@ pub(super) fn maybe_store(
         .as_deref()
         .is_some_and(|v| v.split(',').any(|t| t.trim() == "*"))
     {
-        return;
+        return StoreVerdict::NotStored(
+            "the response says `Vary: *` — never the same twice — so it cannot be shared"
+                .to_string(),
+        );
     }
     // A body the app compressed itself. `storable_header` drops Content-Encoding,
     // and `compress::maybe` hands an already-compressed body back unchanged because
@@ -382,7 +463,10 @@ pub(super) fn maybe_store(
     if let Some(e) = header_value(&resp.headers, "content-encoding") {
         let e = e.trim();
         if !e.is_empty() && !e.eq_ignore_ascii_case("identity") {
-            return;
+            return StoreVerdict::NotStored(format!(
+                "the application compressed the body itself (Content-Encoding: {e}); Askr \
+                 stores bodies it can compress per client, so leave compression to Askr"
+            ));
         }
     }
     let mut stored: Vec<(String, String)> = resp
@@ -434,6 +518,7 @@ pub(super) fn maybe_store(
     // in one instance would collide on them and `askr_cache_forget_tag('posts')` from
     // one would invalidate the other's pages. Stored under the application's
     // namespace, to match what `c_forget_tag` looks up.
+    let tag_count = tags.len();
     let tags: Vec<Vec<u8>> = tags
         .into_iter()
         .map(|t| {
@@ -444,20 +529,18 @@ pub(super) fn maybe_store(
             k
         })
         .collect();
-    match &app_vary {
-        None => {
-            rcache::store(
-                key,
-                resp.status,
-                &stored,
-                &body,
-                ttl,
-                swr,
-                sie,
-                &tags,
-                Some(app),
-            );
-        }
+    let ok = match &app_vary {
+        None => rcache::store(
+            key,
+            resp.status,
+            &stored,
+            &body,
+            ttl,
+            swr,
+            sie,
+            &tags,
+            Some(app),
+        ),
         Some(names) => {
             // Same lifetimes and tags for the index as for the entry, so it lives as
             // long as any variant can and `forget_tag` takes it down with them.
@@ -474,8 +557,23 @@ pub(super) fn maybe_store(
                 sie,
                 &tags,
                 Some(app),
-            );
+            )
         }
+    };
+    if !ok {
+        return StoreVerdict::NotStored(format!(
+            "it is too large for a cache slot ({} bytes of body as stored)",
+            body.len()
+        ));
+    }
+    StoreVerdict::Stored {
+        ttl,
+        swr,
+        stale_if_error: sie,
+        tags: tag_count,
+        by_rule,
+        variant_on: app_vary,
+        dropped_set_cookie,
     }
 }
 
@@ -1042,6 +1140,123 @@ mod tests {
         assert!(cache_rule_for("/x", &[]).is_none());
         // A glob that doesn't match leaves the path unruled.
         assert!(cache_rule_for("/x", &[mk("/admin/*", Some("pass"), None)]).is_none());
+    }
+
+    /// `askr why` reports what `maybe_store` decided; the verdict has to be the decision
+    /// it actually took, for each way a response can be refused or stored.
+    #[test]
+    fn the_store_verdict_says_why() {
+        rcache::init(64);
+        let app = crate::ns::for_docroot(std::path::Path::new("/srv/why-test"));
+        let req = hyper::HeaderMap::new();
+        let resp = |status: u16, headers: &[(&str, &str)]| askr_php::Response {
+            status,
+            php_status: 0,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: b"<p>hello</p>".to_vec(),
+        };
+        let rule = crate::config::CacheRule {
+            path: "/x".into(),
+            action: None,
+            ttl: Some(120),
+            swr: 0,
+            stale_if_error: 0,
+            force: false,
+        };
+        let verdict = |r: &askr_php::Response, rule: Option<&crate::config::CacheRule>| {
+            maybe_store(
+                b"GET\0why.test\0/x\0id\0\0http",
+                r,
+                "",
+                false,
+                rule,
+                &app,
+                &req,
+            )
+        };
+        let not = |v: StoreVerdict| match v {
+            StoreVerdict::NotStored(why) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+
+        assert!(not(verdict(&resp(404, &[("askr-cache", "60")]), None)).contains("this was 404"));
+        assert!(not(verdict(&resp(200, &[]), None)).contains("no Askr-Cache header"));
+        assert!(not(verdict(
+            &resp(200, &[("askr-cache", "60"), ("vary", "*")]),
+            None
+        ))
+        .contains("Vary: *"));
+        assert!(not(verdict(
+            &resp(200, &[("askr-cache", "60"), ("content-encoding", "gzip")]),
+            None
+        ))
+        .contains("Content-Encoding: gzip"));
+
+        assert_eq!(
+            verdict(
+                &resp(
+                    200,
+                    &[
+                        ("askr-cache", "60, swr=30, tags=posts,home"),
+                        ("set-cookie", "laravel_session=abc")
+                    ]
+                ),
+                None
+            ),
+            StoreVerdict::Stored {
+                ttl: 60,
+                swr: 30,
+                stale_if_error: 0,
+                tags: 2,
+                by_rule: false,
+                variant_on: None,
+                dropped_set_cookie: true,
+            }
+        );
+        // The rule's ttl wins over the app's, and a Vary the key cannot express makes
+        // a variant.
+        assert_eq!(
+            verdict(
+                &resp(200, &[("askr-cache", "60"), ("vary", "Accept-Language")]),
+                Some(&rule)
+            ),
+            StoreVerdict::Stored {
+                ttl: 120,
+                swr: 0,
+                stale_if_error: 0,
+                tags: 0,
+                by_rule: true,
+                variant_on: Some("Accept-Language".into()),
+                dropped_set_cookie: false,
+            }
+        );
+    }
+
+    #[test]
+    fn identity_is_named() {
+        let req = |h: &[(&str, &str)]| {
+            let mut b = hyper::Request::builder().uri("/");
+            for (k, v) in h {
+                b = b.header(*k, *v);
+            }
+            b.body(()).unwrap()
+        };
+        let ignore = vec!["_ga*".to_string()];
+        let r = req(&[("cookie", "_ga=1; laravel_session=abc; _gid=2")]);
+        assert!(carries_identity(&r, &ignore));
+        assert_eq!(
+            identity_reason(&r, &ignore),
+            "it carries the cookies `laravel_session`, `_gid`, which are not in [cache] ignore_cookies"
+        );
+        let r = req(&[("authorization", "Bearer x")]);
+        assert!(identity_reason(&r, &ignore).contains("Authorization header"));
+        assert_eq!(
+            key_display(b"GET\0shop.test\0/p?a=1\0br\0m\0https"),
+            "GET https://shop.test/p?a=1, br, device mobile"
+        );
     }
 
     #[test]

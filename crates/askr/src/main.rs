@@ -17,6 +17,7 @@ mod compress;
 mod config;
 mod doctor;
 mod esi;
+mod explain;
 mod ffi;
 #[cfg(feature = "http3")]
 mod http3;
@@ -431,6 +432,29 @@ enum Command {
         /// Extra php.ini lines (e.g. to load opcache).
         #[arg(long)]
         ini: Option<String>,
+    },
+
+    /// Explain what Askr decides about one request: client address, site, static or
+    /// PHP, rate limit, whether it may be cached and under which key, hit or miss, and
+    /// why the response was or was not stored. Asks a running server's admin plane,
+    /// which sends a real GET through the server — it runs PHP and can fill the cache.
+    Why {
+        /// The URL (`https://shop.test/products?page=2`) or a path (`/products`).
+        url: String,
+        /// The admin plane of the running server (`[admin] listen`).
+        #[arg(long, default_value = "127.0.0.1:9000")]
+        admin: String,
+        /// A request header to send, `Name: value`; repeatable. A `Cookie` here shows
+        /// what a returning visitor gets.
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Explain the request as if it came from this address — your load balancer's,
+        /// so `trusted_proxies` is applied the way production sees it.
+        #[arg(long)]
+        peer: Option<std::net::IpAddr>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Validate a config file and print the resolved settings (no server start).
@@ -1014,6 +1038,30 @@ fn main() -> anyhow::Result<()> {
             println!();
             print!("{}", String::from_utf8_lossy(&resp.body));
             Ok(())
+        }
+        Command::Why {
+            url,
+            admin,
+            headers,
+            peer,
+            json,
+        } => {
+            let mut parsed = Vec::new();
+            for h in headers {
+                let (n, v) = h
+                    .split_once(':')
+                    .ok_or_else(|| anyhow::anyhow!("-H {h:?} is not `Name: value`"))?;
+                parsed.push((n.trim().to_string(), v.trim().to_string()));
+            }
+            explain::run(
+                &admin,
+                explain::Question {
+                    url,
+                    headers: parsed,
+                    peer,
+                },
+                json,
+            )
         }
         Command::ConfigCheck { file } => {
             let raw = config::FileConfig::load(&file)?;

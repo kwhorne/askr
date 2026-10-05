@@ -5,6 +5,43 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Added
+
+- **`askr why <url>`: what the server decided about one request, and why.** Most
+  questions about a request — why was this not cached, which address did the rate
+  limiter count, which site served it — had answers Askr computed on every request and
+  then threw away. Now one request can be asked to keep them:
+
+  ```
+  cache      not cacheable
+               it carries the cookie `laravel_session`, which is not in [cache]
+               ignore_cookies — …
+  store      not stored
+               the response has no Askr-Cache header, and no [[cache.rule]] with a
+               ttl matches this path — caching is opt-in, per response or per path
+  ```
+
+  The steps cover the client address (and whether `X-Forwarded-For` was believed), the
+  rate limit, the site, static file or PHP, cacheability and the key after
+  `strip_query_params`, HIT/MISS/STALE/coalesced, PHP's status and time, and the store
+  verdict. The reasons come from the code that made each decision — `maybe_store` now
+  returns what it did instead of returning early in silence — not from a second copy of
+  the rules. `-H` sends headers (a `Cookie` shows what a returning visitor gets), and
+  `--peer` explains the request as the load balancer's, so `trusted_proxies` applies as
+  in production. Also `GET /api/why` on the admin plane, which the command calls.
+
+  How it is kept safe: the admin plane sends the probe through the server's own listener
+  with a secret the master makes before forking; a worker honours it only with that
+  secret, and removes the header from *every* request — a guessed one never reaches PHP
+  (checked end to end: with the removal made conditional, the test sees
+  `HTTP_ASKR_EXPLAIN` in `$_SERVER` and fails). The trace is added after the cache store,
+  so a cached copy never carries it. It is a real GET: it runs PHP, can fill the cache
+  and counts against a rate limit.
+
+### Fixed
+
+- STABILITY.md listed a `status` subcommand that does not exist.
+
 ## 1.7.6 — 2026-10-06
 
 A reload could leave one worker on the previous release, and a graceful stop could hang

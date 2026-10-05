@@ -65,6 +65,7 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 | `GET` | `/api/status` | Supervisor status as JSON (incl. per-worker RSS). |
 | `GET` | `/api/metrics` | Traffic metrics as JSON (throughput, latency, PHP vs I/O). |
 | `POST` | `/api/reload` | Trigger a graceful rolling reload. |
+| `GET` | `/api/why?url=…` | What the server decides about one request, and why. What `askr why` calls. |
 
 ### `GET /api/status`
 
@@ -218,6 +219,24 @@ curl -X POST http://127.0.0.1:9000/api/reload
 Triggers the same graceful **rolling reload** as `SIGHUP`: workers are restarted
 one at a time, so there's no downtime. Use this to pick up new PHP code after a
 deploy.
+
+### `GET /api/why`
+
+```bash
+curl -s 'http://127.0.0.1:9000/api/why?url=/products&h=Cookie:%20laravel_session%3Dabc'
+```
+
+Sends a GET for `url` (a path, or an `http(s)://host/path` URL whose host becomes the
+`Host` header) through this server's own listener and returns the decisions the worker
+made, as `{method, host, path, status, elapsed_ms, bytes, content_type, cache, steps}`;
+each step is `{stage, outcome, why?}`. `h=Name: value` adds a request header (repeatable)
+and `peer=<ip>` explains the request as if it came from that address. Gated like every
+other `/api/` endpoint.
+
+The probe is marked with a secret the master makes at startup and the workers inherit;
+any other `Askr-Explain` header is removed before PHP sees it and changes nothing. It is a
+real request — it runs PHP and can fill the cache — which is why only GET is offered. See
+[`askr why`](CLI.md#askr-why).
 
 ## The dashboard
 

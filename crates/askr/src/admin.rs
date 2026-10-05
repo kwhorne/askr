@@ -27,6 +27,8 @@ use tokio::net::TcpListener;
 #[derive(Clone)]
 pub struct Info {
     pub server_listen: SocketAddr,
+    /// Whether that listener speaks TLS, for `askr why`'s probe.
+    pub server_tls: bool,
     pub mode: &'static str,
     pub record_dir: Option<std::path::PathBuf>,
     /// The sandbox as *configured*. What the workers achieved comes from the metrics
@@ -148,6 +150,7 @@ async fn handle(
         (&Method::GET, "/api/metrics") => json(metrics_json()),
         (&Method::GET, "/metrics") => prometheus(),
         (&Method::GET, "/api/errors") => json(errors_json(&info)),
+        (&Method::GET, "/api/why") => why(&req, &info).await,
         (&Method::POST, "/api/reload") => {
             crate::supervisor::trigger_reload();
             json(r#"{"ok":true,"action":"reload"}"#.to_string())
@@ -158,6 +161,27 @@ async fn handle(
             .unwrap(),
     };
     Ok(resp)
+}
+
+/// `askr why`: send the request through this server and report its decisions.
+async fn why(req: &Request<hyper::body::Incoming>, info: &Info) -> Response<Full<Bytes>> {
+    let error = |status: StatusCode, msg: String| {
+        Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(to_json(
+                &serde_json::json!({ "error": msg }),
+            ))))
+            .unwrap()
+    };
+    let q = match crate::explain::Question::from_query(req.uri().query().unwrap_or("")) {
+        Ok(q) => q,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match crate::explain::probe(info.server_listen, info.server_tls, &q).await {
+        Ok(report) => json(to_json(&report)),
+        Err(e) => error(StatusCode::BAD_GATEWAY, e),
+    }
 }
 
 fn deny(msg: &'static str) -> Response<Full<Bytes>> {
@@ -1186,6 +1210,7 @@ mod tests {
         assert!(crate::squeue::push(hostile.as_bytes(), b"{}", 0) > 0);
         let info = Info {
             server_listen: "127.0.0.1:8000".parse().unwrap(),
+            server_tls: false,
             mode: "worker",
             record_dir: None,
             sandbox: false,
@@ -1219,6 +1244,7 @@ mod tests {
     fn admin_json_endpoints_emit_valid_json() {
         let info = Info {
             server_listen: "127.0.0.1:8000".parse().unwrap(),
+            server_tls: false,
             mode: "per-request",
             record_dir: None,
             sandbox: true,

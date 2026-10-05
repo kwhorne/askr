@@ -382,6 +382,11 @@ pub(crate) fn supervise(
     sidecars: Sidecars,
 ) -> anyhow::Result<()> {
     let web = workers.max(1);
+    // `askr why` goes through the admin plane, which marks its probes with a secret the
+    // workers must already hold — so it is made here, before the first fork.
+    if admin_listen.is_some() {
+        crate::server::why::init_secret();
+    }
     // Queue workers autoscale in [queue_min, queue_max] on backlog. Reserve
     // queue_max contiguous slots; only queue_min run at boot.
     let queue_min = sidecars.queue;
@@ -524,6 +529,7 @@ pub(crate) fn supervise(
     if let Some(addr) = admin_listen {
         let info = crate::admin::Info {
             server_listen: config.listen,
+            server_tls: config.tls_cert.is_some() || config.tls_self_signed,
             mode: if config.worker_script.is_some() {
                 "worker"
             } else {

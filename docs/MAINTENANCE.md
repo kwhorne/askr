@@ -371,6 +371,11 @@ not queue health, and a lane once sat three days undrained with the app's own `/
 answering 200 throughout, because the only thing that knew was a log line nobody read.
 See [Admin](ADMIN.md#queue-liveness-and-warnings).
 
+**A page that is not cached, a client address that is wrong, a request served by the
+wrong site:** `askr why <url>` sends one request through the running server and prints
+what it decided at each step and why. Start there rather than from the config — it shows
+the decision the server actually made. See [CLI](CLI.md#askr-why).
+
 For anything that *looks* fine but behaves wrong — interactivity that dies after the first
 page load, an anonymous visitor served as somebody else, 419 on every form, empty
 downloads, `localhost` in generated URLs — go straight to the [symptom index in

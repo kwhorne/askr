@@ -376,6 +376,9 @@ Details worth knowing:
   desktop client. Background stale-while-revalidate refreshes forward the original
   `User-Agent`, so a refresh re-renders as the same class it's stored under.
 - Responses carry `X-Askr-Cache: HIT|MISS|STALE`; hit-rate shows on the dashboard.
+- **Why was this not cached?** `askr why <url>` asks the running server and prints each
+  decision with its reason — the cookie that made a request personal, the missing
+  `Askr-Cache` header, the `Vary` that made a variant. See [CLI](CLI.md#askr-why).
 - `askr_cache_flush()` clears the response cache too.
 
 ## 2. Request coalescing (singleflight)

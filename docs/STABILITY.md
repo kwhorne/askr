@@ -21,7 +21,8 @@ any of them requires a major bump (`2.0`) and a deprecation period (below).
 ### 1. CLI — subcommands and flags
 
 - Subcommands: `serve`, `test`, `replay`, `doctor`, `tune`, `cache-report`,
-  `config-check`, `upgrade`, `status`.
+  `config-check`, `why`, `upgrade`. For `why`, the `--json` document is the stable
+  surface; the human-readable wording improves freely.
 - Every documented `--flag` on those commands: its name, whether it takes a value,
   and its meaning. Default values may be tuned across minor versions when they are
   purely performance defaults (e.g. the auto worker count) — never when a default

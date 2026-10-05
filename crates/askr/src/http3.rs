@@ -118,7 +118,9 @@ where
         body.extend_from_slice(chunk.copy_to_bytes(chunk.remaining()).as_ref());
     }
 
-    let (parts, _) = req.into_parts();
+    let (mut parts, _) = req.into_parts();
+    // `askr why` is served over TCP only; here its headers are just removed.
+    crate::server::why::strip(&mut parts.headers);
     let hyper_req = Request::from_parts(parts, Full::new(body.freeze()));
 
     let resp = crate::server::handle(hyper_req, rt, peer)

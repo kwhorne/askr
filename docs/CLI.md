@@ -185,6 +185,58 @@ What it looks for, all of it drawn from failures that cost real time:
 The grep is a grep: a queue name built at runtime won't be found, which is why the output
 says "found" rather than "all".
 
+## `askr why`
+
+Ask a running server what it decided about one request, and why:
+
+```bash
+askr why https://shop.test/products?page=2
+askr why /products -H 'Cookie: laravel_session=abc'        # as a returning visitor
+askr why /login --peer 10.0.0.4 -H 'X-Forwarded-For: 203.0.113.9'   # as the LB sees it
+```
+
+```
+GET http://shop.test/products  →  200 (MISS) in 1 ms, 14 bytes
+
+  client     127.0.0.1
+               the connection's own address
+  site       /srv/shop/public (index.php)
+               [server] root: no [[site]] lists the host "shop.test"
+  route      PHP (index.php)
+               no file /products in the docroot
+  cache      not cacheable
+               it carries the cookie `laravel_session`, which is not in [cache]
+               ignore_cookies — a request that carries identity may be shown a
+               personal page. If it identifies no one, list it in [cache]
+               ignore_cookies; a [[cache.rule]] with force = true caches the path
+               regardless
+  php        200 in 0.2 ms
+```
+
+Each line is a decision the server made on that request — which address it believed and
+why, the rate limit it counted against, the site, static file or PHP, whether the request
+may be cached and under which key (after `strip_query_params`), HIT or MISS, and whether
+the response was stored and why not. The reasons come from the code that made the
+decision, not from a second copy of the rules.
+
+It needs the admin plane (`[admin] listen`; `--admin` defaults to `127.0.0.1:9000`, and
+`ASKR_ADMIN_TOKEN` is sent when set). The admin plane sends the request through the
+server's own listener, marked with a secret the workers were forked with, so it is a
+**real GET**: it runs PHP, it can fill the cache, and it counts against a rate limit.
+`--json` prints the report as the admin API returns it.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--admin <ADDR>` | `127.0.0.1:9000` | The running server's admin plane. |
+| `-H, --header <'Name: value'>` | — | A request header to send (repeatable). |
+| `--peer <IP>` | — | Explain the request as if it came from this address, so `trusted_proxies` applies the way it does in production. |
+| `--json` | off | The report as JSON. |
+
+A URL without a host (`/products`) is asked as `localhost`. The scheme in the URL does not
+change the connection — the probe speaks whatever the listener speaks; to explain an
+HTTPS request behind a TLS-terminating proxy, pass `--peer <proxy>` and
+`-H 'X-Forwarded-Proto: https'`.
+
 ## `askr cache-report`
 
 Measure what caching would buy **before** caching anything — and whether it would be
