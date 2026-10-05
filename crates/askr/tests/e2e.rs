@@ -705,6 +705,133 @@ response_slots = 64
     assert_ne!(a.body, b.body, "an un-opted-in page must not be cached");
 }
 
+/// The deploy DEPLOYMENT.md recommends — put the release in place, swap the `current`
+/// symlink, reload — must serve the new release, PHP and static files alike, and keep
+/// the application's shared memory: a deploy is not a new application.
+///
+/// It served the old release for ever. `root` was canonicalised once at startup, so
+/// `/srv/app/current/public` became `/srv/app/releases/a/public`, and every reloaded
+/// worker went on serving release a — while the reload reported success. In worker mode
+/// the application boots from `ASKR_APP_BASE`, which was *not* canonicalised, so the PHP
+/// was new and the static files old: new HTML pointing at assets that did not exist.
+#[test]
+fn a_symlink_swap_deploy_serves_the_new_release_after_a_reload() {
+    let dir = unique_dir("symlink-deploy");
+    let release = |name: &str| {
+        let p = dir.join("app/releases").join(name).join("public");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join("index.php"),
+            format!(
+                r#"<?php
+if (($_SERVER['REQUEST_URI'] ?? '') === '/remember') {{ askr_cache_set('k', 'from {name}'); }}
+echo 'release {name}; cache=' . (askr_cache_get('k') ?? 'none');
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(p.join("asset.txt"), format!("asset {name}")).unwrap();
+    };
+    release("a");
+    release("b");
+    let current = dir.join("app/current");
+    std::os::unix::fs::symlink(dir.join("app/releases/a"), &current).unwrap();
+
+    let mut s = Server::start_in(
+        dir.clone(),
+        &[],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}/current/public"
+workers = "2"
+[cache]
+slots = 64
+"#,
+    );
+    assert_eq!(get(s.port, "/remember").body, "release a; cache=from a");
+    assert_eq!(get(s.port, "/asset.txt").body, "asset a");
+
+    // Swap atomically, the way deploy tools do: a new link renamed over the old one.
+    let next = dir.join("app/current.next");
+    std::os::unix::fs::symlink(dir.join("app/releases/b"), &next).unwrap();
+    std::fs::rename(&next, &current).unwrap();
+    s.signal(libc::SIGHUP);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut body = String::new();
+    while Instant::now() < deadline {
+        body = get(s.port, "/").body;
+        if body.starts_with("release b") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(
+        body,
+        "release b; cache=from a",
+        "after the reload: the new release, with the application's cache intact; log:\n{}",
+        s.log_contents()
+    );
+    assert_eq!(
+        get(s.port, "/asset.txt").body,
+        "asset b",
+        "static files too"
+    );
+    s.stop_gracefully();
+}
+
+/// The same deploy in worker mode, where it was not merely stale but mixed: the app
+/// boots from a path that was never resolved (new release) while static files came from
+/// the resolved root (old release) — new HTML, old assets. Askr-51, reproduced.
+#[test]
+fn a_symlink_swap_deploy_in_worker_mode_is_not_half_new() {
+    let dir = unique_dir("symlink-worker");
+    for name in ["a", "b"] {
+        let r = dir.join("app/releases").join(name);
+        std::fs::create_dir_all(r.join("public")).unwrap();
+        std::fs::write(r.join("public/index.php"), "<?php\n").unwrap();
+        std::fs::write(r.join("public/asset.txt"), format!("asset {name}")).unwrap();
+        std::fs::write(
+            r.join("worker.php"),
+            format!(
+                "<?php\nwhile (askr_handle_request(function (array $r): int {{ echo 'release {name}'; return 200; }})) {{}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let current = dir.join("app/current");
+    std::os::unix::fs::symlink(dir.join("app/releases/a"), &current).unwrap();
+    let mut s = Server::start_in(
+        dir.clone(),
+        &[],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}/current/public"
+workers = "2"
+[worker]
+script = "{ROOT}/current/worker.php"
+"#,
+    );
+    assert_eq!(get(s.port, "/").body, "release a");
+    let next = dir.join("app/current.next");
+    std::os::unix::fs::symlink(dir.join("app/releases/b"), &next).unwrap();
+    std::fs::rename(&next, &current).unwrap();
+    s.signal(libc::SIGHUP);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline && get(s.port, "/").body != "release b" {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(
+        (get(s.port, "/").body, get(s.port, "/asset.txt").body),
+        ("release b".to_string(), "asset b".to_string()),
+        "PHP and static files from the same release; log:\n{}",
+        s.log_contents()
+    );
+    s.stop_gracefully();
+}
+
 /// The bug: the cache key used the raw `Host` header (with port) while routing used
 /// a normalised one, so `PURGE` could never match anything.
 #[test]

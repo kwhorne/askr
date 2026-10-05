@@ -239,7 +239,9 @@ edge; serving directly, they're the application's job.
 ### What sites share, and what they don't
 
 Everything in shared memory is one region per *instance*. Since 1.5.1 it is
-partitioned by **application** — a namespace derived from the site's docroot — so two
+partitioned by **application** — a namespace derived from the site's docroot, as written
+(a symlink in it is part of the name, so a release deploy that swaps `current` keeps the
+application's data) — so two
 sites with different docroots are two applications and cannot see each other's data,
 while two domains serving one docroot are one application and share, as they should.
 
@@ -307,6 +309,9 @@ root    = "/var/www/domene/public"      # ...so its workers run in that namespac
 script = "/opt/askr/examples/askr-scheduler.php"
 # no root here: it defaults to [queue] root
 ```
+
+A `root` here that reaches a site's directory another way — through a symlink, or the
+other way round — is taken as that site's application, spelled as the site spells it.
 
 `[scheduler] root` defaults to `[queue] root`, and that to `[server] root`, so a scheduler
 serving the same application as the queue workers needs no second line. Set it when the

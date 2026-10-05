@@ -603,8 +603,7 @@ impl FileConfig {
             .parse()
             .with_context(|| format!("invalid server.listen {:?}", self.server.listen))?;
 
-        let docroot = std::fs::canonicalize(&self.server.root)
-            .with_context(|| format!("server.root {} not found", self.server.root.display()))?;
+        let docroot = app_root(&self.server.root, "server.root")?;
 
         let front = PathBuf::from(&self.server.front);
         anyhow::ensure!(
@@ -613,30 +612,16 @@ impl FileConfig {
             docroot.join(&front).display()
         );
 
-        // Which application the queue/scheduler sidecars belong to. Canonicalised the same
-        // way as `docroot`, because the namespace is a hash of the canonical path and two
-        // spellings of one directory must not become two applications.
-        let resolve_root = |r: Option<&PathBuf>, key: &str| -> anyhow::Result<Option<PathBuf>> {
-            match r {
-                Some(p) => {
-                    Ok(Some(std::fs::canonicalize(p).with_context(|| {
-                        format!("{key} {} not found", p.display())
-                    })?))
-                }
-                None => Ok(None),
-            }
+        // Which application the queue/scheduler sidecars belong to. Checked here; spelled
+        // below, once the sites are known.
+        let queue_root = match &self.queue.root {
+            Some(p) => Some(app_root(p, "queue.root")?),
+            None => None,
         };
-        let queue_root = resolve_root(self.queue.root.as_ref(), "queue.root")?;
-        let scheduler_root = resolve_root(self.scheduler.root.as_ref(), "scheduler.root")?;
-        // Queue workers and the scheduler are separate processes and may legitimately
-        // belong to different applications, so they get separate roots rather than one
-        // shared value. Collapsing them into one — which the first cut of this did —
-        // means `[scheduler] root` is silently ignored whenever `[queue] root` is also
-        // set: a key that does not do what its name says, which is worse than no key.
-        let sidecar_docroot = queue_root.clone().unwrap_or_else(|| docroot.clone());
-        let scheduler_docroot = scheduler_root
-            .or(queue_root)
-            .unwrap_or_else(|| docroot.clone());
+        let scheduler_root = match &self.scheduler.root {
+            Some(p) => Some(app_root(p, "scheduler.root")?),
+            None => None,
+        };
 
         // Resolve [[site]] virtual hosts (each with its own docroot + front
         // controller). Host-routed per request; full dynamic dispatch is
@@ -644,8 +629,7 @@ impl FileConfig {
         // still served per site).
         let mut sites = Vec::new();
         for s in &self.site {
-            let sroot = std::fs::canonicalize(&s.root)
-                .with_context(|| format!("site root {} not found", s.root.display()))?;
+            let sroot = app_root(&s.root, "site root")?;
             let sfront = PathBuf::from(&s.front);
             anyhow::ensure!(
                 sroot.join(&sfront).is_file(),
@@ -659,6 +643,34 @@ impl FileConfig {
                 front_controller: sfront,
             });
         }
+
+        // The namespace is a hash of the docroot as spelled, so a sidecar root that names
+        // a served application's directory another way — through a symlink, or the
+        // other way round — must take that application's spelling, or it becomes a
+        // second application and its workers never see the jobs (the 1.7.0 fault, by
+        // another route). One the instance does not serve keeps its own.
+        let served: Vec<&PathBuf> = std::iter::once(&docroot)
+            .chain(sites.iter().map(|s| &s.docroot))
+            .collect();
+        let as_served = |p: PathBuf| -> PathBuf {
+            let real = std::fs::canonicalize(&p).ok();
+            served
+                .iter()
+                .find(|d| **d == &p || (real.is_some() && std::fs::canonicalize(d).ok() == real))
+                .map(|d| (*d).clone())
+                .unwrap_or(p)
+        };
+        let queue_root = queue_root.map(as_served);
+        let scheduler_root = scheduler_root.map(as_served);
+        // Queue workers and the scheduler are separate processes and may legitimately
+        // belong to different applications, so they get separate roots rather than one
+        // shared value. Collapsing them into one — which the first cut of this did —
+        // means `[scheduler] root` is silently ignored whenever `[queue] root` is also
+        // set: a key that does not do what its name says, which is worse than no key.
+        let sidecar_docroot = queue_root.clone().unwrap_or_else(|| docroot.clone());
+        let scheduler_docroot = scheduler_root
+            .or(queue_root)
+            .unwrap_or_else(|| docroot.clone());
 
         // Cache rules: validate at load so a typo fails at startup (and under
         // `askr config-check`) instead of becoming a rule that never matches.
@@ -1194,6 +1206,20 @@ fn fields_of<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
     fields
 }
 
+/// A docroot as Askr keeps it: checked to exist, made absolute, and otherwise **as
+/// configured** — a symlink in it stays a symlink.
+///
+/// It used to be canonicalised, which resolved `/srv/app/current/public` to the release
+/// `current` pointed at when the server started. Every reload after that served the
+/// same release: the documented deploy (swap the link, reload) reported success and
+/// changed nothing, and in worker mode — where the application boots from
+/// `ASKR_APP_BASE`, which was never canonicalised — the PHP was new and the static files
+/// old. Kept as written, the link is followed on every request, like nginx's `root`.
+pub(crate) fn app_root(p: &std::path::Path, key: &str) -> Result<PathBuf> {
+    std::fs::metadata(p).with_context(|| format!("{key} {} not found", p.display()))?;
+    Ok(crate::ns::app_path(p))
+}
+
 /// The durable SQL backends this process has selected, by the variable that selects each.
 ///
 /// Empty without the `sql-backend` feature: the variables are then not read at all.
@@ -1430,14 +1456,56 @@ script = "{site}/index.php"
         let r = resolve("sidecar-named", &named).expect("naming the application is accepted");
         assert_eq!(
             r.config.sidecar_docroot,
-            std::fs::canonicalize(&site).unwrap(),
+            crate::ns::app_path(&site),
             "queue workers take the named application"
         );
         assert_eq!(
             r.config.scheduler_docroot,
-            std::fs::canonicalize(&site).unwrap(),
+            crate::ns::app_path(&site),
             "and the scheduler inherits it when it has no root of its own"
         );
+    }
+
+    /// A `[queue] root` that reaches a site's directory by another spelling — through a
+    /// symlink, or the site's own root being one — is that site's application, not a
+    /// second one. The namespace is a hash of the spelling, so taking the other spelling
+    /// would strand every job the site pushes.
+    #[test]
+    fn a_sidecar_root_spelled_another_way_joins_the_site_it_names() {
+        let site = app_dir("spelled-site");
+        let link = site.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&site, &link).unwrap();
+        let body = format!(
+            r#"
+[server]
+root = "{{ROOT}}"
+
+[[site]]
+hosts = ["b.test"]
+root = "{site}"
+
+[queue]
+root = "{link}"
+slots = 64
+workers = 1
+script = "{site}/index.php"
+"#,
+            site = site.display(),
+            link = link.display()
+        );
+        let r = resolve("spelled", &body).unwrap();
+        assert_eq!(r.config.sites[0].docroot, crate::ns::app_path(&site));
+        assert_eq!(
+            r.config.sidecar_docroot, r.config.sites[0].docroot,
+            "the queue workers are the site's application"
+        );
+        assert_eq!(
+            crate::ns::for_docroot(&r.config.sidecar_docroot),
+            crate::ns::for_docroot(&r.config.sites[0].docroot)
+        );
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&site);
     }
 
     /// `[scheduler] root` has to be honoured when `[queue] root` is also set.
@@ -1471,13 +1539,10 @@ script = "{s}/index.php"
             ),
         )
         .expect("two roots is a valid configuration");
-        assert_eq!(
-            r.config.sidecar_docroot,
-            std::fs::canonicalize(&qapp).unwrap()
-        );
+        assert_eq!(r.config.sidecar_docroot, crate::ns::app_path(&qapp));
         assert_eq!(
             r.config.scheduler_docroot,
-            std::fs::canonicalize(&sapp).unwrap(),
+            crate::ns::app_path(&sapp),
             "[scheduler] root must not be overridden by [queue] root"
         );
     }

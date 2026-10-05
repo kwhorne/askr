@@ -5,6 +5,33 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **A release deploy through a symlink served the old release after every reload, and
+  reported success.** `root = "/srv/app/current/public"` was resolved once at startup to
+  the release `current` pointed at, so the documented deploy — swap the link, reload —
+  changed nothing. In worker mode it was worse than nothing: the application boots from
+  `ASKR_APP_BASE`, which was never resolved, so the PHP was the new release and the
+  static files the old one, which is the mixed content once seen after a reload on a
+  live deployment and never reproduced (Askr-51). The root is now kept as written —
+  checked, made absolute, symlinks left alone — and followed on every request, like
+  nginx's `root`. Reproduced first: an end-to-end test that swaps `current` and reloads
+  served release a before the fix and serves release b, PHP and static files, after it.
+
+  The application's namespace in shared memory is now derived from the same spelling,
+  so a deploy is no longer a new application: cache, sessions and queued jobs survive
+  the swap (the same test reads back a value written before it). A `[queue]` or
+  `[scheduler] root` that names a site's directory another way takes the site's
+  spelling, so its workers still see the site's jobs — a test plants a symlink for this
+  and fails without it. For a root with a symlink in it the namespace changes once on
+  this upgrade; drain a persisted queue ring first (UPGRADING.md).
+
+- **The namespace hash no longer depends on the Rust toolchain.** It was
+  `DefaultHasher`, whose algorithm std explicitly does not promise across releases — a
+  toolchain update could have moved every application to a new namespace and stranded a
+  persisted queue's jobs. It is now SipHash-1-3 written out, held by a test to the
+  value `DefaultHasher` gives today, so no root without a symlink changes namespace.
+
 ## 1.7.4 — 2026-09-28
 
 Two things that used to be silent now say so, and one thing that used to be loud is now

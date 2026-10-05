@@ -131,6 +131,31 @@ it means we added something that isn't additive.
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
 
+### To the next release
+
+**A docroot behind a symlink now follows the symlink.** If `root` (or a `[[site]] root`)
+goes through a link that your deploys swap — `/srv/app/current/public` — a reload now
+serves the new release. Before, the root was resolved to the release it pointed at when
+Askr started, and every reload served that release again; see
+[Deployment](DEPLOYMENT.md#zero-downtime-deploys). If you worked around that by
+restarting instead of reloading, a reload is enough now.
+
+Two things move with it, both only for a root that goes through a symlink:
+
+- `DOCUMENT_ROOT` and `SCRIPT_FILENAME` show the path as configured
+  (`/srv/app/current/public/index.php`) rather than the release directory — what nginx's
+  `$document_root` gives. Laravel takes its paths from `__DIR__`, which PHP resolves
+  itself, so it does not notice.
+- **The application's shared-memory namespace changes once**, because it is now derived
+  from the path as written. Everything in shared memory is rebuilt on a restart anyway,
+  with one exception: **a persisted queue ring** (`[queue] persist`). Jobs in it were
+  pushed under the old namespace and would not be seen by the upgraded workers, so drain
+  the queue before this upgrade, as [Maintenance](MAINTENANCE.md#queues) already asks
+  for any upgrade. A saved response cache (`[cache] persist`) simply starts cold.
+
+A root with no symlink in it keeps its namespace exactly — the hash is the same one,
+now written out so that a future Rust toolchain cannot change it either.
+
 ### To 1.7.4
 
 **An unknown key in `askr.toml` is now a warning, not an error.** The server starts, the

@@ -1330,9 +1330,10 @@ fn resolve_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
             }
         }
     };
-    let canonical = std::fs::canonicalize(&root)
-        .map_err(|e| anyhow::anyhow!("bad --root {}: {e}", root.display()))?;
-    Ok(canonical)
+    // Checked, made absolute, and otherwise kept as given — see `config::app_root` for
+    // why a symlink in it must stay one.
+    std::fs::metadata(&root).map_err(|e| anyhow::anyhow!("bad --root {}: {e}", root.display()))?;
+    Ok(ns::app_path(&root))
 }
 
 /// Identify the deployed application, so a saved response cache can't be restored

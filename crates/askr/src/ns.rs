@@ -9,7 +9,9 @@
 //!
 //! The namespace is derived from the application's **docroot**, not from the host: two
 //! domains serving one docroot are one application and should share; two docroots are
-//! two applications and must not. That makes it automatic — nothing to configure, and
+//! two applications and must not. It is the docroot *as configured* — made absolute, but
+//! with symlinks left alone — so `/srv/app/current/public` stays one application across
+//! deploys that swap `current` from one release to the next. That makes it automatic — nothing to configure, and
 //! nothing to get wrong — and it makes the sidecars fall out naturally: a queue worker
 //! belongs to the application at the configured docroot, and takes that namespace.
 //!
@@ -23,7 +25,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 
@@ -49,18 +51,18 @@ pub struct App([u8; PREFIX_LEN - 1]);
 impl App {
     /// The application rooted at `docroot`.
     ///
-    /// Canonicalised first, so `/var/www/app/public` and `/var/www/app/public/` — or a
-    /// symlink to either — agree, then hashed. Memoised: this is on the request path, and
-    /// canonicalisation is a syscall.
+    /// Made absolute and lexically tidied first ([`app_path`]), so
+    /// `/var/www/app/public` and `/var/www/app/public/` agree, then hashed. Symlinks are
+    /// *not* resolved: that is what a release deploy swaps, and resolving it made every
+    /// deploy a new application — and, worse, pinned the server to the release it
+    /// started on (see `config::app_root`). Memoised: this is on the request path.
     pub fn for_docroot(docroot: &Path) -> App {
         let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
         if let Some(app) = memo.lock().ok().and_then(|m| m.get(docroot).copied()) {
             return app;
         }
-        let canonical = std::fs::canonicalize(docroot).unwrap_or_else(|_| docroot.to_path_buf());
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        canonical.as_os_str().hash(&mut h);
-        let hex = format!("{:016x}", h.finish());
+        let path = app_path(docroot);
+        let hex = format!("{:016x}", path_hash(path.as_os_str()));
         let app = App::parse(&hex).expect("sixteen hex digits");
         if let Ok(mut m) = memo.lock() {
             m.insert(docroot.to_path_buf(), app);
@@ -116,6 +118,71 @@ impl std::fmt::Debug for App {
 /// the reporting scans — so this is the bridge's context, not a convenience for Rust.
 static CURRENT: RwLock<Option<App>> = RwLock::new(None);
 static MEMO: OnceLock<Mutex<HashMap<PathBuf, App>>> = OnceLock::new();
+
+/// `p` made absolute and tidied — `.` and repeated or trailing separators dropped —
+/// without touching the filesystem, so a symlink in it stays a symlink. The one
+/// definition of how a docroot is spelled, for serving and for identity alike.
+pub fn app_path(p: &Path) -> PathBuf {
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    abs.components().collect()
+}
+
+/// The hash a namespace is made of: SipHash-1-3 with zero keys over the path's bytes,
+/// length-prefixed.
+///
+/// That is exactly what `DefaultHasher::new()` computes for `OsStr::hash` today — the
+/// test below holds the two to the same answers — written out because std promises
+/// nothing about that algorithm across releases. A toolchain that changed it would have
+/// moved every application to a new namespace on upgrade, and stranded the jobs in a
+/// persisted queue ring under the old one.
+fn path_hash(p: &std::ffi::OsStr) -> u64 {
+    let bytes = p.as_encoded_bytes();
+    let mut msg = Vec::with_capacity(8 + bytes.len());
+    msg.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    msg.extend_from_slice(bytes);
+    sip13(&msg)
+}
+
+/// SipHash-1-3, keys (0, 0).
+fn sip13(msg: &[u8]) -> u64 {
+    let (mut v0, mut v1, mut v2, mut v3) = (
+        0x736f_6d65_7073_6575u64,
+        0x646f_7261_6e64_6f6du64,
+        0x6c79_6765_6e65_7261u64,
+        0x7465_6462_7974_6573u64,
+    );
+    let round = |v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64| {
+        *v0 = v0.wrapping_add(*v1);
+        *v1 = v1.rotate_left(13) ^ *v0;
+        *v0 = v0.rotate_left(32);
+        *v2 = v2.wrapping_add(*v3);
+        *v3 = v3.rotate_left(16) ^ *v2;
+        *v0 = v0.wrapping_add(*v3);
+        *v3 = v3.rotate_left(21) ^ *v0;
+        *v2 = v2.wrapping_add(*v1);
+        *v1 = v1.rotate_left(17) ^ *v2;
+        *v2 = v2.rotate_left(32);
+    };
+    let mut chunks = msg.chunks_exact(8);
+    for c in &mut chunks {
+        let m = u64::from_le_bytes(c.try_into().expect("eight bytes"));
+        v3 ^= m;
+        round(&mut v0, &mut v1, &mut v2, &mut v3);
+        v0 ^= m;
+    }
+    let mut last = (msg.len() as u64 & 0xff) << 56;
+    for (i, b) in chunks.remainder().iter().enumerate() {
+        last |= (*b as u64) << (8 * i);
+    }
+    v3 ^= last;
+    round(&mut v0, &mut v1, &mut v2, &mut v3);
+    v0 ^= last;
+    v2 ^= 0xff;
+    for _ in 0..3 {
+        round(&mut v0, &mut v1, &mut v2, &mut v3);
+    }
+    v0 ^ v1 ^ v2 ^ v3
+}
 
 /// Shorthand for [`App::for_docroot`].
 pub fn for_docroot(docroot: &Path) -> App {
@@ -228,6 +295,61 @@ pub(crate) mod tests {
         assert!(a.as_str().bytes().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(a, for_docroot(Path::new("/var/www/one/public")), "stable");
         assert_ne!(a, b, "two applications, two identities");
+    }
+
+    /// The namespace hash is `DefaultHasher`'s answer today, held fixed: same value for
+    /// every path, so no application moves on the upgrade that introduces it — and
+    /// none will move when a toolchain changes the std algorithm.
+    #[test]
+    fn the_namespace_hash_is_the_one_applications_already_have() {
+        use std::hash::{Hash, Hasher};
+        let mut paths: Vec<String> = vec![
+            String::new(),
+            "/".into(),
+            "/var/www/app/public".into(),
+            "/srv/blåbær/public".into(),
+            "/private/var/folders/xy/T/askr-cfg-one-123/".into(),
+        ];
+        // Every length across several SipHash blocks, so each tail size is covered.
+        for n in 0..70 {
+            paths.push(format!("/{}", "x".repeat(n)));
+        }
+        for p in &paths {
+            let os = std::ffi::OsStr::new(p);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            os.hash(&mut h);
+            assert_eq!(path_hash(os), h.finish(), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn a_symlink_in_the_docroot_is_part_of_its_name() {
+        let base = std::env::temp_dir().join(format!("askr-ns-link-{}", std::process::id()));
+        let (a, b) = (base.join("releases/a"), base.join("releases/b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let current = base.join("current");
+        let _ = std::fs::remove_file(&current);
+        std::os::unix::fs::symlink(&a, &current).unwrap();
+        let before = App::for_docroot(&current.join("."));
+        std::fs::remove_file(&current).unwrap();
+        std::os::unix::fs::symlink(&b, &current).unwrap();
+        // Through a fresh spelling, so the memo cannot answer for it.
+        let after = App::for_docroot(&base.join("current/"));
+        assert_eq!(
+            before, after,
+            "a deploy that swaps the link is the same application"
+        );
+        assert_ne!(
+            after,
+            App::for_docroot(&b),
+            "the release directory is another name"
+        );
+        assert_eq!(
+            app_path(Path::new("/srv/app/./current//public/")),
+            Path::new("/srv/app/current/public")
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

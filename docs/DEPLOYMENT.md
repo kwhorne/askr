@@ -93,18 +93,22 @@ sudo systemctl enable --now askr
 1. Put the new code in place (`rsync`, `git pull`, atomic symlink swap, …).
 2. Reload: `systemctl reload askr` (or `curl -X POST http://127.0.0.1:9000/api/reload`).
 
-> **One unexplained observation (Askr-51).** On a live deployment a worker was seen
-> still serving the previous release after a reload had reported success. It has not
-> been reproduced -- a regression test that records every PID, sends `SIGHUP` and
-> polls until no pre-reload PID remains passes repeatedly against the same fleet
-> shape, sidecars included -- and the diagnosis originally reasoned from it has been
-> withdrawn. The mixed content is unexplained rather than explained.
->
-> A reload that leaves one worker on the old code serves the previous release from a
-> fraction of requests *and reports success*, which is why it is written down here
-> rather than left in the issue tracker. Until it is understood, a deploy that must
-> be certain should recreate the process rather than reload it, and accept the
-> dropped connections that costs.
+**Release directories behind a symlink** (`root = "/srv/app/current/public"`, with
+`current` swapped from one release to the next — Envoyer, Deployer, Forge's zero-downtime
+deploys) work from 1.7.5: the root is kept as written and the link is followed on every
+request, the way nginx's `root` is. The application keeps its shared memory across the
+swap — cache, sessions and queued jobs belong to `current/public`, not to a release.
+
+> **Before 1.7.5 they did not, and it said otherwise.** The root was resolved once at
+> startup, so `current/public` became the release it pointed at then, and every reload
+> served that release again while reporting success. In worker mode the application
+> boots from `ASKR_APP_BASE`, which was never resolved, so the PHP was the new release
+> and the static files the old one — new HTML pointing at built assets that did not
+> exist. That is the mixed content once observed on a live deployment after a reload
+> (Askr-51), which a PID-tracking reload test could not reproduce because the workers
+> really were all new. Whether it is what that deployment hit cannot be confirmed after
+> the fact; it is the one mechanism found that produces exactly that, and
+> `a_symlink_swap_deploy_serves_the_new_release_after_a_reload` now holds it shut.
 
 Workers restart **one at a time**, each draining in-flight requests before
 exiting; the master keeps the listen socket open and waits for each fresh worker
