@@ -900,6 +900,44 @@ listen = "127.0.0.1:{ADMIN}"
     s.stop_gracefully();
 }
 
+/// An `app_id` names the application wherever it lives: two servers with different
+/// docroots and the same id file their data under the same application, and a server
+/// without one under its docroot's. Read off `/api/status`, which reports the
+/// application each queued job belongs to — so this is the id reaching the request path,
+/// not a unit of `ns` in isolation.
+#[test]
+fn an_app_id_names_the_application_wherever_it_lives() {
+    let app_of = |name: &str, app_id: Option<&str>| -> String {
+        let s = Server::start(
+            name,
+            &[("index.php", "<?php askr_queue_push('mail', 'job', 0); echo 'queued';")],
+            &format!(
+                "[server]\nlisten = \"127.0.0.1:{{PORT}}\"\nroot = \"{{ROOT}}\"\nworkers = \"1\"\n{}\
+                 [admin]\nlisten = \"127.0.0.1:{{ADMIN}}\"\n[queue]\nslots = 16\n",
+                app_id.map(|id| format!("app_id = \"{id}\"\n")).unwrap_or_default()
+            ),
+        );
+        s.wait_admin();
+        assert_eq!(get(s.port, "/").body, "queued");
+        let status: serde_json::Value = serde_json::from_str(&s.admin_status()).unwrap();
+        let q = status["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["queue"] == "mail")
+            .unwrap_or_else(|| panic!("no mail queue in {status:#}"))
+            .clone();
+        q["app"].as_str().expect("an application").to_string()
+    };
+    let one = app_of("appid-one", Some("shop"));
+    let two = app_of("appid-two", Some("shop"));
+    let other = app_of("appid-other", Some("blog"));
+    let unnamed = app_of("appid-none", None);
+    assert_eq!(one, two, "the same name in two places is one application");
+    assert_ne!(one, other);
+    assert_ne!(one, unnamed, "without a name, the docroot names it");
+}
+
 /// The bug: the cache key used the raw `Host` header (with port) while routing used
 /// a normalised one, so `PURGE` could never match anything.
 #[test]

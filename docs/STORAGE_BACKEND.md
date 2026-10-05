@@ -30,11 +30,16 @@ written to match `squeue.rs` / `cache.rs`.
 
 ### One application per L2 database
 
-With one difference that matters: **L1 is separated per application, L2 is not.** Shared
-memory keys every entry, job and channel by the application it belongs to (derived from
-its docroot). The SQL tables are keyed only by the name PHP chose, so two applications
-that both use the queue `default`, the cache key `config` or the channel `orders` are
-using the same rows:
+With one difference that matters: **L1 is separated per application; L2 is separated only
+for an application with an `app_id`.** Shared memory keys every entry and job by the
+application it belongs to, named by its docroot. A docroot is a local path, which another
+host sharing the database need not have, so the SQL tables are keyed by the name PHP chose
+— unless the application has a name of its own (`[server] app_id`, `[[site]] app_id`).
+Then its cache keys and queue names carry that name, the same on every host, and its
+`flush` takes only its own rows.
+
+Without one, two applications that both use the queue `default`, the cache key `config` or
+the channel `orders` are using the same rows:
 
 - **cache** — one application reads another's cached values, and a flush in any of them
   empties the table for all;
@@ -42,15 +47,22 @@ using the same rows:
   wrong application;
 - **broadcast** — an event reaches the other application's subscribers on that channel.
 
-So give each application its own Askr instance and its own database files. Askr warns at
-startup, and `askr config-check` says the same, when an L2 variable is set and the
-instance serves more than one application (`[[site]]`, or a `[queue] root` /
-`[scheduler] root` that differs from `[server] root`). It cannot see the other way to get
-there — two separate instances pointed at the same file — so don't.
+So give each application an `app_id`, or its own Askr instance and its own database files.
+**Broadcasting is not separated either way** — it is not namespaced in shared memory
+either, because one instance has one Pusher secret and so serves one application's
+realtime traffic — so two applications on one `ASKR_BROADCAST_DB` still share channels.
 
-Separating L2 per application needs an application id that is the same on every host and
-across deploys, which a hash of a local path is not. Until there is one, this is a
-limitation rather than a bug to be worked around.
+Askr warns at startup, and `askr config-check` says the same, when an L2 variable is set
+and the instance serves more than one application (`[[site]]`, or a `[queue] root` /
+`[scheduler] root` that differs from `[server] root`) that it does not keep apart: the
+cache while any of them has no `app_id` (its flush empties every row), the queue while
+two have none, broadcasting always. It cannot see the other way to get there — two
+separate instances pointed at the same file — so give those an `app_id` each, or don't.
+
+Adding an `app_id` to an application that already uses L2 moves its rows to a new name:
+its cached values start cold, and **jobs already queued under the bare name are not seen
+by its workers** — drain the queue before adding one.
+
 
 ## Queue (elyra-9) — implemented
 

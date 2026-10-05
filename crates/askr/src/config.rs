@@ -66,6 +66,9 @@ pub struct SiteSpec {
     pub root: PathBuf,
     #[serde(default = "default_front")]
     pub front: String,
+    /// This application's name — see [`ServerSection::app_id`].
+    #[serde(default)]
+    pub app_id: Option<String>,
 }
 
 /// A declarative host redirect (e.g. `www.domene.no` → `https://domene.no`). The
@@ -217,6 +220,12 @@ pub struct ServerSection {
     /// anyone could rotate a fake client IP and walk straight past a rate limit.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// A name for this application (`shop`), used instead of its docroot to tell its data
+    /// apart from other applications'. The same name is the same application on every
+    /// host — which lets the durable SQL backends keep applications apart, as shared
+    /// memory does. Unset, the docroot names it, as before.
+    #[serde(default)]
+    pub app_id: Option<String>,
     /// Structured (JSON) access log destination: a file path, or "-" for stdout.
     pub access_log: Option<PathBuf>,
     /// Serve HTTP/3 (QUIC) on the TLS port (requires TLS; build with `http3`).
@@ -471,6 +480,7 @@ impl Default for ServerSection {
             front: default_front(),
             traffic_log: None,
             trusted_proxies: Vec::new(),
+            app_id: None,
             workers: default_workers(),
             workers_min: None,
             workers_max: None,
@@ -641,7 +651,49 @@ impl FileConfig {
                 hosts: s.hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
                 docroot: sroot,
                 front_controller: sfront,
+                app_id: s.app_id.clone(),
             });
+        }
+
+        // `app_id`s: well-formed, one per application, and never one for two. An id names
+        // a docroot, so two domains serving one docroot share it, as they share data.
+        let mut ids: Vec<(&PathBuf, &str, String)> = Vec::new();
+        let named =
+            std::iter::once((
+                &docroot,
+                self.server.app_id.as_deref(),
+                "[server]".to_string(),
+            ))
+            .chain(self.site.iter().zip(&sites).enumerate().map(
+                |(i, (spec, site))| {
+                    (
+                        &site.docroot,
+                        spec.app_id.as_deref(),
+                        format!("[[site]] #{}", i + 1),
+                    )
+                },
+            ));
+        for (root, id, place) in named {
+            let Some(id) = id else { continue };
+            anyhow::ensure!(
+                crate::ns::valid_app_id(id),
+                "{place} app_id {id:?} is not a valid name: lowercase letters, digits, `.`, \
+                 `_` and `-`, starting with a letter or digit, at most 64 characters"
+            );
+            for (r, other, where_) in &ids {
+                anyhow::ensure!(
+                    !(*r == root && *other != id),
+                    "{place} and {where_} serve the same docroot {} but name it {id:?} and \
+                     {other:?} — one docroot is one application, with one name",
+                    root.display()
+                );
+                anyhow::ensure!(
+                    !(*r != root && *other == id),
+                    "{place} and {where_} both have app_id {id:?} but serve different \
+                     docroots — they would share every cache key, session and queue"
+                );
+            }
+            ids.push((root, id, place));
         }
 
         // The namespace is a hash of the docroot as spelled, so a sidecar root that names
@@ -1025,6 +1077,7 @@ impl FileConfig {
                     .iter()
                     .filter_map(|p| crate::server::parse_cidr(p))
                     .collect(),
+                app_id: self.server.app_id.clone(),
             },
             workers,
             workers_min: self.server.workers_min.unwrap_or(workers).max(1),
@@ -1253,6 +1306,20 @@ pub fn l2_backends() -> Vec<&'static str> {
 /// `l2` is what [`l2_backends`] returned; it is a parameter so this can be tested without
 /// touching the environment.
 pub fn l2_sharing_warning(config: &Config, l2: &[&str]) -> Option<String> {
+    // Each application, by docroot, and the name it was given if any. A sidecar root is
+    // the application it names; an id names a docroot, so a site sharing one shares it.
+    let id_of = |root: &std::path::Path| -> Option<&str> {
+        if root == config.docroot {
+            if let Some(id) = &config.app_id {
+                return Some(id);
+            }
+        }
+        config
+            .sites
+            .iter()
+            .find(|s| s.docroot == root && s.app_id.is_some())
+            .and_then(|s| s.app_id.as_deref())
+    };
     let mut apps: Vec<&std::path::Path> = vec![
         &config.docroot,
         &config.sidecar_docroot,
@@ -1264,17 +1331,22 @@ pub fn l2_sharing_warning(config: &Config, l2: &[&str]) -> Option<String> {
     if apps.len() < 2 || l2.is_empty() {
         return None;
     }
+    let unnamed = apps.iter().filter(|a| id_of(a).is_none()).count();
     let mut effects = Vec::new();
     for var in l2 {
         effects.push(match *var {
-            "ASKR_CACHE_DB" => {
+            // An unnamed application's rows carry no namespace, so its flush empties the
+            // table for everyone, named or not — one is enough.
+            "ASKR_CACHE_DB" if unnamed >= 1 => {
                 "cache keys are shared, so one application reads another's cached values, \
                  and a cache flush in any of them empties the cache for all"
             }
-            "ASKR_QUEUE_DB" => {
+            "ASKR_QUEUE_DB" if unnamed >= 2 => {
                 "queue names are shared, so a queue worker takes jobs pushed by another \
                  application and runs them in the wrong one"
             }
+            // Broadcasting is not namespaced at all, here or in shared memory: one instance
+            // has one Pusher secret, so it serves one application's realtime traffic.
             "ASKR_BROADCAST_DB" => {
                 "channel names are shared, so a broadcast reaches the other applications' \
                  subscribers on the same channel"
@@ -1282,11 +1354,15 @@ pub fn l2_sharing_warning(config: &Config, l2: &[&str]) -> Option<String> {
             _ => continue,
         });
     }
+    if effects.is_empty() {
+        return None;
+    }
     Some(format!(
         "{} {} set and this instance serves {} applications ([[site]] / [queue] root / \
-         [scheduler] root), but the SQL backends are not separated per application: {}. \
-         Run each application as its own Askr instance with its own database files, or \
-         leave {} unset to use shared memory, which is separated per application.",
+         [scheduler] root), but the SQL backends do not keep them apart: {}. Give each \
+         application an app_id ([server] app_id, [[site]] app_id) to separate its cache and \
+         queue rows, run each as its own instance with its own database files, or leave {} \
+         unset to use shared memory, which is separated per application.",
         l2.join(" and "),
         if l2.len() == 1 { "is" } else { "are" },
         apps.len(),
@@ -1300,7 +1376,7 @@ pub fn l2_sharing_warning(config: &Config, l2: &[&str]) -> Option<String> {
 /// worked out a second time. See `assemble` for which raw fields these stand in for.
 pub(crate) struct Checked {
     pub listen: SocketAddr,
-    /// Canonical, so the per-application namespace (a hash of it) has one spelling.
+    /// As configured, made absolute ([`app_root`]); the namespace is a hash of it.
     pub docroot: PathBuf,
     /// Relative to `docroot`, and known to exist there.
     pub front: PathBuf,
@@ -1369,6 +1445,31 @@ mod tests {
             w.contains("cache flush") && w.contains("subscribers"),
             "{w}"
         );
+
+        // Named applications keep their cache and queue rows apart; broadcasting is not
+        // namespaced, so it is still shared.
+        let body = format!(
+            "[server]\nroot = \"{{ROOT}}\"\napp_id = \"shop\"\n[[site]]\nhosts = [\"b.test\"]\nroot = \"{}\"\napp_id = \"blog\"\n",
+            site.display()
+        );
+        let named = resolve("named", &body).unwrap();
+        assert_eq!(
+            l2_sharing_warning(&named.config, &["ASKR_CACHE_DB", "ASKR_QUEUE_DB"]),
+            None
+        );
+        let w = l2_sharing_warning(&named.config, &["ASKR_QUEUE_DB", "ASKR_BROADCAST_DB"]).unwrap();
+        assert!(
+            w.contains("subscribers") && !w.contains("queue names"),
+            "{w}"
+        );
+        // One unnamed application is enough to share the cache: its flush empties all of it.
+        let body = format!(
+            "[server]\nroot = \"{{ROOT}}\"\napp_id = \"shop\"\n[[site]]\nhosts = [\"b.test\"]\nroot = \"{}\"\n",
+            site.display()
+        );
+        let half = resolve("half", &body).unwrap();
+        assert!(l2_sharing_warning(&half.config, &["ASKR_CACHE_DB"]).is_some());
+        assert_eq!(l2_sharing_warning(&half.config, &["ASKR_QUEUE_DB"]), None);
 
         // No [[site]], but the queue workers belong to a different application.
         let body = format!(
@@ -1505,6 +1606,60 @@ script = "{site}/index.php"
             crate::ns::for_docroot(&r.config.sites[0].docroot)
         );
         let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&site);
+    }
+
+    /// An `app_id` is a name for one application: well-formed, never two names for one
+    /// docroot, never one name for two.
+    #[test]
+    fn an_app_id_names_exactly_one_application() {
+        let site = app_dir("appid-site");
+        let cfg = |server_id: &str, site_root: &std::path::Path, site_id: &str| {
+            format!(
+                "[server]\nroot = \"{{ROOT}}\"\n{server_id}\n[[site]]\nhosts = [\"b.test\"]\nroot = \"{}\"\n{site_id}\n",
+                site_root.display()
+            )
+        };
+        let r = resolve(
+            "appid-ok",
+            &cfg("app_id = \"shop\"", &site, "app_id = \"blog\""),
+        )
+        .unwrap();
+        assert_eq!(r.config.app_id.as_deref(), Some("shop"));
+        assert_eq!(r.config.sites[0].app_id.as_deref(), Some("blog"));
+
+        let e = resolve(
+            "appid-bad",
+            "[server]\nroot = \"{ROOT}\"\napp_id = \"My Shop\"\n",
+        )
+        .err()
+        .expect("refused")
+        .to_string();
+        assert!(
+            e.contains("[server] app_id \"My Shop\" is not a valid name"),
+            "{e}"
+        );
+
+        let e = resolve(
+            "appid-twice",
+            &cfg("app_id = \"shop\"", &site, "app_id = \"shop\""),
+        )
+        .err()
+        .expect("refused")
+        .to_string();
+        assert!(
+            e.contains("both have app_id \"shop\" but serve different docroots"),
+            "{e}"
+        );
+
+        // A site serving the top-level docroot is the same application, so it cannot be
+        // given a different name.
+        let body = "[server]\nroot = \"{ROOT}\"\napp_id = \"shop\"\n[[site]]\nhosts = [\"b.test\"]\nroot = \"{ROOT}\"\napp_id = \"blog\"\n";
+        let e = resolve("appid-split", body)
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(e.contains("serve the same docroot"), "{e}");
         let _ = std::fs::remove_dir_all(&site);
     }
 

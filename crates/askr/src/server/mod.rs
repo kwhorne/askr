@@ -169,6 +169,8 @@ pub struct Config {
     pub redirects: Vec<crate::config::RedirectRule>,
     /// Virtual hosts routed by the `Host` header (empty = single-site).
     pub sites: Vec<Site>,
+    /// `[server] app_id`: this application's name, when it has one.
+    pub app_id: Option<String>,
     /// Query parameters stripped from the response-cache key (trailing `*` globs).
     pub cache_strip_query: Vec<String>,
     /// Cookies that don't defeat response cacheability (trailing `*` globs).
@@ -192,6 +194,23 @@ pub struct Site {
     pub hosts: Vec<String>,
     pub docroot: PathBuf,
     pub front_controller: PathBuf,
+    /// `[[site]] app_id`, when it has one.
+    pub app_id: Option<String>,
+}
+
+impl Config {
+    /// Name the applications that have an `app_id`, before any process uses their data.
+    /// Called once at startup in the process that forks the rest.
+    pub fn name_apps(&self) {
+        if let Some(id) = &self.app_id {
+            crate::ns::name_app(&self.docroot, id);
+        }
+        for s in &self.sites {
+            if let Some(id) = &s.app_id {
+                crate::ns::name_app(&s.docroot, id);
+            }
+        }
+    }
 }
 
 impl Config {

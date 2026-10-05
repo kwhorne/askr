@@ -31,6 +31,7 @@ warning that names it and the key it was probably meant to be — at startup and
 | `listen` | string | `127.0.0.1:8000` | Address to bind. |
 | `root` | path | `public` | Document root (the app's `public/`). |
 | `front` | string | `index.php` | Front controller, relative to `root`. |
+| `app_id` | string | — | A name for this application (`shop`): lowercase letters, digits, `.`, `_`, `-`. Its data is kept apart from other applications' under this name instead of under its docroot, so the same name is the same application on every host and under every path. Needed to keep applications apart in the durable SQL backends; see [Storage backends](STORAGE_BACKEND.md#one-application-per-l2-database). Unset, the docroot names it. |
 | `workers` | string | `auto` | Number of worker processes, or `auto` (= CPU cores). |
 | `max_requests` | int | `0` | Recycle each worker after N requests (`0` = never). |
 | `max_rss` | int | `0` | Recycle a worker gracefully once its RSS exceeds this many MB (`0` = never). Leak-aware; Linux only. |
@@ -230,7 +231,12 @@ root  = "/var/www/domene/public"
 hosts = ["annet.no"]
 root  = "/var/www/annet/public"
 front = "index.php"
+app_id = "annet"                     # optional; see [server] app_id
 ```
+
+A site's `app_id` names its application, as `[server] app_id` does for the top level. An
+id names a docroot, so two sites serving one docroot are one application with one name;
+Askr refuses two names for one docroot, and one name for two.
 
 Static files are served from the matching site's root in any mode. **Full dynamic
 dispatch (a different app per host) works in per-request mode** — each request runs

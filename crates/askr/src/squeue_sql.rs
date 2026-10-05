@@ -234,14 +234,18 @@ fn with_conn<R>(f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> rusqlite:
     })
 }
 
+// Queue names reach the table through `ns::l2_key`: an application with an `app_id`
+// has its own `default`, the same on every host; one without shares the name, as before.
 pub fn push(queue: &[u8], payload: &[u8], delay: u64) -> u64 {
-    with_conn(|c| do_push(c, queue, payload, delay))
+    let queue = crate::ns::l2_key(queue);
+    with_conn(|c| do_push(c, &queue, payload, delay))
         .map(|id| id as u64)
         .unwrap_or(0)
 }
 
 pub fn pop(queue: &[u8], visibility: u64) -> Option<Reserved> {
-    with_conn(|c| do_pop(c, queue, visibility)).unwrap_or(None)
+    let queue = crate::ns::l2_key(queue);
+    with_conn(|c| do_pop(c, &queue, visibility)).unwrap_or(None)
 }
 
 pub fn delete(id: u64) -> bool {
@@ -253,7 +257,8 @@ pub fn release(id: u64, delay: u64) -> bool {
 }
 
 pub fn size(queue: &[u8]) -> u64 {
-    with_conn(|c| do_size(c, queue)).unwrap_or(0) as u64
+    let queue = crate::ns::l2_key(queue);
+    with_conn(|c| do_size(c, &queue)).unwrap_or(0) as u64
 }
 
 /// Every queue holding a job, with its counts — the L2 twin of
@@ -291,8 +296,9 @@ pub fn by_queue() -> Vec<(String, crate::squeue::Counts)> {
 
 /// Per-queue counts; zeros when the backend is unreachable, matching `size()`.
 pub fn counts(queue: &[u8]) -> crate::squeue::Counts {
+    let queue = crate::ns::l2_key(queue);
     let (pending, delayed, reserved, oldest) =
-        with_conn(|c| do_counts(c, queue)).unwrap_or((0, 0, 0, 0));
+        with_conn(|c| do_counts(c, &queue)).unwrap_or((0, 0, 0, 0));
     crate::squeue::Counts {
         pending: pending.max(0) as u64,
         delayed: delayed.max(0) as u64,

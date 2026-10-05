@@ -51,9 +51,14 @@ pub fn stats() -> (usize, usize, u64) {
 pub fn by_queue_with_app() -> Vec<(Option<crate::ns::App>, String, crate::squeue::Counts)> {
     #[cfg(feature = "sql-backend")]
     if crate::squeue_sql::enabled() {
+        // A named application's queues carry its namespace in the table; report it, as
+        // the shared-memory scan does, rather than show the prefix as part of the name.
         return crate::squeue_sql::by_queue()
             .into_iter()
-            .map(|(name, c)| (None, name, c))
+            .map(|(name, c)| {
+                let (app, bare) = crate::ns::split(name.as_bytes());
+                (app, String::from_utf8_lossy(bare).into_owned(), c)
+            })
             .collect();
     }
     crate::squeue::by_queue_with_app()

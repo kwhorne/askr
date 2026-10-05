@@ -87,6 +87,11 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
 
+        /// A name for this application (`shop`), used instead of its docroot to keep its
+        /// data apart — the same name is the same application on every host.
+        #[arg(long)]
+        app_id: Option<String>,
+
         /// Front controller, relative to the document root.
         #[arg(long, default_value = "index.php")]
         front: PathBuf,
@@ -466,6 +471,7 @@ fn main() -> anyhow::Result<()> {
             config: config_file,
             admin,
             root,
+            app_id,
             front,
             listen,
             workers,
@@ -568,6 +574,13 @@ fn main() -> anyhow::Result<()> {
                 if let Some(ss) = &scheduler_script {
                     anyhow::ensure!(ss.is_file(), "scheduler script not found: {}", ss.display());
                 }
+                if let Some(id) = &app_id {
+                    anyhow::ensure!(
+                        ns::valid_app_id(id),
+                        "--app-id {id:?} is not a valid name: lowercase letters, digits, `.`, \
+                         `_` and `-`, starting with a letter or digit, at most 64 characters"
+                    );
+                }
                 let workers = workers.unwrap_or_else(default_workers).max(1);
                 // The command line, said as a config file, so that it is assembled by the
                 // same code as one (`FileConfig::assemble`). Every section is spelled out
@@ -600,6 +613,7 @@ fn main() -> anyhow::Result<()> {
                         sandbox_write,
                         // Config-file only.
                         trusted_proxies: Vec::new(),
+                        app_id,
                     },
                     worker: config::WorkerSection {
                         script: worker_script,
@@ -732,6 +746,9 @@ fn main() -> anyhow::Result<()> {
                 ca_root: r.acme_ca_root,
             };
             let config = r.config;
+            // Before anything derives an application from a docroot: a named one must be
+            // known by its name from the first key it touches.
+            config.name_apps();
             let workers = r.workers;
             let ini = r.ini;
             let admin_listen = r.admin_listen;
@@ -1010,6 +1027,13 @@ fn main() -> anyhow::Result<()> {
             let c = &resolved.config;
             println!("  listen:        {}", c.listen);
             println!("  root:          {}", c.docroot.display());
+            println!(
+                "  application:   {}",
+                match &c.app_id {
+                    Some(id) => format!("{id} (app_id)"),
+                    None => "named by its docroot".to_string(),
+                }
+            );
             println!("  front:         {}", c.front_controller.display());
             println!("  workers:       {}", resolved.workers);
             println!(

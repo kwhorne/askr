@@ -31,7 +31,8 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--config <FILE>` | — | Load all settings from `askr.toml` (other flags ignored). |
-| `--root <DIR>` | `./public` | Document root. |
+| `--root <DIR>` | `./public` | Document root. Kept as given (made absolute): a symlink in it is followed per request, so a release deploy that swaps `current` takes effect on reload. |
+| `--app-id <NAME>` | — | A name for this application; see `[server] app_id` in [Configuration](CONFIGURATION.md#server). |
 | `--front <FILE>` | `index.php` | Front controller, relative to root. |
 | `--listen <ADDR>` | `127.0.0.1:8000` | Address to bind. |
 | `--https` | off | Mark requests as HTTPS in `$_SERVER` (behind a TLS terminator). |

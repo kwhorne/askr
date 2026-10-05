@@ -70,6 +70,19 @@ impl App {
         app
     }
 
+    /// The application named `id` by an `app_id` in the configuration.
+    ///
+    /// Hashed like a docroot, from a different input — `app_id` and a NUL in front — so
+    /// it cannot collide with one. The same `id` gives the same application on every
+    /// host and under every path, which a docroot cannot promise: that is what lets two
+    /// boxes, or the durable SQL backends, agree on whose data is whose.
+    pub fn for_id(id: &str) -> App {
+        let mut input = b"app_id\0".to_vec();
+        input.extend_from_slice(id.as_bytes());
+        let hex = format!("{:016x}", bytes_hash(&input));
+        App::parse(&hex).expect("sixteen hex digits")
+    }
+
     /// Exactly sixteen hex digits, as written into a stored key or passed across the PHP
     /// boundary. Anything else is not an application.
     pub fn parse(s: &str) -> Option<App> {
@@ -136,7 +149,11 @@ pub fn app_path(p: &Path) -> PathBuf {
 /// moved every application to a new namespace on upgrade, and stranded the jobs in a
 /// persisted queue ring under the old one.
 fn path_hash(p: &std::ffi::OsStr) -> u64 {
-    let bytes = p.as_encoded_bytes();
+    bytes_hash(p.as_encoded_bytes())
+}
+
+/// [`path_hash`] over plain bytes.
+fn bytes_hash(bytes: &[u8]) -> u64 {
     let mut msg = Vec::with_capacity(8 + bytes.len());
     msg.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     msg.extend_from_slice(bytes);
@@ -182,6 +199,61 @@ fn sip13(msg: &[u8]) -> u64 {
         round(&mut v0, &mut v1, &mut v2, &mut v3);
     }
     v0 ^ v1 ^ v2 ^ v3
+}
+
+/// Is `id` usable as an `app_id`? Lowercase letters, digits, `.`, `_` and `-`, starting
+/// with a letter or digit, at most 64 bytes — it ends up in logs and in key prefixes.
+pub fn valid_app_id(id: &str) -> bool {
+    let b = id.as_bytes();
+    !b.is_empty()
+        && b.len() <= 64
+        && b[0].is_ascii_alphanumeric()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
+}
+
+static NAMED: RwLock<Vec<App>> = RwLock::new(Vec::new());
+
+/// Make the application at `docroot` the one named `id`, for this process and every
+/// process forked from it. Called at startup, before the workers exist.
+pub fn name_app(docroot: &Path, id: &str) -> App {
+    let app = App::for_id(id);
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut m) = memo.lock() {
+        m.insert(docroot.to_path_buf(), app);
+        m.insert(app_path(docroot), app);
+    }
+    if let Ok(mut n) = NAMED.write() {
+        if !n.contains(&app) {
+            n.push(app);
+        }
+    }
+    app
+}
+
+/// Was `app` named by an `app_id`, rather than derived from where it lives?
+#[cfg(any(feature = "sql-backend", test))]
+pub fn is_named(app: &App) -> bool {
+    NAMED.read().is_ok_and(|n| n.contains(app))
+}
+
+/// `key` as the durable SQL backends store it: prefixed with the current application
+/// when that application has an `app_id`, and unchanged otherwise.
+///
+/// Only a named application is prefixed, because only its identity is the same on every
+/// host that shares the database — and because prefixing everyone would have hidden every
+/// existing row from the deployments already using those backends.
+#[cfg(any(feature = "sql-backend", test))]
+pub fn l2_key(key: &[u8]) -> Cow<'_, [u8]> {
+    match current() {
+        Some(app) if is_named(&app) => {
+            let mut out = Vec::with_capacity(PREFIX_LEN + key.len());
+            out.extend_from_slice(&app.prefix_bytes());
+            out.extend_from_slice(key);
+            Cow::Owned(out)
+        }
+        _ => Cow::Borrowed(key),
+    }
 }
 
 /// Shorthand for [`App::for_docroot`].
@@ -350,6 +422,39 @@ pub(crate) mod tests {
             Path::new("/srv/app/current/public")
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_app_id_names_the_application_wherever_it_lives() {
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(App::for_id("shop"), App::for_id("shop"), "same everywhere");
+        assert_ne!(App::for_id("shop"), App::for_id("blog"));
+        assert_ne!(
+            App::for_id("shop"),
+            App::for_docroot(Path::new("shop")),
+            "an id is not a path"
+        );
+        let named = name_app(Path::new("/srv/one/public/"), "one");
+        assert_eq!(for_docroot(Path::new("/srv/one/public")), named);
+        assert!(is_named(&named));
+        assert!(!is_named(&for_docroot(Path::new("/srv/two/public"))));
+
+        // Only a named application's durable keys are prefixed.
+        set(&named);
+        assert_eq!(
+            &*l2_key(b"k"),
+            [&named.prefix_bytes()[..], b"k"].concat().as_slice()
+        );
+        set(&for_docroot(Path::new("/srv/two/public")));
+        assert_eq!(&*l2_key(b"k"), b"k");
+        clear();
+
+        for ok in ["shop", "shop-2", "a.b_c", "0"] {
+            assert!(valid_app_id(ok), "{ok}");
+        }
+        for bad in ["", "Shop", "-x", "a b", "æ", &"x".repeat(65)] {
+            assert!(!valid_app_id(bad), "{bad}");
+        }
     }
 
     #[test]

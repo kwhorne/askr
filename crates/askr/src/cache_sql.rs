@@ -15,10 +15,10 @@
 //! the L1 shared-memory cache. Compiled only with `--features sql-backend`.
 //! Each process opens its own WAL connection.
 //!
-//! Keys are stored as PHP passed them, **not** namespaced per application the way the
-//! L1 cache is, so every application using one database shares one key space. Askr warns
-//! when an instance would do that (`config::l2_sharing_warning`); see
-//! docs/STORAGE_BACKEND.md.
+//! Keys are stored as PHP passed them unless the application has an `app_id`, in which
+//! case they carry its namespace, as in the L1 cache (`ns::l2_key`). Applications without
+//! one share one key space in a shared database; Askr warns when an instance would do
+//! that (`config::l2_sharing_warning`); see docs/STORAGE_BACKEND.md.
 
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_long};
@@ -159,6 +159,22 @@ fn do_touch(conn: &Connection, key: &[u8], ttl: u64) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// Delete the rows whose key starts with `prefix` (an application's namespace), and
+/// their tag rows.
+fn do_flush_prefix(conn: &Connection, prefix: &[u8]) -> rusqlite::Result<()> {
+    let p = String::from_utf8_lossy(prefix);
+    let n = p.chars().count() as i64;
+    conn.execute(
+        "DELETE FROM askr_cache WHERE substr(key, 1, ?2) = ?1",
+        params![p, n],
+    )?;
+    conn.execute(
+        "DELETE FROM askr_cache_tags WHERE substr(key, 1, ?2) = ?1",
+        params![p, n],
+    )?;
+    Ok(())
+}
+
 fn do_flush(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("DELETE FROM askr_cache; DELETE FROM askr_cache_tags;")
 }
@@ -203,28 +219,34 @@ fn l1() -> bool {
     crate::cache::enabled()
 }
 
+// Each operation takes the key as PHP gave it: the L1 front namespaces it the way shared
+// memory does, and the database gets `ns::l2_key` — prefixed only for an application
+// named by an `app_id`, whose name is the same on every host sharing the database.
 pub fn get(key: &[u8]) -> Option<Vec<u8>> {
+    let k2 = crate::ns::l2_key(key);
     if l1() {
         if let Some(v) = crate::cache::get(key) {
             return Some(v); // hot L1 hit — no database round-trip
         }
-        if let Some((v, ttl)) = with_conn(|c| do_get_with_ttl(c, key)).unwrap_or(None) {
+        if let Some((v, ttl)) = with_conn(|c| do_get_with_ttl(c, &k2)).unwrap_or(None) {
             crate::cache::set(key, &v, ttl); // populate L1 with the remaining TTL
             return Some(v);
         }
         return None;
     }
-    with_conn(|c| do_get(c, key)).unwrap_or(None)
+    with_conn(|c| do_get(c, &k2)).unwrap_or(None)
 }
 pub fn set(key: &[u8], val: &[u8], ttl: u64) -> bool {
-    let ok = with_conn(|c| do_set(c, key, val, ttl)).is_ok();
+    let k2 = crate::ns::l2_key(key);
+    let ok = with_conn(|c| do_set(c, &k2, val, ttl)).is_ok();
     if ok && l1() {
         crate::cache::set(key, val, ttl); // warm L1
     }
     ok
 }
 pub fn add(key: &[u8], val: &[u8], ttl: u64) -> bool {
-    let acquired = with_conn(|c| do_add(c, key, val, ttl)).unwrap_or(false);
+    let k2 = crate::ns::l2_key(key);
+    let acquired = with_conn(|c| do_add(c, &k2, val, ttl)).unwrap_or(false);
     if l1() {
         if acquired {
             crate::cache::set(key, val, ttl);
@@ -235,28 +257,40 @@ pub fn add(key: &[u8], val: &[u8], ttl: u64) -> bool {
     acquired
 }
 pub fn delete(key: &[u8]) -> bool {
-    let ok = with_conn(|c| do_delete(c, key)).unwrap_or(false);
+    let k2 = crate::ns::l2_key(key);
+    let ok = with_conn(|c| do_delete(c, &k2)).unwrap_or(false);
     if l1() {
         crate::cache::delete(key);
     }
     ok
 }
 pub fn increment(key: &[u8], delta: i64, ttl: u64) -> i64 {
-    let v = with_conn(|c| do_increment(c, key, delta, ttl)).unwrap_or(0);
+    let k2 = crate::ns::l2_key(key);
+    let v = with_conn(|c| do_increment(c, &k2, delta, ttl)).unwrap_or(0);
     if l1() {
         crate::cache::delete(key); // invalidate; next get repopulates from L2
     }
     v
 }
 pub fn touch(key: &[u8], ttl: u64) -> bool {
-    let ok = with_conn(|c| do_touch(c, key, ttl)).unwrap_or(false);
+    let k2 = crate::ns::l2_key(key);
+    let ok = with_conn(|c| do_touch(c, &k2, ttl)).unwrap_or(false);
     if l1() {
         crate::cache::delete(key);
     }
     ok
 }
 pub fn flush() {
-    let _ = with_conn(do_flush);
+    // A named application empties its own rows; anyone else empties the table, as before
+    // — its rows carry nothing that says whose they are.
+    match crate::ns::current().filter(crate::ns::is_named) {
+        Some(app) => {
+            let _ = with_conn(|c| do_flush_prefix(c, &app.prefix_bytes()));
+        }
+        None => {
+            let _ = with_conn(do_flush);
+        }
+    }
     flush_l1();
 }
 pub fn forget_tag(tag: &[u8]) {
@@ -265,8 +299,9 @@ pub fn forget_tag(tag: &[u8]) {
 }
 /// The L1 front, for this application — the scope `cache::flush_app` has had since 1.5.1.
 ///
-/// Note the asymmetry, which predates this: the L2 table itself is not namespaced (see the
-/// module docs), so `do_flush` above empties it for every application sharing it.
+/// Note the asymmetry for an application without an `app_id`: its L2 rows are not
+/// namespaced (see the module docs), so `do_flush` above empties the table for every
+/// application sharing it.
 fn flush_l1() {
     if l1() {
         if let Some(app) = crate::ns::current() {
@@ -394,6 +429,37 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         init_schema(&c).unwrap();
         c
+    }
+
+    /// A named application's flush takes its own rows and nothing else's.
+    #[test]
+    fn a_named_flush_is_scoped_to_its_application() {
+        let c = db();
+        let shop = crate::ns::App::for_id("shop-flush-test");
+        let blog = crate::ns::App::for_id("blog-flush-test");
+        let key = |app: &crate::ns::App, k: &str| [&app.prefix_bytes()[..], k.as_bytes()].concat();
+        do_set(&c, &key(&shop, "k"), b"shop", 0).unwrap();
+        do_set(&c, &key(&blog, "k"), b"blog", 0).unwrap();
+        do_set(&c, b"k", b"unnamed", 0).unwrap();
+        c.execute(
+            "INSERT INTO askr_cache_tags (tag, key) VALUES ('t', ?1), ('t', ?2)",
+            params![
+                String::from_utf8_lossy(&key(&shop, "k")),
+                String::from_utf8_lossy(&key(&blog, "k"))
+            ],
+        )
+        .unwrap();
+        do_flush_prefix(&c, &shop.prefix_bytes()).unwrap();
+        assert_eq!(do_get(&c, &key(&shop, "k")).unwrap(), None);
+        assert_eq!(
+            do_get(&c, &key(&blog, "k")).unwrap().as_deref(),
+            Some(&b"blog"[..])
+        );
+        assert_eq!(do_get(&c, b"k").unwrap().as_deref(), Some(&b"unnamed"[..]));
+        let tags: i64 = c
+            .query_row("SELECT count(*) FROM askr_cache_tags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tags, 1, "the blog's tag row stays");
     }
 
     #[test]

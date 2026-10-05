@@ -241,7 +241,7 @@ edge; serving directly, they're the application's job.
 Everything in shared memory is one region per *instance*. Since 1.5.1 it is
 partitioned by **application** — a namespace derived from the site's docroot, as written
 (a symlink in it is part of the name, so a release deploy that swaps `current` keeps the
-application's data) — so two
+application's data), or from its `app_id` when it has one — so two
 sites with different docroots are two applications and cannot see each other's data,
 while two domains serving one docroot are one application and share, as they should.
 

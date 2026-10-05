@@ -5,6 +5,22 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Added
+
+- **`app_id`: a name for an application, the same on every host.** `[server] app_id`,
+  `[[site]] app_id` and `--app-id` name an application's data instead of its docroot.
+  A docroot is a local path, so it could not keep applications apart in the durable SQL
+  backends, which other hosts share; a name can. With one, an application's L2 cache
+  keys and queue names carry its namespace, its `flush` takes only its own rows, and the
+  shared-backend warning drops what the names now separate. Broadcasting stays shared,
+  as it is in shared memory. Ids are checked: well-formed, one name per docroot, one
+  docroot per name. Unset, nothing changes — no existing L2 row moves.
+
+  Tested end to end: two servers with different docroots and the same `app_id` file
+  their queued jobs under the same application in `/api/status`, and a third without one
+  under its docroot's (with the startup registration removed, that test fails). Plus the
+  validation, the scoped flush (with `sql-backend`), and the warning's new cases.
+
 ### Fixed
 
 - **A reload could leave a worker on the old code, and a stop could hang.** A worker
