@@ -9,26 +9,46 @@
  * Askr can tell you whether your app is worker-safe.
  *
  * It is framework-agnostic; given a Laravel container it also tracks container
- * bindings/instances. **Dev only** — reflecting over app classes every request
- * is expensive (that's why it's behind `--paranoid`).
+ * bindings/instances.
  *
- * Signal: it compares each request to the *previous* one and reports counters
- * that increased. A one-time bump when a singleton first resolves is normal and
- * self-limiting; something that grows on *every* request is a leak.
+ * Two modes:
+ *
+ * - `--paranoid` (dev): every request is checked, and every growth is reported. A
+ *   one-time bump when a singleton first resolves is normal and self-limiting;
+ *   something that grows on *every* request is a leak. Reflecting over app classes
+ *   on every request is expensive, which is why this is dev only.
+ * - `[worker] paranoid_sample = N` (production): one request in N is checked, and a
+ *   key is reported only once it has grown in three checks running — lazy services
+ *   and autoloading level off as the routes are visited; a leak does not. Class and
+ *   function counts are not watched here, since autoloading is exactly what grows them.
+ *
+ * Findings go to the log and, through askr_state_bleed(), to /api/status.
  */
 final class AskrParanoid
 {
     /** @var array<string,string> previous snapshot: key => fingerprint */
     private array $prev = [];
+    /** @var array<string,int> key => checks in a row it has grown */
+    private array $streak = [];
+    private int $checks = 0;
     /** @var array<string,bool> class name => is it an app (non-vendor) class */
     private array $appClasses = [];
     private int $findingsTotal = 0;
 
+    /**
+     * @param int $sample  check one request in this many (1 = every request, dev)
+     * @param int $sustain report a key once it has grown in this many checks running
+     *                     (default: 1 when checking every request, 3 when sampling)
+     */
     public function __construct(
         private string $appBase,
         private ?object $app = null,
         private int $warmup = 2,
+        private int $sample = 1,
+        private ?int $sustain = null,
     ) {
+        $this->sample = max(1, $this->sample);
+        $this->sustain ??= $this->sample > 1 ? 3 : 1;
         // Class files come back as realpaths (e.g. /tmp -> /private/tmp on
         // macOS), so canonicalise the base to compare correctly.
         $this->appBase = realpath($appBase) ?: $appBase;
@@ -37,7 +57,9 @@ final class AskrParanoid
     /** Announce (call once, before serving). */
     public function baseline(): void
     {
-        $this->emit(["[askr paranoid] armed — warming up {$this->warmup} requests before watching (dev mode)"]);
+        $this->emit([$this->sample > 1
+            ? "[askr paranoid] armed — checking one request in {$this->sample}, reporting what grows {$this->sustain} checks running"
+            : "[askr paranoid] armed — warming up {$this->warmup} requests before watching (dev mode)"]);
     }
 
     /**
@@ -47,44 +69,59 @@ final class AskrParanoid
      */
     public function check(int $request): void
     {
+        if ($request % $this->sample !== 0) {
+            return; // not this request's turn — the cost of sampling is this line
+        }
+        $check = ++$this->checks;
         $now = $this->snapshot();
 
-        if ($request <= $this->warmup) {
+        if ($check <= $this->warmup) {
             $this->prev = $now;
-            if ($request === $this->warmup) {
+            if ($check === $this->warmup) {
                 $watched = count(array_filter($this->appClasses));
-                $this->emit(["[askr paranoid] baseline set after {$this->warmup} requests — watching $watched app classes for state bleed"]);
+                $this->emit(["[askr paranoid] baseline set after {$this->warmup} checks — watching $watched app classes for state bleed"]);
             }
             return;
         }
 
-        $findings = [];
+        $lines = [];
+        $report = [];
 
         foreach ($now as $key => $fp) {
             $before = $this->prev[$key] ?? null;
-            if ($before === $fp) {
-                continue;
-            }
             $a = self::sizeOf($before);
             $b = self::sizeOf($fp);
-            if ($a !== null && $b !== null && $b > $a) {
-                $findings[] = sprintf("  ↑ %s  %s → %s  (+%d)", $key, $before, $fp, $b - $a);
-            } elseif ($before === null) {
-                $findings[] = sprintf("  + %s = %s", $key, $fp);
-            } elseif ($a === null) {
-                $findings[] = sprintf("  ~ %s  %s → %s", $key, $before, $fp);
+            $grew = $before !== $fp && ($before === null || $a === null || ($b !== null && $b > $a));
+            $this->streak[$key] = $grew ? ($this->streak[$key] ?? 0) + 1 : 0;
+            // Report on the check that completes a streak, and again each time it is
+            // completed anew — not on every check of a long one.
+            if (!$grew || $this->streak[$key] % $this->sustain !== 0) {
+                continue;
             }
+            if ($a !== null && $b !== null && $b > $a) {
+                $lines[] = sprintf("  ↑ %s  %s → %s  (+%d)", $key, $before, $fp, $b - $a);
+            } elseif ($before === null) {
+                $lines[] = sprintf("  + %s = %s", $key, $fp);
+            } else {
+                $lines[] = sprintf("  ~ %s  %s → %s", $key, $before, $fp);
+            }
+            $report[] = ['key' => $key, 'from' => (string) $before, 'to' => $fp];
         }
 
         $this->prev = $now;
 
-        if ($findings) {
-            $this->findingsTotal += count($findings);
+        if ($lines) {
+            $this->findingsTotal += count($lines);
             array_unshift(
-                $findings,
-                "[askr paranoid] request #$request — state changed after reset (possible bleed):"
+                $lines,
+                $this->sample > 1
+                    ? "[askr paranoid] request #$request — still growing after {$this->sustain} checks one in {$this->sample} apart (likely bleed):"
+                    : "[askr paranoid] request #$request — state changed after reset (possible bleed):"
             );
-            $this->emit($findings);
+            $this->emit($lines);
+            if (function_exists('askr_state_bleed')) {
+                askr_state_bleed(json_encode($report));
+            }
         }
     }
 
@@ -105,10 +142,14 @@ final class AskrParanoid
             }
         }
 
-        // Cheap global signals.
+        // Cheap global signals. Class and function counts grow with autoloading as new
+        // routes are visited, which is all a sampled check sees of them — so only the
+        // every-request mode watches those.
         $snap['$GLOBALS.keys'] = 'count:' . count($GLOBALS);
-        $snap['declared_classes'] = 'count:' . count(get_declared_classes());
-        $snap['declared_functions'] = 'count:' . count(get_defined_functions()['user']);
+        if ($this->sample === 1) {
+            $snap['declared_classes'] = 'count:' . count(get_declared_classes());
+            $snap['declared_functions'] = 'count:' . count(get_defined_functions()['user']);
+        }
 
         // Laravel container (optional).
         if ($this->app !== null) {

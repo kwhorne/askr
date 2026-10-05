@@ -428,6 +428,7 @@ fn status_json(info: &Info) -> String {
             landlock_abi: abi,
         }
     };
+    let (state_bleed, state_bleed_dropped) = crate::bleed::snapshot();
     to_json(&StatusDoc {
         version: env!("CARGO_PKG_VERSION"),
         listen: info.server_listen.to_string(),
@@ -444,6 +445,8 @@ fn status_json(info: &Info) -> String {
         queues,
         queues_idle,
         warnings,
+        state_bleed,
+        state_bleed_dropped,
         rollout: s.rollout,
         sandbox,
         pids: s.pids,
@@ -600,6 +603,11 @@ struct StatusDoc {
     queues: Vec<QueueDoc>,
     queues_idle: Vec<IdleLaneDoc>,
     warnings: Vec<WarningDoc>,
+    /// Application state a worker's state-bleed detector found growing between requests
+    /// (`[worker] paranoid` or `paranoid_sample`). Empty means none found — or no detector.
+    state_bleed: Vec<crate::bleed::Leak>,
+    /// Findings that did not fit the table.
+    state_bleed_dropped: u64,
     rollout: &'static str,
     sandbox: SandboxDoc,
     workers: Vec<WorkerDoc>,

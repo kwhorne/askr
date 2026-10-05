@@ -29,6 +29,7 @@ app_base = "/var/www/app"    # exported as $ASKR_APP_BASE for the worker script
 # PHP 8.5 has OPcache built into libphp — just switch it on (no zend_extension).
 ini = "opcache.enable=1\nopcache.enable_cli=1\nopcache.validate_timestamps=0\nopcache.jit=tracing\nopcache.jit_buffer_size=128M"
 # paranoid = true            # dev only: detect state bleed between requests (expensive)
+# paranoid_sample = 1000     # production: check one request in 1000 per worker; see /api/status state_bleed
 
 [tls]
 # Either provide cert + key, or set self_signed = true (dev only). Omit for HTTP.

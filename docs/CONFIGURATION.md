@@ -64,6 +64,7 @@ Omit this whole section to run in per-request mode. Present it to enable
 | `app_base` | path | Application base path, exported as `$ASKR_APP_BASE` for the worker script (inherited across `fork`). |
 | `ini` | string | Extra php.ini lines (newline-separated), e.g. to load opcache. |
 | `paranoid` | bool | Dev only: detect state bleed between requests (expensive). See [Worker mode](WORKER_MODE.md#is-my-app-worker-safe----paranoid). |
+| `paranoid_sample` | int | Production state-bleed detection: check one request in N per worker, and report a key once it has grown in three checks running. Findings go to the log and to `/api/status` (`state_bleed`). Not with `paranoid`. See [Worker mode](WORKER_MODE.md#in-production-paranoid_sample). |
 
 ### `[tls]`
 

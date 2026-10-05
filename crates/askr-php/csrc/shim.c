@@ -1068,6 +1068,30 @@ static PHP_FUNCTION(askr_broadcast) {
 }
 
 /* ------------------------------------------------------------------ */
+/* state-bleed findings (askr_state_bleed)                            */
+/* ------------------------------------------------------------------ */
+/* The state-bleed detector (examples/askr-paranoid.php) hands its findings to Askr as
+ * a JSON document, so they reach /api/status instead of only the log. */
+
+typedef int (*askr_bleed_fn)(const char *json, size_t len);
+static askr_bleed_fn g_bleed = NULL;
+
+void askr_php_set_bleed_bridge(askr_bleed_fn f) {
+    g_bleed = f;
+}
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_state_bleed, 0, 0, 1)
+    ZEND_ARG_INFO(0, findings)
+ZEND_END_ARG_INFO()
+static PHP_FUNCTION(askr_state_bleed) {
+    char *json; size_t len;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(json, len)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(g_bleed ? g_bleed(json, len) : 0);
+}
+
+/* ------------------------------------------------------------------ */
 /* CoW template hook (askr_cow_ready)                                 */
 /* ------------------------------------------------------------------ */
 /* The worker script calls askr_cow_ready() after booting the app, before its
@@ -1117,6 +1141,7 @@ static const zend_function_entry askr_functions[] = {
     ZEND_FE(askr_queue_size, arginfo_askr_queue_size)
     ZEND_FE(askr_queue_stats, arginfo_askr_queue_stats)
     ZEND_FE(askr_broadcast, arginfo_askr_broadcast)
+    ZEND_FE(askr_state_bleed, arginfo_askr_state_bleed)
     ZEND_FE(askr_cow_ready, arginfo_askr_cow_ready)
     ZEND_FE_END
 };

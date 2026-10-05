@@ -35,11 +35,16 @@ $app = require $base . '/bootstrap/app.php';
 /** @var \Illuminate\Contracts\Http\Kernel $kernel */
 $kernel = $app->make(Illuminate\Contracts\Http\Kernel::class);
 
-// State-bleed detector (dev only), enabled by `askr serve --paranoid`.
+// State-bleed detector: every request with `--paranoid` (dev), one in N with
+// `[worker] paranoid_sample` (production). See examples/askr-paranoid.php.
 $paranoid = null;
 if (getenv('ASKR_PARANOID')) {
     require __DIR__ . '/askr-paranoid.php';
     $paranoid = new AskrParanoid($base, $app);
+} elseif ($every = (int) getenv('ASKR_PARANOID_SAMPLE')) {
+    // Production: one request in $every, reported once something keeps growing.
+    require __DIR__ . '/askr-paranoid.php';
+    $paranoid = new AskrParanoid($base, $app, sample: $every);
 }
 
 $requestNo = 0;

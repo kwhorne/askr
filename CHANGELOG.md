@@ -7,6 +7,21 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Added
 
+- **State-bleed detection in production: `[worker] paranoid_sample = N`.** The
+  `--paranoid` detector checks every request and reports every growth, which is right
+  in development and too expensive and too noisy for production. Sampled, it checks one
+  request in N per worker and reports a key only once it has grown in three checks
+  running — lazily resolved services and caches filled on first use level off; a leak
+  does not. Findings now leave the log too: the detector hands them to a new PHP
+  function, `askr_state_bleed()`, and `/api/status` lists them under `state_bleed`, one
+  row per key with the latest growth and how often it was reported.
+
+  Tested end to end with the real detector in a worker: a static array that grows on
+  every request is reported, one that grows for five requests and stops is not (with the
+  three-in-a-row rule removed, it is — and the test fails), and with the bridge not
+  registered nothing reaches `/api/status` (the test fails again). `--paranoid` reports
+  what it did before.
+
 - **`askr top`: what each route costs, live.** Requests per second, share of the PHP
   time, average and p95 latency, 5xx and cache hit rate per route shape
   (`GET /products/*`), across every worker, redrawn every two seconds — or the totals

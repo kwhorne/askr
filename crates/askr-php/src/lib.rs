@@ -472,6 +472,18 @@ pub mod broadcast_bridge {
     }
 }
 
+/// State-bleed bridge. `askr_state_bleed($findingsJson)` in PHP — called by the
+/// detector in `examples/askr-paranoid.php` — hands its findings to this callback.
+pub mod bleed_bridge {
+    use std::ffi::{c_char, c_int};
+
+    pub type BleedFn = extern "C" fn(*const c_char, usize) -> c_int;
+
+    extern "C" {
+        pub fn askr_php_set_bleed_bridge(f: BleedFn);
+    }
+}
+
 /// Convenience: helper used by tests to read a C string (unused in normal flow).
 #[allow(dead_code)]
 unsafe fn cstr_to_string(p: *const c_char) -> String {

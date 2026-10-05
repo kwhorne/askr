@@ -6,6 +6,7 @@
 
 mod acme;
 mod admin;
+mod bleed;
 mod broadcast;
 #[cfg(feature = "sql-backend")]
 mod broadcast_sql;
@@ -209,6 +210,12 @@ enum Command {
         /// (reports app state that keeps growing). Expensive — not for prod.
         #[arg(long)]
         paranoid: bool,
+
+        /// Production state-bleed detection: check one request in N per worker, and
+        /// report a key only once it has grown in three checks running. Findings go to
+        /// the log and to `/api/status` (`state_bleed`). Worker mode.
+        #[arg(long)]
+        paranoid_sample: Option<u64>,
 
         /// Run N queue-worker processes alongside the web workers (requires
         /// --queue-script). Supervised and respawned like web workers. With
@@ -544,6 +551,7 @@ fn main() -> anyhow::Result<()> {
             tls_self_signed,
             max_body_size,
             paranoid,
+            paranoid_sample,
             queue,
             queue_max,
             queue_script,
@@ -631,6 +639,7 @@ fn main() -> anyhow::Result<()> {
                          `_` and `-`, starting with a letter or digit, at most 64 characters"
                     );
                 }
+                config::check_paranoid_sample(paranoid, paranoid_sample, "--paranoid-sample")?;
                 let workers = workers.unwrap_or_else(default_workers).max(1);
                 // The command line, said as a config file, so that it is assembled by the
                 // same code as one (`FileConfig::assemble`). Every section is spelled out
@@ -670,6 +679,7 @@ fn main() -> anyhow::Result<()> {
                         app_base: None,
                         ini: ini.or_else(|| std::env::var("ASKR_PHP_INI").ok()),
                         paranoid,
+                        paranoid_sample,
                     },
                     tls: config::TlsSection {
                         cert: tls_cert,
@@ -803,6 +813,7 @@ fn main() -> anyhow::Result<()> {
             let ini = r.ini;
             let admin_listen = r.admin_listen;
             let paranoid = r.paranoid;
+            let paranoid_sample = r.paranoid_sample;
             let cache_slots = r.cache_slots;
             let cache_large_slots = r.cache_large_slots;
             let response_cache = r.response_cache_slots;
@@ -849,11 +860,20 @@ fn main() -> anyhow::Result<()> {
                     "paranoid mode ON — state-bleed detection (dev only). \
                      Use --workers 1 for readable output."
                 );
+            } else if let Some(n) = paranoid_sample {
+                // Read by the detector in the worker script (examples/askr-paranoid.php).
+                std::env::set_var("ASKR_PARANOID_SAMPLE", n.to_string());
+                tracing::info!(
+                    every = n,
+                    "state-bleed sampling on: one request in {n} per worker is checked; \
+                     findings go to GET /api/status `state_bleed`"
+                );
             }
 
             // Map shared metrics before any fork so all workers share them.
             metrics::Metrics::init();
             routes::init();
+            bleed::init();
 
             // Auto-TLS via ACME: obtain the cert in the master (HTTP-01 on
             // --acme-http) before forking; workers serve HTTPS from the cache.

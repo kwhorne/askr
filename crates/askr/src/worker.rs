@@ -115,6 +115,7 @@ pub fn run_sidecar(script: std::path::PathBuf, ini: Option<String>) -> i32 {
     crate::cache::register_bridge();
     crate::queue::register_bridge();
     crate::broadcast::register_bridge();
+    crate::bleed::register_bridge();
     php.run_script(&script.to_string_lossy()).unwrap_or(1)
 }
 

@@ -960,6 +960,7 @@ pub(crate) fn run_cow(
     crate::cache::register_bridge();
     crate::queue::register_bridge();
     crate::broadcast::register_bridge();
+    crate::bleed::register_bridge();
 
     let recycle_after = config.max_requests;
     // The CoW parent boots the web application, so it takes the web docroot; sidecars

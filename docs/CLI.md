@@ -56,6 +56,7 @@ the other flags are ignored). See [Configuration](CONFIGURATION.md).
 | `--workers-max <N>` | `--workers` | CoW autoscaling ceiling (> min enables autoscaling). |
 | `--cow` | off | CoW template: boot once, fork warm workers (~ms respawn). Needs `--worker-script`. |
 | `--paranoid` | off | Dev: detect state bleed between requests (worker mode; expensive). |
+| `--paranoid-sample <N>` | off | Production: check one request in N per worker for state bleed; findings in `/api/status` `state_bleed`. |
 
 ### TLS
 

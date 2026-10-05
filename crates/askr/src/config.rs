@@ -260,6 +260,10 @@ pub struct WorkerSection {
     /// Dev only: detect state bleed between requests (expensive; worker mode).
     #[serde(default)]
     pub paranoid: bool,
+    /// Production state-bleed detection: check one request in this many per worker.
+    /// Findings reach `/api/status` as `state_bleed`. Unset = off.
+    #[serde(default)]
+    pub paranoid_sample: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -534,6 +538,8 @@ pub struct Resolved {
     pub ini: Option<String>,
     pub app_base: Option<PathBuf>,
     pub paranoid: bool,
+    /// `[worker] paranoid_sample`, checked: at least 1, and not with `paranoid`.
+    pub paranoid_sample: Option<u64>,
     pub admin_listen: Option<SocketAddr>,
     /// Auto-TLS from `[acme]`. See [`AcmeSection`] for why these belong in the file.
     pub acme: bool,
@@ -833,6 +839,11 @@ impl FileConfig {
                 base.display()
             );
         }
+        check_paranoid_sample(
+            self.worker.paranoid,
+            self.worker.paranoid_sample,
+            "worker.paranoid_sample",
+        )?;
 
         // TLS validation.
         let tls_self_signed = self.tls.self_signed;
@@ -1089,6 +1100,7 @@ impl FileConfig {
             ini: self.worker.ini,
             app_base: self.worker.app_base,
             paranoid: self.worker.paranoid,
+            paranoid_sample: self.worker.paranoid_sample,
             admin_listen,
             acme: acme.enabled,
             acme_domains: acme.domains,
@@ -1271,6 +1283,23 @@ fn fields_of<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
 pub(crate) fn app_root(p: &std::path::Path, key: &str) -> Result<PathBuf> {
     std::fs::metadata(p).with_context(|| format!("{key} {} not found", p.display()))?;
     Ok(crate::ns::app_path(p))
+}
+
+/// `paranoid_sample` is a rate (1 = every request), and choosing it alongside `paranoid`
+/// — which already checks every request, verbosely — is two answers to one question.
+pub(crate) fn check_paranoid_sample(paranoid: bool, sample: Option<u64>, key: &str) -> Result<()> {
+    if let Some(n) = sample {
+        anyhow::ensure!(
+            n >= 1,
+            "{key} must be at least 1 (one request in N is checked)"
+        );
+        anyhow::ensure!(
+            !paranoid,
+            "{key} and paranoid are both set — paranoid checks every request (dev); \
+             {key} checks one in N (production). Choose one."
+        );
+    }
+    Ok(())
 }
 
 /// The durable SQL backends this process has selected, by the variable that selects each.

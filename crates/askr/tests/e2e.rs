@@ -1188,6 +1188,90 @@ response_slots = 64
     assert!(first_row.starts_with("GET /products/*"), "{text}");
 }
 
+/// Production state-bleed detection: with `paranoid_sample`, the real detector
+/// (`examples/askr-paranoid.php`) checks one request in N and reports what keeps growing
+/// to `/api/status` — and not what grows for a while and stops, which is what lazily
+/// resolved services and caches filled on first use look like.
+#[test]
+fn sampled_state_bleed_reaches_the_status_document() {
+    let detector =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/askr-paranoid.php");
+    let dir = unique_dir("bleed");
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(
+        dir.join("app/src/Classes.php"),
+        "<?php
+class Leaky { public static array $seen = []; }
+class Lazy { public static array $cache = []; }
+class Clean { public static int $booted = 0; }
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app/worker.php"),
+        format!(
+            r#"<?php
+require __DIR__ . '/src/Classes.php';
+require '{}';
+$p = new AskrParanoid(__DIR__, null, sample: (int) getenv('ASKR_PARANOID_SAMPLE'));
+$p->baseline();
+$n = 0;
+while (askr_handle_request(function (array $r): int {{
+    Leaky::$seen[] = 1;                                   // grows on every request
+    if (count(Lazy::$cache) < 5) {{ Lazy::$cache[] = 1; }} // grows, then levels off
+    Clean::$booted = 1;
+    echo 'ok';
+    return 200;
+}})) {{
+    $p->check(++$n);
+}}
+"#,
+            detector.display()
+        ),
+    )
+    .unwrap();
+    let s = Server::start_in(
+        dir,
+        &[("index.php", "<?php\n")],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+workers = "1"
+[worker]
+script = "{ROOT}/worker.php"
+paranoid_sample = 2
+[admin]
+listen = "127.0.0.1:{ADMIN}"
+"#,
+    );
+    s.wait_admin();
+    for _ in 0..24 {
+        assert_eq!(get(s.port, "/").body, "ok");
+    }
+    let status: serde_json::Value = serde_json::from_str(&s.admin_status()).unwrap();
+    let leaks = status["state_bleed"]
+        .as_array()
+        .expect("a state_bleed list");
+    let keys: Vec<&str> = leaks.iter().filter_map(|l| l["key"].as_str()).collect();
+    assert!(
+        keys.contains(&"Leaky::$seen"),
+        "the leak is reported: {status:#}\n{}",
+        s.log_contents()
+    );
+    assert!(
+        !keys.contains(&"Lazy::$cache"),
+        "growth that levels off is not: {keys:?}"
+    );
+    assert!(!keys.iter().any(|k| k.starts_with("Clean")), "{keys:?}");
+    let leak = leaks.iter().find(|l| l["key"] == "Leaky::$seen").unwrap();
+    assert!(leak["to"].as_str().unwrap().starts_with("array:"), "{leak}");
+    assert!(
+        s.log_has("state bleed: this keeps growing"),
+        "and it is in the log"
+    );
+}
+
 /// The bug: the cache key used the raw `Host` header (with port) while routing used
 /// a normalised one, so `PURGE` could never match anything.
 #[test]

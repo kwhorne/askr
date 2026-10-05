@@ -242,6 +242,37 @@ How it works ([`examples/askr-paranoid.php`](../examples/askr-paranoid.php)):
 It's expensive (reflection every request) — **dev only**, and use `--workers 1`
 for readable output. Enable it in a config file with `[worker] paranoid = true`.
 
+### In production: `paranoid_sample`
+
+Some bleed only shows under real traffic — a route nobody exercises in development, a
+static cache keyed by user. To watch for it in production, sample instead:
+
+```toml
+[worker]
+paranoid_sample = 1000   # check one request in 1000, per worker
+```
+
+One request in N is checked, so the cost is one reflection pass per N requests. Because
+checks are N requests apart, a key is reported only once it has **grown in three checks
+running**: services resolved lazily and caches filled on first use grow for a while as
+routes are visited and then level off; a leak keeps going. Class and function counts are
+not watched in this mode, since autoloading is all a sampled check would see of them.
+
+Findings go to the log and to `GET /api/status`, where a product watching Askr can show
+them:
+
+```json
+"state_bleed": [
+  { "key": "App\\Services\\Cart::$items", "app": "3f9a0c2e7d1b4a85",
+    "from": "array:412", "to": "array:1207", "reports": 4,
+    "first_seen_secs": 5400, "last_seen_secs": 60 }
+]
+```
+
+The detector ships as `examples/askr-paranoid.php`; `examples/laravel-worker.php` turns it
+on when `paranoid_sample` (or `paranoid`) is set. A worker script of your own can do the
+same — see how that file reads `ASKR_PARANOID_SAMPLE`.
+
 ## Streaming responses
 
 Output is normally buffered and sent as one response (so it can be cached and

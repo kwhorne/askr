@@ -73,6 +73,7 @@ impl Php {
                 crate::cache::register_bridge();
                 crate::queue::register_bridge();
                 crate::broadcast::register_bridge();
+                crate::bleed::register_bridge();
                 tracing::info!(version = %php.php_version(), "embedded PHP ready (per-request)");
 
                 while let Some(job) = rx.blocking_recv() {
@@ -120,6 +121,7 @@ impl Php {
                 crate::cache::register_bridge();
                 crate::queue::register_bridge();
                 crate::broadcast::register_bridge();
+                crate::bleed::register_bridge();
                 tracing::info!("embedded PHP ready (worker mode), running worker script");
 
                 register_stream_callbacks();

@@ -79,6 +79,7 @@ authors. Their names and call signatures won't change within a major version:
 | `askr_cache_get/set/add/delete/increment/flush/touch/forget_tag(...)` | Shared cache. |
 | `askr_queue_push/pop/delete/release/size(...)` | Shared job queue. |
 | `askr_broadcast($channel, $payload)` | Publish a broadcast event. |
+| `askr_state_bleed($findingsJson)` | Report state-bleed findings (a JSON list of `{key, from, to}`) to `/api/status`. Used by the detector. |
 
 New functions may be **added** in a minor version; existing ones won't change or
 disappear without a deprecation cycle. The official
