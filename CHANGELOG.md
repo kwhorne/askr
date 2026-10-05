@@ -7,6 +7,21 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Added
 
+- **`askr top`: what each route costs, live.** Requests per second, share of the PHP
+  time, average and p95 latency, 5xx and cache hit rate per route shape
+  (`GET /products/*`), across every worker, redrawn every two seconds — or the totals
+  since start with `--once`, and JSON with `--json`. Also `GET /api/routes`.
+
+  Every client response is counted into a fixed table of 512 routes in shared memory,
+  mapped before the workers fork; the admin plane reads it. Measured: no difference on
+  static files and about 1% on a hello-world PHP route, the cheapest a route can be. A route that finds no slot
+  is counted under `(other)` instead of evicting one, so the numbers never reshuffle.
+  The claim protocol had a race the concurrency test caught on its first run — a thread
+  that lost the claim to a slot still being named moved on and claimed a second slot for
+  the same route; it now waits for the slot to settle (100 of 100 runs clean). Tested
+  end to end: three `/products/{id}` requests are one route holding the PHP time across
+  two workers, a static file costs none, and a cached page's hits are counted as hits.
+
 - **`askr why <url>`: what the server decided about one request, and why.** Most
   questions about a request — why was this not cached, which address did the rate
   limiter count, which site served it — had answers Askr computed on every request and

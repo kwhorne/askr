@@ -289,6 +289,10 @@ the next `composer install`, and every route 500s.
 | `max_requests` | 500–2000 | Recycles a worker before a slow leak matters. |
 | `max_rss` | (RAM − 1 GB) / workers | A worker over budget is replaced instead of inviting the OOM killer. |
 
+**Where the CPU goes:** `askr top` shows each route's share of the PHP time, its p95 and its
+cache hit rate, live. The route at the top is where caching, a query fix or a queued job
+pays off most — see [CLI](CLI.md#askr-top).
+
 Memory is the constraint that bites first. Each worker is a full PHP interpreter with your
 app booted; measure `rss_kb_total / workers_alive` under real traffic rather than
 estimating. A Laravel 13 + Livewire + Flux app in worker mode measures about **77 MB per

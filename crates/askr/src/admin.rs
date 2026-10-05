@@ -151,6 +151,7 @@ async fn handle(
         (&Method::GET, "/metrics") => prometheus(),
         (&Method::GET, "/api/errors") => json(errors_json(&info)),
         (&Method::GET, "/api/why") => why(&req, &info).await,
+        (&Method::GET, "/api/routes") => json(to_json(&crate::top::doc())),
         (&Method::POST, "/api/reload") => {
             crate::supervisor::trigger_reload();
             json(r#"{"ok":true,"action":"reload"}"#.to_string())

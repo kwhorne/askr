@@ -237,6 +237,47 @@ change the connection — the probe speaks whatever the listener speaks; to expl
 HTTPS request behind a TLS-terminating proxy, pass `--peer <proxy>` and
 `-H 'X-Forwarded-Proto: https'`.
 
+## `askr top`
+
+What each route costs, live, across every worker:
+
+```
+askr top — 127.0.0.1:9000 — every 2s, sorted by cpu (Ctrl-C to quit)
+
+4 routes · 43.9 req/s · PHP 0.68 s/s over 2 s
+
+ROUTE               req/s     CPU       avg       p95    5xx   cache
+GET /api/search      14.5     97%    45.9ms     ≤50ms      0      0%
+GET /products/*      14.5      2%     1.2ms      ≤5ms      0     72%
+GET /                14.5      0%     0.1ms      ≤1ms      0      0%
+GET /boom             0.5      0%     0.2ms      ≤1ms      1      0%
+```
+
+A route is the method and the path's shape — ids collapse the way `askr cache-report`
+collapses them (`/products/1421` → `/products/*`), and the host goes in front when there
+are `[[site]]`s. **CPU** is the route's share of the PHP time in the window, which is
+usually the answer to "where does the CPU go"; **p95** is the upper bound of the latency
+bucket the 95th percentile fell in; **cache** is the response cache's hit rate (`–` when
+it had no say). Static files are routes too, at no PHP cost.
+
+It needs the admin plane (`--admin`, default `127.0.0.1:9000`; `ASKR_ADMIN_TOKEN` is sent
+when set). Every worker counts each response into a shared table, which the admin plane
+reads: a path shape, a hash and a handful of atomic additions per request. Measured on a
+release build (`ab`, 16 connections, two workers): no difference on static files, about
+1% fewer requests per second on a hello-world PHP route — the cheapest a route can be,
+so the most the counting can show.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--interval <SECS>` | `2` | Seconds between refreshes; each shows the change since the last. |
+| `--once` | off | Print the totals since the server started, once. |
+| `--json` | off | JSON: the totals with `--once`, else each refresh's change. |
+| `--sort <cpu\|requests\|p95\|errors>` | `cpu` | Order of the table. |
+| `--limit <N>` | `20` | Routes shown. |
+
+The table holds 512 routes; a route that finds no room is counted under `(other)` rather
+than pushing another out, so the numbers on the page never shuffle under pressure.
+
 ## `askr cache-report`
 
 Measure what caching would buy **before** caching anything — and whether it would be

@@ -66,6 +66,7 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 | `GET` | `/api/metrics` | Traffic metrics as JSON (throughput, latency, PHP vs I/O). |
 | `POST` | `/api/reload` | Trigger a graceful rolling reload. |
 | `GET` | `/api/why?url=…` | What the server decides about one request, and why. What `askr why` calls. |
+| `GET` | `/api/routes` | Per-route totals since start: requests, PHP and total time, 5xx, bytes, cache hits/misses, latency buckets. What `askr top` reads. |
 
 ### `GET /api/status`
 

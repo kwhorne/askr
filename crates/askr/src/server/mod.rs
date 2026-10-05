@@ -250,6 +250,17 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    /// The `askr top` route this request is counted under: its method and path shape,
+    /// with the host in front when there are `[[site]]`s to tell apart.
+    pub(crate) fn route_of<B>(&self, req: &Request<B>) -> String {
+        let host = (!self.config.sites.is_empty()).then(|| {
+            let authority =
+                crate::cgi::effective_host(req.headers(), req.uri()).unwrap_or_default();
+            crate::cgi::host_without_port(&authority).to_ascii_lowercase()
+        });
+        crate::routes::route_of(req.method().as_str(), host.as_deref(), req.uri().path())
+    }
+
     /// Record one request for the cache oracle (`askr cache-report`).
     ///
     /// Called only for responses that actually ran PHP, which is the point: the log
@@ -539,6 +550,7 @@ where
             let mut req = req;
             let method = req.method().as_str().to_string();
             let path = req.uri().path().to_string();
+            let route = rt.route_of(&req);
             let start = Instant::now();
             // `askr why`: removed from every request, honoured only with the secret.
             let resp = match why::take_request(req.headers_mut()) {
@@ -555,6 +567,7 @@ where
                 }
             };
             if let Ok(r) = &resp {
+                crate::routes::note_response(&route, r, start.elapsed().as_micros() as u64);
                 let bytes = r.body().size_hint().exact().unwrap_or(0);
                 rt.log_access(
                     &method,
@@ -1319,6 +1332,9 @@ where
     }
 
     finish(&rt, &response, t_start, php_us);
+    response
+        .extensions_mut()
+        .insert(crate::routes::PhpTime(php_us));
     Ok(response)
 }
 

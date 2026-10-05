@@ -34,6 +34,7 @@ mod queue;
 mod ratelimit;
 mod rcache;
 mod record;
+mod routes;
 mod sandbox;
 mod server;
 mod shadow;
@@ -44,6 +45,7 @@ mod squeue_sql;
 mod supervisor;
 mod term;
 mod tls;
+mod top;
 mod tune;
 mod upgrade;
 mod upload;
@@ -457,6 +459,30 @@ enum Command {
         json: bool,
     },
 
+    /// What each route costs, live: requests per second, share of the PHP time, p95,
+    /// errors and cache hit rate per route shape (`GET /products/*`), across every
+    /// worker. Asks a running server's admin plane.
+    Top {
+        /// The admin plane of the running server (`[admin] listen`).
+        #[arg(long, default_value = "127.0.0.1:9000")]
+        admin: String,
+        /// Seconds between refreshes.
+        #[arg(long, default_value_t = 2.0)]
+        interval: f64,
+        /// Print the totals since the server started, once, and exit.
+        #[arg(long)]
+        once: bool,
+        /// JSON instead of a table: the totals with `--once`, else each refresh's change.
+        #[arg(long)]
+        json: bool,
+        /// What to sort by.
+        #[arg(long, value_enum, default_value = "cpu")]
+        sort: top::Sort,
+        /// Routes to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Validate a config file and print the resolved settings (no server start).
     ConfigCheck {
         /// Path to askr.toml.
@@ -827,6 +853,7 @@ fn main() -> anyhow::Result<()> {
 
             // Map shared metrics before any fork so all workers share them.
             metrics::Metrics::init();
+            routes::init();
 
             // Auto-TLS via ACME: obtain the cert in the master (HTTP-01 on
             // --acme-http) before forking; workers serve HTTPS from the cache.
@@ -1061,6 +1088,27 @@ fn main() -> anyhow::Result<()> {
                     peer,
                 },
                 json,
+            )
+        }
+        Command::Top {
+            admin,
+            interval,
+            once,
+            json,
+            sort,
+            limit,
+        } => {
+            anyhow::ensure!(
+                interval.is_finite() && interval >= 0.2,
+                "--interval must be at least 0.2 seconds"
+            );
+            top::run(
+                &admin,
+                std::time::Duration::from_secs_f64(interval),
+                once,
+                json,
+                sort,
+                limit,
             )
         }
         Command::ConfigCheck { file } => {

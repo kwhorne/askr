@@ -123,9 +123,12 @@ where
     crate::server::why::strip(&mut parts.headers);
     let hyper_req = Request::from_parts(parts, Full::new(body.freeze()));
 
+    let route = rt.route_of(&hyper_req);
+    let start = std::time::Instant::now();
     let resp = crate::server::handle(hyper_req, rt, peer)
         .await
         .map_err(|e| anyhow::anyhow!("handle: {e:?}"))?;
+    crate::routes::note_response(&route, &resp, start.elapsed().as_micros() as u64);
 
     let (parts, mut resp_body) = resp.into_parts();
     stream

@@ -1094,6 +1094,100 @@ ignore_cookies = ["_ga"]
     );
 }
 
+/// `askr top` through a real server: requests to `/products/1`, `/products/2` and so on
+/// are one route, its PHP time is attributed to it across both workers, a static file
+/// costs no PHP, and a cached page's hits are counted as hits.
+#[test]
+fn askr_top_attributes_cost_to_route_shapes_across_the_fleet() {
+    let app = r#"<?php
+$uri = strtok($_SERVER['REQUEST_URI'] ?? '/', '?');
+if (str_starts_with($uri, '/products/')) { usleep(30000); echo 'product'; exit; }
+if ($uri === '/page') { header('Askr-Cache: 300'); echo 'page'; exit; }
+echo 'cheap';
+"#;
+    let s = Server::start(
+        "top",
+        &[("index.php", app), ("style.css", "body{}")],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+workers = "2"
+[admin]
+listen = "127.0.0.1:{ADMIN}"
+[cache]
+response_slots = 64
+"#,
+    );
+    s.wait_admin();
+    for id in [1, 2, 3] {
+        assert_eq!(get(s.port, &format!("/products/{id}")).body, "product");
+    }
+    for _ in 0..4 {
+        get(s.port, "/cheap");
+    }
+    get(s.port, "/style.css");
+    for _ in 0..3 {
+        get(s.port, "/page");
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args([
+            "top",
+            "--once",
+            "--json",
+            "--admin",
+            &format!("127.0.0.1:{}", s.admin),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let routes = doc["routes"].as_array().unwrap();
+    let find = |name: &str| {
+        routes
+            .iter()
+            .find(|r| r["route"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {doc:#}"))
+    };
+    let products = find("GET /products/*");
+    assert_eq!(products["requests"], 3, "three ids, one route");
+    assert!(products["php_us"].as_u64().unwrap() >= 90_000, "{products}");
+    assert_eq!(
+        routes[0]["route"], "GET /products/*",
+        "the costliest PHP first"
+    );
+    assert_eq!(find("GET /cheap")["requests"], 4);
+    let css = find("GET /style.css");
+    assert_eq!(
+        (css["requests"].as_u64(), css["php_us"].as_u64()),
+        (Some(1), Some(0))
+    );
+    let page = find("GET /page");
+    assert_eq!(
+        (page["hits"].as_u64(), page["misses"].as_u64()),
+        (Some(2), Some(1))
+    );
+
+    // And the table says the same in words.
+    let out = Command::new(env!("CARGO_BIN_EXE_askr"))
+        .args([
+            "top",
+            "--once",
+            "--admin",
+            &format!("127.0.0.1:{}", s.admin),
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let first_row = text.lines().nth(3).unwrap_or("");
+    assert!(first_row.starts_with("GET /products/*"), "{text}");
+}
+
 /// The bug: the cache key used the raw `Host` header (with port) while routing used
 /// a normalised one, so `PURGE` could never match anything.
 #[test]
