@@ -106,6 +106,7 @@ curl -H "Authorization: Bearer $ASKR_ADMIN_TOKEN" http://host:9000/api/status
 | `queues_idle` | Queues a worker polls that hold no jobs right now: `{queue, app, last_polled_secs, last_drained_secs}`. |
 | `warnings` | Lanes that are in trouble, named, with the numbers behind the call. Empty when nothing is wrong — see below. |
 | `state_bleed` | Application state a worker's state-bleed detector found still growing between requests: `{key, app, from, to, reports, first_seen_secs, last_seen_secs}` per key, most-reported first. Empty when nothing was found or no detector runs — see [Worker mode](WORKER_MODE.md#in-production-paranoid_sample). `state_bleed_dropped` counts findings past the table's 64 keys. |
+| `verify` | The last verified reload (`[reload] verify`): `state` (`idle`, `replaying`, `done`), `recorded`, `replayed`, `identical`, `changed`, `flaky`, `regressed`, and `regressions` (`{url, before, after}`). Absent when verification is off. See [Deployment](DEPLOYMENT.md#verified-reloads). |
 | `pids` | Live worker PIDs. |
 
 #### Queue liveness and `warnings`

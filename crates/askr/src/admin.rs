@@ -447,6 +447,7 @@ fn status_json(info: &Info) -> String {
         warnings,
         state_bleed,
         state_bleed_dropped,
+        verify: crate::verify::report(),
         rollout: s.rollout,
         sandbox,
         pids: s.pids,
@@ -608,6 +609,10 @@ struct StatusDoc {
     state_bleed: Vec<crate::bleed::Leak>,
     /// Findings that did not fit the table.
     state_bleed_dropped: u64,
+    /// The last verified reload (`[reload] verify`): what the canary replayed and how
+    /// the new code answered. Absent when verification is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<crate::verify::Report>,
     rollout: &'static str,
     sandbox: SandboxDoc,
     workers: Vec<WorkerDoc>,

@@ -357,6 +357,9 @@ broadcast ring.
 | `canary_min_requests` | int | Requests the canary must serve for a verdict; below this the rollout is `inconclusive` and continues with a warning. Default `20`. |
 | `canary_max_error_rate` | float | Percentage points of error rate the canary may exceed the fleet by. Default `2.0`. |
 | `canary_max_latency_factor` | float | Mean-latency factor vs the fleet. Default `3.0`. |
+| `verify` | bool | Verified reloads: the canary replays the last distinct anonymous GETs the old code answered, and a page that worked before and fails now aborts the rollout. Needs `canary`. See [Deployment](DEPLOYMENT.md#verified-reloads). |
+| `verify_requests` | int | URLs replayed per reload, most recent first. Default `200`. |
+| `verify_timeout` | int | Seconds the gate waits for the replay before calling the canary unhealthy. Default `120`. |
 
 ### Example
 

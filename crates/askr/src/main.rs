@@ -50,6 +50,7 @@ mod top;
 mod tune;
 mod upgrade;
 mod upload;
+mod verify;
 mod worker;
 
 use std::net::SocketAddr;
@@ -814,6 +815,7 @@ fn main() -> anyhow::Result<()> {
             let admin_listen = r.admin_listen;
             let paranoid = r.paranoid;
             let paranoid_sample = r.paranoid_sample;
+            let verify_cfg = (r.verify, r.verify_requests, r.verify_timeout);
             let cache_slots = r.cache_slots;
             let cache_large_slots = r.cache_large_slots;
             let response_cache = r.response_cache_slots;
@@ -874,6 +876,14 @@ fn main() -> anyhow::Result<()> {
             metrics::Metrics::init();
             routes::init();
             bleed::init();
+            if let (true, budget, timeout) = verify_cfg {
+                verify::init(budget, timeout);
+                tracing::info!(
+                    budget,
+                    "verified reloads on: the canary replays up to {budget} recent requests \
+                     and aborts the rollout on a page that worked before and fails now"
+                );
+            }
 
             // Auto-TLS via ACME: obtain the cert in the master (HTTP-01 on
             // --acme-http) before forking; workers serve HTTPS from the cache.

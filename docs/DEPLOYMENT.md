@@ -165,7 +165,51 @@ What each verdict means:
 - **inconclusive** — the canary served fewer than `canary_min_requests`, so there was
   nothing to judge. The rollout **continues** (a deploy shouldn't be blocked by an
   absence of evidence) and logs a warning. On a quiet site, raise `canary_window` or
-  lower `canary_min_requests` to make the gate meaningful.
+  lower `canary_min_requests` to make the gate meaningful — or turn on verified
+  reloads, below, which give the canary its evidence instead of waiting for it.
+
+### Verified reloads
+
+On most sites the canary's window sees a handful of requests, often to the same two
+pages, so the verdict is *inconclusive* and the deploy goes ahead on no evidence — and a
+page nobody visited in those seconds is never tried. `[reload] verify = true` closes
+that gap:
+
+```toml
+[reload]
+canary = true
+verify = true
+verify_requests = 200   # most recent distinct URLs to replay
+verify_timeout = 120    # seconds to wait for the replay
+```
+
+1. While serving, every worker remembers the last distinct **anonymous GETs that ran
+   PHP** — URL, status and a hash of the body — in shared memory (256 URLs).
+2. When the canary boots on the new code, it **replays** them through its own request
+   handler — no network, no cache, no rate limit, not in the metrics — alongside the
+   live traffic it serves.
+3. A page that answered **2xx/3xx before and 5xx now**, or **2xx before and 4xx now**,
+   is a regression. It is tried once more first; one that passes the second time is
+   counted as *flaky*, not blamed on the deploy. A changed body is counted but not
+   judged — a deploy is supposed to change pages.
+4. The gate waits for the replay. A regression **aborts** the rollout exactly as an
+   unhealthy canary does; a clean replay turns a quiet window from *inconclusive* into
+   *ok*:
+
+```
+INFO  verify: replaying recent requests against the new code urls=143
+ERROR verify: this answered 200 before the deploy and 500 now url=shop.test/checkout
+ERROR canary UNHEALTHY — aborting reload
+      reason=verification: 1 page(s) that worked before the deploy fail now: shop.test/checkout 200→500
+```
+
+`/api/status` reports the last verification under `verify`: `replayed`, `identical`,
+`changed`, `flaky`, `regressed`, and the regressions with their before and after status.
+
+Only anonymous GETs are recorded and replayed — a request with a session cookie or an
+`Authorization` header is somebody's, and a POST is not safe to repeat. That is also
+the limit of what it can tell you: a page only signed-in users reach is not replayed.
+Replays do run the application, so a GET that writes (a view counter) writes once more.
 
 > **Worker mode vs per-request mode.** In worker mode the surviving workers hold the
 > *previous* app in memory, so an abort genuinely keeps the old code serving. In

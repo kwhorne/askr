@@ -456,6 +456,12 @@ pub async fn run(
         });
     }
 
+    // Verified reloads: the canary replays what the old code answered, alongside the
+    // live traffic it serves — never instead of it, so a single-worker site stays up.
+    if crate::verify::should_replay() {
+        tokio::spawn(crate::verify::replay(rt.clone()));
+    }
+
     // SIGTERM triggers a graceful drain (used for shutdown and rolling reload).
     // Through a pipe this worker makes now, not tokio's per-process one, which a worker
     // forked after the master built a runtime shares with it — see `crate::term`.
@@ -644,9 +650,13 @@ where
 
     // Rate limiting: refuse before anything expensive happens — a blocked request
     // never costs a PHP cycle, a cache lookup, or a disk stat.
-    if let Some(resp) = ratelimit_check(&req, peer, config) {
-        finish(&rt, &resp, t_start, 0);
-        return Ok(resp);
+    // A verification replay is the server asking itself; it spends nobody's budget.
+    let replaying = crate::verify::replaying();
+    if !replaying {
+        if let Some(resp) = ratelimit_check(&req, peer, config) {
+            finish(&rt, &resp, t_start, 0);
+            return Ok(resp);
+        }
     }
 
     // Cache invalidation over HTTP: PURGE one URL, or BAN a glob of URLs. Handled
@@ -766,7 +776,9 @@ where
     let rule = cache_rule_for(req.uri().path(), &rt.config.cache_rules);
     let passed = rule.is_some_and(|r| r.is_pass());
     let anonymous = !carries_identity(&req, &rt.config.cache_ignore_cookies);
+    // A replay must run the new code, not read what the old code stored.
     let cacheable = rcache::enabled()
+        && !replaying
         && !passed
         && matches!(*req.method(), Method::GET | Method::HEAD)
         && (anonymous || rule.is_some_and(|r| r.force));
@@ -810,7 +822,7 @@ where
     // to mirror. The mirror itself fires after the real response is built.
     let shadow_probe: Option<(Method, String)> = rt.shadow.as_ref().and_then(|sh| {
         let has_cookie = req.headers().contains_key(hyper::header::COOKIE);
-        if crate::shadow::eligible(req.method(), has_cookie) && sh.sampled() {
+        if !replaying && crate::shadow::eligible(req.method(), has_cookie) && sh.sampled() {
             let pq = req
                 .uri()
                 .path_and_query()
@@ -1184,12 +1196,22 @@ where
                     crate::shadow::compare_owned(client, base, method, pq, ps, ph).await;
                 });
             }
+            // Verified reloads: remember what the old code answered to an anonymous GET,
+            // and carry the body's hash so a replay compares the same bytes.
+            let body_hash = (crate::verify::ENABLED.load(Ordering::Relaxed))
+                .then(|| crate::verify::body_hash(&resp.body));
+            if let Some(h) = body_hash {
+                if !replaying && anonymous && parts.method == Method::GET {
+                    let pq = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+                    crate::verify::record(&authority, pq, resp.status, h);
+                }
+            }
             // `PASS` makes a rule-bypassed path visible in the response, so you can
             // tell "not cacheable" from "a rule said no" with curl.
             // Cache oracle: record what this request cost and what it returned, so
             // `askr cache-report` can tell the operator whether caching it would be
             // both worthwhile and safe. Off unless --traffic-log is set.
-            if rt.traffic.is_some() {
+            if rt.traffic.is_some() && !replaying {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 resp.body.hash(&mut h);
@@ -1238,7 +1260,10 @@ where
             } else {
                 resp
             };
-            let built = build_response(resp, state, &accept_encoding);
+            let mut built = build_response(resp, state, &accept_encoding);
+            if let Some(h) = body_hash {
+                built.extensions_mut().insert(crate::verify::BodyHash(h));
+            }
             #[cfg(feature = "otel")]
             otel_phases.push(crate::otel::Phase {
                 name: "response.build",
@@ -1486,6 +1511,11 @@ fn redirect_target<B>(
 
 /// Record metrics and advance the recycle counter for a finished request.
 fn finish(rt: &Runtime, response: &Response<ResBody>, t_start: Instant, php_us: u64) {
+    // A verification replay is not traffic: not in the metrics, the canary's own
+    // counters, or the count that recycles a worker.
+    if crate::verify::replaying() {
+        return;
+    }
     if let Some(m) = crate::metrics::Metrics::get() {
         let total_us = t_start.elapsed().as_micros() as u64;
         let bytes = response.body().size_hint().exact().unwrap_or(0);

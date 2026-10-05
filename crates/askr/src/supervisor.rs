@@ -688,16 +688,60 @@ pub(crate) fn supervise(
         }
 
         // Canary gate: once the window elapses, decide whether to roll the rest.
+        //
+        // With verified reloads the verdict also waits for the canary's replay of what
+        // the old code answered: a regression there aborts like an unhealthy canary, and
+        // a clean replay is the evidence a quiet canary window does not have.
+        let verify_gate = if CANARY_ACTIVE.load(Ordering::SeqCst)
+            && now_secs() >= CANARY_DEADLINE.load(Ordering::SeqCst)
+            && crate::verify::ENABLED.load(Ordering::SeqCst)
+            && CHILDREN[0].load(Ordering::SeqCst) != 0
+        {
+            let started = CANARY_DEADLINE
+                .load(Ordering::SeqCst)
+                .saturating_sub(CANARY_WINDOW.load(Ordering::SeqCst));
+            crate::verify::gate(now_secs().saturating_sub(started))
+        } else {
+            crate::verify::Gate::Pass { replayed: 0 }
+        };
         if CANARY_ACTIVE.load(Ordering::SeqCst)
             && now_secs() >= CANARY_DEADLINE.load(Ordering::SeqCst)
+            && verify_gate != crate::verify::Gate::Wait
         {
             CANARY_ACTIVE.store(false, Ordering::SeqCst);
             let alive = CHILDREN[0].load(Ordering::SeqCst) != 0;
-            let verdict = canary_verdict(web, alive);
+            let verdict = match &verify_gate {
+                crate::verify::Gate::Fail { reason } if alive => Verdict::Unhealthy {
+                    reason: format!("verification: {reason}"),
+                },
+                _ => canary_verdict(web, alive),
+            };
+            let replayed = match verify_gate {
+                crate::verify::Gate::Pass { replayed } => replayed,
+                _ => 0,
+            };
+            // A quiet window with a clean replay is not "no evidence": the new code
+            // answered every recent page it was asked without a regression.
+            let verdict = match verdict {
+                Verdict::Inconclusive { requests, .. } if replayed > 0 => {
+                    tracing::info!(
+                        live_requests = requests,
+                        replayed,
+                        "canary saw little live traffic, but answered {replayed} replayed \
+                         requests without a regression — rolling the rest"
+                    );
+                    Verdict::Healthy {
+                        requests,
+                        err_pct: 0.0,
+                    }
+                }
+                v => v,
+            };
             match verdict {
                 Verdict::Healthy { requests, err_pct } => {
                     tracing::info!(
                         requests,
+                        replayed,
                         err_pct = format!("{err_pct:.2}%"),
                         "canary healthy — rolling the rest"
                     );
@@ -1219,6 +1263,8 @@ extern "C" fn on_reload(_sig: libc::c_int) {
 /// async-signal-safe: atomics and `libc::kill`, nothing that allocates or locks.
 fn begin_reload() {
     if CANARY_ENABLED.load(Ordering::SeqCst) {
+        // A new deploy gets a new verdict. Atomics only — this is a signal handler.
+        crate::verify::reset();
         CANARY_ERR_BASE.store(error_count(), Ordering::SeqCst);
         // Snapshot the fleet so the canary is compared against the *same* window.
         // Atomics only in here: this is a signal handler.

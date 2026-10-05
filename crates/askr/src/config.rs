@@ -427,6 +427,24 @@ pub struct ReloadSection {
     /// Mean-latency factor the canary may exceed the fleet by (3.0 = 3×).
     #[serde(default = "default_canary_max_latency_factor")]
     pub canary_max_latency_factor: f64,
+    /// Verified reloads: the canary replays the last distinct anonymous GETs the old
+    /// code answered, and a page that worked before and fails now aborts the rollout.
+    /// Needs `canary`.
+    #[serde(default)]
+    pub verify: bool,
+    /// URLs replayed per reload, most recent first.
+    #[serde(default = "default_verify_requests")]
+    pub verify_requests: u64,
+    /// Seconds the gate waits for the replay before calling the canary unhealthy.
+    #[serde(default = "default_verify_timeout")]
+    pub verify_timeout: u64,
+}
+
+fn default_verify_requests() -> u64 {
+    200
+}
+fn default_verify_timeout() -> u64 {
+    120
 }
 
 fn default_canary_window() -> u64 {
@@ -454,6 +472,9 @@ impl Default for ReloadSection {
             canary_min_requests: default_canary_min_requests(),
             canary_max_error_rate: default_canary_max_error_rate(),
             canary_max_latency_factor: default_canary_max_latency_factor(),
+            verify: false,
+            verify_requests: default_verify_requests(),
+            verify_timeout: default_verify_timeout(),
         }
     }
 }
@@ -573,6 +594,10 @@ pub struct Resolved {
     pub canary_min_requests: u64,
     pub canary_max_error_rate: f64,
     pub canary_max_latency_factor: f64,
+    /// `[reload] verify`, and its budget and patience.
+    pub verify: bool,
+    pub verify_requests: u64,
+    pub verify_timeout: u64,
 }
 
 impl FileConfig {
@@ -844,6 +869,12 @@ impl FileConfig {
             self.worker.paranoid_sample,
             "worker.paranoid_sample",
         )?;
+
+        anyhow::ensure!(
+            !self.reload.verify || self.reload.canary,
+            "reload.verify needs reload.canary = true — the replay runs in the canary, and \
+             its verdict is part of the canary gate"
+        );
 
         // TLS validation.
         let tls_self_signed = self.tls.self_signed;
@@ -1129,6 +1160,9 @@ impl FileConfig {
             canary_min_requests: self.reload.canary_min_requests,
             canary_max_error_rate: self.reload.canary_max_error_rate.max(0.0),
             canary_max_latency_factor: self.reload.canary_max_latency_factor.max(1.0),
+            verify: self.reload.verify,
+            verify_requests: self.reload.verify_requests.max(1),
+            verify_timeout: self.reload.verify_timeout.max(1),
         }
     }
 }

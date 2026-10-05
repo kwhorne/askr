@@ -7,6 +7,23 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ### Added
 
+- **Verified reloads: `[reload] verify = true`.** The canary gate judges the new worker
+  on whatever live traffic reaches it in its window — on most sites a handful of
+  requests, so the verdict is *inconclusive* and the deploy goes ahead on no evidence,
+  and a page nobody visited in those seconds is never tried. Now every worker remembers
+  the last distinct anonymous GETs that ran PHP (URL, status, body hash), and the canary
+  replays them through its own handler on the new code — no cache, no rate limit, not in
+  the metrics, alongside its live traffic. A page that worked before and fails now (2xx
+  or 3xx to 5xx, 2xx to 4xx) is tried once more, then aborts the rollout like an
+  unhealthy canary; a clean replay turns a quiet window into *ok*. `/api/status` reports
+  it under `verify`.
+
+  Tested end to end in worker mode, where the old fleet keeps the old code in memory: a
+  deploy that breaks `/b` — a page the quiet canary window never saw — is aborted with
+  `/b 200→500` named, and the old workers keep serving it; a healthy deploy rolls as
+  *ok* on the replay's evidence. With the verdict ignored, both tests see the old
+  behaviour — *inconclusive*, and the broken deploy rolls on.
+
 - **State-bleed detection in production: `[worker] paranoid_sample = N`.** The
   `--paranoid` detector checks every request and reports every growth, which is right
   in development and too expensive and too noisy for production. Sampled, it checks one

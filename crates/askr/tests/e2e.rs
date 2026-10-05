@@ -1272,6 +1272,116 @@ listen = "127.0.0.1:{ADMIN}"
     );
 }
 
+/// A worker-mode app whose behaviour is fixed at boot: workers booted before `broken`
+/// exists keep serving every page; a worker booted after it fails `/b`. That is a deploy
+/// as worker mode sees it — the old fleet keeps the old code in memory.
+fn verify_app(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/index.php"), "<?php\n").unwrap();
+    std::fs::write(
+        dir.join("app/worker.php"),
+        r#"<?php
+$broken = file_exists(__DIR__ . '/broken');
+while (askr_handle_request(function (array $r) use ($broken): int {
+    $path = strtok($r['uri'], '?');
+    if ($broken && $path === '/b') { http_response_code(500); echo 'fatal'; return 500; }
+    echo 'page ' . $path;
+    return 200;
+})) {}
+"#,
+    )
+    .unwrap();
+}
+
+const VERIFY_CONFIG: &str = r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+workers = "2"
+[worker]
+script = "{ROOT}/worker.php"
+[admin]
+listen = "127.0.0.1:{ADMIN}"
+[reload]
+canary = true
+canary_window = 1
+canary_min_requests = 1000
+verify = true
+verify_timeout = 30
+"#;
+
+fn wait_rollout(s: &Server, want: &[&str]) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let st: serde_json::Value = serde_json::from_str(&s.admin_status()).unwrap();
+        let r = st["rollout"].as_str().unwrap_or("").to_string();
+        if want.contains(&r.as_str()) || Instant::now() > deadline {
+            return st;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A verified reload aborts a deploy that breaks a page the old code served — a page the
+/// canary's own live traffic never touched, because the window is quiet.
+#[test]
+fn a_verified_reload_stops_a_deploy_that_breaks_a_page() {
+    let dir = unique_dir("verify-bad");
+    verify_app(&dir);
+    let s = Server::start_in(dir.clone(), &[], VERIFY_CONFIG);
+    s.wait_admin();
+    for p in ["/a", "/b", "/c?x=1"] {
+        assert_eq!(
+            get(s.port, p).body,
+            format!("page {}", p.split('?').next().unwrap())
+        );
+    }
+    std::fs::write(dir.join("app/broken"), "1").unwrap();
+    s.signal(libc::SIGHUP);
+    let st = wait_rollout(&s, &["aborted", "ok", "inconclusive"]);
+    assert_eq!(st["rollout"], "aborted", "{st:#}\n{}", s.log_contents());
+    let v = &st["verify"];
+    assert_eq!(v["state"], "done", "{v:#}");
+    assert_eq!(v["regressed"], 1, "{v:#}");
+    let reg = &v["regressions"][0];
+    assert!(reg["url"].as_str().unwrap().ends_with("/b"), "{reg}");
+    assert_eq!(
+        (reg["before"].as_u64(), reg["after"].as_u64()),
+        (Some(200), Some(500))
+    );
+    assert!(
+        s.log_has("answered 200 before the deploy and 500 now"),
+        "{}",
+        s.log_contents()
+    );
+    // The old worker still serves the working page.
+    assert_eq!(get(s.port, "/b").body, "page /b");
+}
+
+/// And a healthy deploy rolls on the strength of the replay, where the quiet window alone
+/// would have said "inconclusive".
+#[test]
+fn a_verified_reload_rolls_a_healthy_deploy_on_the_replay_s_evidence() {
+    let dir = unique_dir("verify-ok");
+    verify_app(&dir);
+    let s = Server::start_in(dir, &[], VERIFY_CONFIG);
+    s.wait_admin();
+    for p in ["/a", "/b", "/c"] {
+        get(s.port, p);
+    }
+    s.signal(libc::SIGHUP);
+    let st = wait_rollout(&s, &["aborted", "ok", "inconclusive"]);
+    assert_eq!(st["rollout"], "ok", "{st:#}\n{}", s.log_contents());
+    // Three pages here, and `/` from the harness's readiness check.
+    assert!(st["verify"]["replayed"].as_u64().unwrap() >= 3, "{st:#}");
+    assert_eq!(st["verify"]["regressed"], 0);
+    assert!(
+        s.log_has("replayed requests without a regression"),
+        "{}",
+        s.log_contents()
+    );
+}
+
 /// The bug: the cache key used the raw `Host` header (with port) while routing used
 /// a normalised one, so `PURGE` could never match anything.
 #[test]
