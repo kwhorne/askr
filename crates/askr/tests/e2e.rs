@@ -832,6 +832,67 @@ script = "{ROOT}/current/worker.php"
     s.stop_gracefully();
 }
 
+/// Every worker still hears SIGTERM after reloads with a busy admin plane — so a reload
+/// rolls the whole fleet and a stop stops.
+///
+/// Two things a worker forked from the busy master inherited broke this:
+///
+/// - the master's tokio signal pipe (the admin plane's runtime), so a SIGTERM's wake-up
+///   could be read by another process and the worker never drained — the next reload
+///   left it on the old code, and a stop hung (`stop_gracefully` panics after 30 s).
+///   With workers on tokio's signal handling this test failed six runs in six. See
+///   `term.rs`, whose own test shows the mechanism deterministically;
+/// - the pipe of a `ps` the admin plane was running for `/api/status`, so the admin
+///   plane waited for an end-of-file that the worker held: it stopped answering until
+///   that worker restarted. With RSS read through `ps` this test failed five in five.
+#[test]
+fn every_worker_hears_sigterm_after_reloads_with_a_busy_admin_plane() {
+    let s = Server::start(
+        "sigterm",
+        &[
+            ("index.php", "<?php\n"),
+            (
+                "worker.php",
+                "<?php\nwhile (askr_handle_request(function (array $r): int { echo 'ok'; return 200; })) {}\n",
+            ),
+        ],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+workers = "4"
+[worker]
+script = "{ROOT}/worker.php"
+[admin]
+listen = "127.0.0.1:{ADMIN}"
+"#,
+    );
+    s.wait_admin();
+    for round in 0..3 {
+        let before = s.worker_pids();
+        s.signal(libc::SIGHUP);
+        // The whole fleet rolls — every pre-reload worker gone — while the admin plane is
+        // asked for status throughout, as a dashboard would.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let now = s.worker_pids();
+            if now.len() == 4 && !now.iter().any(|p| before.contains(p)) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reload {round}: workers {before:?} never all rolled (now {now:?}); log:\n{}",
+                s.log_contents()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(get(s.port, "/").body, "ok");
+    }
+    // And a stop stops: this panics if the master is still waiting after 30 s.
+    let mut s = s;
+    s.stop_gracefully();
+}
+
 /// The bug: the cache key used the raw `Host` header (with port) while routing used
 /// a normalised one, so `PURGE` could never match anything.
 #[test]

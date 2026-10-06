@@ -425,7 +425,9 @@ pub async fn run(
     }
 
     // SIGTERM triggers a graceful drain (used for shutdown and rolling reload).
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Through a pipe this worker makes now, not tokio's per-process one, which a worker
+    // forked after the master built a runtime shares with it — see `crate::term`.
+    let mut sigterm = crate::term::Term::install()?;
 
     loop {
         tokio::select! {

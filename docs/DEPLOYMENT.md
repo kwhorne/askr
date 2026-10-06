@@ -104,11 +104,17 @@ swap — cache, sessions and queued jobs belong to `current/public`, not to a re
 > served that release again while reporting success. In worker mode the application
 > boots from `ASKR_APP_BASE`, which was never resolved, so the PHP was the new release
 > and the static files the old one — new HTML pointing at built assets that did not
-> exist. That is the mixed content once observed on a live deployment after a reload
-> (Askr-51), which a PID-tracking reload test could not reproduce because the workers
-> really were all new. Whether it is what that deployment hit cannot be confirmed after
-> the fact; it is the one mechanism found that produces exactly that, and
+> exist. That is one mechanism for the mixed content once observed on a live deployment
+> after a reload (Askr-51), and
 > `a_symlink_swap_deploy_serves_the_new_release_after_a_reload` now holds it shut.
+>
+> **A second one, fixed after 1.7.5:** a reload could skip a worker altogether. A worker
+> forked after the admin plane started shared the master's signal pipe, and its SIGTERM
+> could be taken by another process; it never drained, so the reload moved past it and
+> it kept serving the previous release — every worker new but one, which a PID-tracking
+> test sees only when the admin plane is busy. The same lost signal made a graceful stop
+> hang. Workers now take SIGTERM through a pipe of their own
+> (`every_worker_hears_sigterm_after_reloads_with_a_busy_admin_plane`).
 
 Workers restart **one at a time**, each draining in-flight requests before
 exiting; the master keeps the listen socket open and waits for each fresh worker

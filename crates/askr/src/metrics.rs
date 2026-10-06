@@ -171,13 +171,39 @@ impl Metrics {
     }
 }
 
-/// Resident set size of a process in KB (via `ps`, portable Linux/macOS).
+/// Resident set size of a process in KB, read from the kernel directly.
+///
+/// This used to run `ps` and read its output through a pipe. The admin plane calls it on
+/// every status request, from a thread of the master — and when the master forked a
+/// worker while that `ps` was running, the worker inherited the pipe's write end, so the
+/// read never saw end-of-file: `/api/status` hung until that worker next restarted.
+/// Reading the kernel's own numbers holds nothing a fork could carry away.
+#[cfg(target_os = "linux")]
 pub fn rss_kb(pid: i32) -> Option<u64> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    crate::supervisor::worker_rss_bytes(pid).map(|b| b / 1024)
+}
+
+/// See the Linux version: the same number, from `proc_pidinfo`.
+#[cfg(target_os = "macos")]
+pub fn rss_kb(pid: i32) -> Option<u64> {
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: `info` is a writable proc_taskinfo of exactly `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    (n == size).then_some(info.pti_resident_size / 1024)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn rss_kb(_pid: i32) -> Option<u64> {
+    None
 }
 
 #[cfg(test)]

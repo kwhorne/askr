@@ -41,6 +41,7 @@ mod squeue;
 #[cfg(feature = "sql-backend")]
 mod squeue_sql;
 mod supervisor;
+mod term;
 mod tls;
 mod tune;
 mod upgrade;

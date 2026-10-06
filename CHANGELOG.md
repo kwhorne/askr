@@ -5,6 +5,29 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **A reload could leave a worker on the old code, and a stop could hang.** A worker
+  forked after the master had built a tokio runtime — the admin plane's, or with
+  `--acme` the certificate request's, before the first fork — inherited the master's
+  signal pipe, which tokio keeps one of per process. A SIGTERM's wake-up byte went into
+  that shared pipe, and whichever process read first took it: often not the worker it
+  was for. That worker never drained, so a reload moved on past it and it kept serving
+  the previous release — the "one worker still on the old code after a reload that
+  reported success" once seen live (Askr-51) — and a graceful stop waited for it until
+  the master was killed. Workers now take SIGTERM through a pipe they make after the
+  fork (`term.rs`). Its test forks eight workers at a time under a parent with its own
+  signal pipe: on tokio's signal handling 54–58 of 80 heard their SIGTERM, every run;
+  now all 80 do. End to end, three reloads of four workers with the admin plane polled
+  throughout failed six runs in six, and pass ten in ten.
+
+- **`/api/status` could stop answering after a reload.** It read each worker's memory by
+  running `ps` and reading its output through a pipe; a worker forked while that `ps` was
+  running inherited the pipe, and the admin plane waited for an end-of-file the worker
+  held — until that worker next restarted. Caught in a stack sample of the master,
+  blocked in `rss_kb` → `read_output`. RSS is now read from the kernel directly
+  (`/proc/<pid>/statm`, `proc_pidinfo` on macOS), so there is no pipe to inherit.
+
 ## 1.7.5 — 2026-10-06
 
 One fix, released alone because it is the deploy itself: a release swapped in behind a
