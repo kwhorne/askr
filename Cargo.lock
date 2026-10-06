@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "askr"
-version = "1.7.4"
+version = "1.7.5"
 dependencies = [
  "anyhow",
  "askr-php",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "askr-php"
-version = "1.7.4"
+version = "1.7.5"
 dependencies = [
  "cc",
  "serde_json",

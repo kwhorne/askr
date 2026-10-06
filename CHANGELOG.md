@@ -5,6 +5,14 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.7.5 — 2026-10-06
+
+One fix, released alone because it is the deploy itself: a release swapped in behind a
+`current` symlink and reloaded — the zero-downtime deploy DEPLOYMENT.md recommends, and
+what Envoyer, Deployer and Forge do — kept serving the old release, and in worker mode
+served new PHP with the old release's static files, while the reload reported success.
+If you deploy that way, this is the upgrade to take now.
+
 ### Fixed
 
 - **A release deploy through a symlink served the old release after every reload, and
@@ -15,8 +23,9 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   static files the old one, which is the mixed content once seen after a reload on a
   live deployment and never reproduced (Askr-51). The root is now kept as written —
   checked, made absolute, symlinks left alone — and followed on every request, like
-  nginx's `root`. Reproduced first: an end-to-end test that swaps `current` and reloads
-  served release a before the fix and serves release b, PHP and static files, after it.
+  nginx's `root`. Reproduced first, in both modes: end-to-end tests that swap `current`
+  and reload served release a (per-request) and new PHP with release a's static files
+  (worker mode) before the fix, and release b throughout after it.
 
   The application's namespace in shared memory is now derived from the same spelling,
   so a deploy is no longer a new application: cache, sessions and queued jobs survive
