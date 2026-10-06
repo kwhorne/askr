@@ -177,12 +177,16 @@ for mode in per-request worker; do
   cfg="$WORK/$mode.toml"
   printf '[server]\nlisten = "0.0.0.0:8080"\nroot = "/app/public"\n' > "$cfg"
   [ "$mode" = worker ] && printf '\n[worker]\nscript = "/fixtures/framework_worker.php"\n' >> "$cfg"
-  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
   name="askr-verify-$mode-$$"
   CONTAINERS+=("$name")
-  docker run -d --name "$name" -p "127.0.0.1:$port:8080" \
+  # Docker picks the host port as it publishes it. Choosing a free one first and handing
+  # it over is a race: anything can take it in between, and the check then reports that
+  # the image could not start.
+  docker run -d --name "$name" -p "127.0.0.1::8080" \
     -v "$WORK/public:/app/public:ro" -v "$FIX:/fixtures:ro" -v "$cfg:/etc/askr/askr.toml:ro" \
     "$IMAGE:$V" serve --config /etc/askr/askr.toml >/dev/null 2>&1 || { unk "$mode: could not start the image"; continue; }
+  port=$(docker port "$name" 8080/tcp | sed -n 's/^127\.0\.0\.1:\([0-9]*\)$/\1/p' | head -1)
+  [ -n "$port" ] || { unk "$mode: could not read the published port"; continue; }
   deadline=$((SECONDS + 60)); up=""
   while [ "$SECONDS" -lt "$deadline" ]; do
     up=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$port/" 2>/dev/null)

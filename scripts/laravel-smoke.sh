@@ -74,14 +74,21 @@ rm -f "$WORK/app/bootstrap/cache/config.php" "$WORK/app/bootstrap/cache/routes"*
 chmod -R a+rwX "$WORK/app/storage" "$WORK/app/bootstrap/cache"
 
 # --- serve it ------------------------------------------------------------------------------
-PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+# Ports: never "find a free one, release it, hand it to someone else to bind" — between the
+# release and the bind anything can take it, and the smoke then reports that it could not
+# run. In image mode Docker picks the port as it publishes it; in binary mode Askr binds
+# the one we chose, so a bind that lost the race is retried on another.
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 # Loopback (binary mode) and the private ranges a container runtime puts its gateway in
 # (image mode): the peer is a trusted proxy in both, so X-Forwarded-For is believed.
 TRUSTED='["127.0.0.1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]'
 
 if [ "$MODE" = binary ]; then
   [ -x "$TARGET" ] || { echo "no executable at $TARGET" >&2; exit 2; }
-  cat > "$WORK/askr.toml" <<TOML
+  logs() { tail -40 "$WORK/askr.log"; }
+  for attempt in 1 2 3 4 5; do
+    PORT=$(free_port)
+    cat > "$WORK/askr.toml" <<TOML
 [server]
 listen = "127.0.0.1:$PORT"
 root = "$WORK/app/public"
@@ -91,10 +98,18 @@ trusted_proxies = $TRUSTED
 [worker]
 script = "$REPO/examples/laravel-worker.php"
 TOML
-  ASKR_APP_BASE="$WORK/app" SESSION_DRIVER=array CACHE_STORE=array \
-    "$TARGET" serve --config "$WORK/askr.toml" > "$WORK/askr.log" 2>&1 &
-  PID=$!
-  logs() { tail -40 "$WORK/askr.log"; }
+    ASKR_APP_BASE="$WORK/app" SESSION_DRIVER=array CACHE_STORE=array \
+      "$TARGET" serve --config "$WORK/askr.toml" > "$WORK/askr.log" 2>&1 &
+    PID=$!
+    # A lost bind fails at once; give it a moment to, then decide.
+    sleep 1
+    if kill -0 "$PID" 2>/dev/null || ! grep -qi 'address already in use' "$WORK/askr.log"; then
+      break
+    fi
+    echo "port $PORT was taken before Askr could bind it; trying another" >&2
+    PID=""
+  done
+  [ -n "$PID" ] || { echo "could not bind a port in five attempts" >&2; logs >&2; exit 2; }
 else
   cat > "$WORK/askr.toml" <<TOML
 [server]
@@ -109,12 +124,15 @@ listen = "127.0.0.1:9000"
 [worker]
 script = "/opt/askr/examples/laravel-worker.php"
 TOML
-  docker run -d --name "$CONTAINER" -p "127.0.0.1:$PORT:8080" \
+  docker run -d --name "$CONTAINER" -p "127.0.0.1::8080" \
     -e ASKR_APP_BASE=/var/www/app -e SESSION_DRIVER=array -e CACHE_STORE=array \
     -v "$WORK/app:/var/www/app" -v "$WORK/askr.toml:/etc/askr/askr.toml:ro" \
     "$TARGET" serve --config /etc/askr/askr.toml >/dev/null \
     || { echo "docker run failed" >&2; exit 2; }
   logs() { docker logs --tail 40 "$CONTAINER" 2>&1; }
+  # The port Docker chose when it published 8080.
+  PORT=$(docker port "$CONTAINER" 8080/tcp | sed -n 's/^127\.0\.0\.1:\([0-9]*\)$/\1/p' | head -1)
+  [ -n "$PORT" ] || { echo "could not read the published port" >&2; logs >&2; exit 2; }
 fi
 
 BASE="http://127.0.0.1:$PORT"

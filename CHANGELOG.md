@@ -5,6 +5,17 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Internal
+
+- **The release smoke checks no longer race for a port.** `laravel-smoke.sh` and
+  `verify-release.sh` chose a free port, released it, and handed it to Docker or Askr to
+  bind — and anything could take it in between, which the checks then reported as "could
+  not run" (it happened verifying 1.8.2). In image mode Docker now picks the port as it
+  publishes it, read back with `docker port`; in binary mode, where Askr binds the port
+  it is given, a bind that lost the race is retried on another. Forced in a test: with
+  the first port held open, the first attempt fails with "Address already in use" and
+  the second binds.
+
 ## 1.8.2 — 2026-10-06
 
 Dependency updates, each checked for what it touches rather than only built. No
