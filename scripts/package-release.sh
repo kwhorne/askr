@@ -53,7 +53,19 @@ cat > "$DIST/askr-run.sh" <<'EOF'
 #!/usr/bin/env bash
 # Convenience launcher: enables opcache (+ JIT), then runs askr from this dir.
 # PHP 8.5 has OPcache built into libphp, so we just switch it on via the INI.
-HERE="$(cd "$(dirname "$0")" && pwd)"
+#
+# "This dir" is where the launcher really lives, not where a symlink to it does:
+# linked into PATH as `askr`, dirname "$0" would be the PATH directory, and the
+# exec below would run the link — this script — again, for ever.
+SELF="$0"
+while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *) SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
 if [ -z "${ASKR_PHP_INI:-}" ]; then
     export ASKR_PHP_INI="opcache.enable=1
 opcache.enable_cli=1

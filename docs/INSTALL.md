@@ -157,6 +157,11 @@ sudo apt-get install -y libssl3 libxml2 libonig5 libsqlite3-0
 ./askr-run.sh doctor
 ```
 
+To have `askr` on your `PATH`, link the launcher rather than the binary, so every
+command gets the opcache settings the server does:
+`sudo ln -s "$PWD/askr-run.sh" /usr/local/bin/askr` (from 1.8.1, which follows the link
+to find its own directory).
+
 `doctor` verifies the PHP build, the extensions your app will need, and platform
 support. **Read its output before going further** — it's designed to tell you what's
 wrong while nothing is at stake.

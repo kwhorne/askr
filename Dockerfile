@@ -70,6 +70,13 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /opt/askr /opt/askr
+# `askr` on PATH, so `docker exec <container> askr why /` and `askr top` work as they do
+# on a host. Through the launcher, for the same opcache settings the server gets. The
+# launcher follows the link to find its directory (1.8.1 on); checked here, so a build
+# against a release whose launcher does not is a failed build rather than a command
+# that runs itself for ever.
+RUN ln -s /opt/askr/askr-run.sh /usr/local/bin/askr \
+    && timeout 10 askr --version
 # System user (auto UID). ubuntu:24.04 already reserves UID 1000 for `ubuntu`, so
 # we don't force one.
 RUN useradd -r -m -d /home/askr askr \

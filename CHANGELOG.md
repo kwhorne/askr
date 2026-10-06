@@ -5,6 +5,18 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Changed
+
+- **`askr` is on the `PATH` in the Docker image**, so `docker exec <container> askr why /`
+  and `askr top` work as they do on a host; before, the command was
+  `/opt/askr/askr-run.sh`. It is a link to the launcher, which needed a fix first: it
+  found its directory with `dirname "$0"`, so called through a link it looked in the
+  link's directory and ran the link — itself — again, for ever. It now follows links
+  first (checked through an absolute link, a relative one and a chain; the old launcher
+  loops on all three). The image build runs `askr --version` under a timeout, so building
+  against a release with the old launcher fails the build instead of shipping the loop —
+  tried against 1.8.0, it stops there with exit 124.
+
 ## 1.8.0 — 2026-10-06
 
 Four ways for Askr to say what it already knows. `askr why <url>` explains what the

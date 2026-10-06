@@ -37,6 +37,14 @@ Since 1.5.1 a non-loopback `--admin` **refuses to start** without
 `ASKR_ADMIN_TOKEN`: an open admin plane on a network is a public reload trigger.
 If you do need one, set that token — see [Admin API](ADMIN.md).
 
+The commands that talk to that admin plane run inside the container the same way, and
+from 1.8.1 `askr` is on the `PATH` there (before, it was `/opt/askr/askr-run.sh`):
+
+```bash
+docker exec <container> askr why /products/42     # what the server decided, and why
+docker exec <container> askr top                  # what each route costs, live
+```
+
 For anything you start more than once, [`quickstart.yml`](../examples/docker/quickstart.yml)
 is the same thing as a compose file (`docker compose up` / `down`), with worker mode, a
 response cache and a graceful `stop_grace_period` already set. Step-by-step walkthrough
