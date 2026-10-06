@@ -5,6 +5,13 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.1 — 2026-10-06
+
+`askr` on the `PATH` in the Docker image, so the commands 1.8.0 added for a running
+server — `askr why`, `askr top` — are `docker exec <container> askr …` rather than a path
+to the launcher. And the launcher can now be linked into a `PATH` without calling itself
+for ever.
+
 ### Changed
 
 - **`askr` is on the `PATH` in the Docker image**, so `docker exec <container> askr why /`
