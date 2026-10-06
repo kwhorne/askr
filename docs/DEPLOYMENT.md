@@ -108,7 +108,7 @@ swap — cache, sessions and queued jobs belong to `current/public`, not to a re
 > after a reload (Askr-51), and
 > `a_symlink_swap_deploy_serves_the_new_release_after_a_reload` now holds it shut.
 >
-> **A second one, fixed after 1.7.5:** a reload could skip a worker altogether. A worker
+> **A second one, fixed in 1.7.6:** a reload could skip a worker altogether. A worker
 > forked after the admin plane started shared the master's signal pipe, and its SIGTERM
 > could be taken by another process; it never drained, so the reload moved past it and
 > it kept serving the previous release — every worker new but one, which a PID-tracking

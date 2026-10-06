@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.7.5; ARCH=$(uname -m)
+VER=v1.7.6; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.7.5     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.7.6     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.7` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.7.5-full`) are the same server built with the optional features
+The `-full` tags (`1.7.6-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,21 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.7.6
+
+**Nothing to change.** Two fixes, both in how workers forked during a reload behave:
+every worker now drains on SIGTERM, so a reload rolls the whole fleet and a stop
+finishes; and `/api/status` no longer hangs after a reload. If you worked around either —
+restarting instead of reloading, or a stop timeout that ended in `SIGKILL` — a reload is
+enough now.
+
+**New, optional: `app_id`** (`[server] app_id`, `[[site]] app_id`). Leave it unset and
+nothing moves. Set it only if you use the durable SQL backends (`ASKR_CACHE_DB`,
+`ASKR_QUEUE_DB`) and want applications kept apart in them, and **drain the queue first**
+if the application already uses `ASKR_QUEUE_DB`: its queue names gain a prefix, and jobs
+queued under the bare name are not seen afterwards. See
+[Storage backends](STORAGE_BACKEND.md#one-application-per-l2-database).
 
 ### To 1.7.5
 

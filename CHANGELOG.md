@@ -5,6 +5,16 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.7.6 — 2026-10-06
+
+A reload could leave one worker on the previous release, and a graceful stop could hang
+— a worker forked after the admin plane started (or, with `--acme`, any worker) shared
+the master's signal pipe and could lose its SIGTERM to another process. That is the
+other half of Askr-51, after 1.7.5's symlink fix, and the reason to take this release if
+you reload in worker mode or use `--acme`. With it: `/api/status` no longer stalls after
+a reload, and `app_id`, which names an application the same on every host so the
+durable SQL backends can keep applications apart.
+
 ### Added
 
 - **`app_id`: a name for an application, the same on every host.** `[server] app_id`,
