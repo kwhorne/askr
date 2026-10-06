@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.7.6; ARCH=$(uname -m)
+VER=v1.8.0; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.7.6     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.8.0     # or :1.7 to follow patches
 ```
 
-Pin the **exact** version in production and bump it deliberately. `:1.7` follows
+Pin the **exact** version in production and bump it deliberately. `:1.8` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.7.6-full`) are the same server built with the optional features
+The `-full` tags (`1.8.0-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,23 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.8.0
+
+**Nothing to change.** Everything new is a command you run or a key you add:
+
+- `askr why <url>` and `askr top` — both need the admin plane (`[admin] listen`), and
+  `askr why` sends a real GET through the server (it runs PHP and can fill the cache).
+- `[worker] paranoid_sample = 1000` — state-bleed detection in production; findings in
+  `/api/status` under `state_bleed`. Needs a worker script that loads the detector, as
+  `examples/laravel-worker.php` does.
+- `[reload] verify = true` (with `canary = true`) — the canary replays recent anonymous
+  GETs before the rest of the fleet rolls. Worth turning on if you reload in worker
+  mode; see [Deployment](DEPLOYMENT.md#verified-reloads) for what it can and cannot see.
+
+Two costs to know. Every response is now counted per route for `askr top` — measured at
+about 1% on a hello-world PHP route and nothing on static files. And with `verify` on,
+each anonymous GET that runs PHP has its body hashed for the replay to compare.
 
 ### To 1.7.6
 

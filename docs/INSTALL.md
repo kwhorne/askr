@@ -33,7 +33,7 @@ You do **not** need nginx, Apache, or Redis. Askr replaces all three.
 ```bash
 docker run --rm --name askr -p 8080:8080 \
   -v /path/to/your/app:/app \
-  ghcr.io/kwhorne/askr:1.7 \
+  ghcr.io/kwhorne/askr:1.8 \
   serve --listen 0.0.0.0:8080 --root /app/public --admin 127.0.0.1:9000
 ```
 
@@ -104,7 +104,7 @@ docker compose logs -f                                      # PHP diagnostics la
 into an image so a deploy is a new image rather than a mutated directory — that's
 [`examples/docker/docker-compose.yml`](../examples/docker/docker-compose.yml) with its
 `Dockerfile`, read-only root filesystem and a volume for `storage/`. Pin an exact version
-(`askr:1.7.6`), not `:1.7` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
+(`askr:1.8.0`), not `:1.8` or `:latest`. Full details: **[DOCKER.md](DOCKER.md)**.
 
 Then skip to [step 4: the Laravel side](#4-the-laravel-side).
 
@@ -118,7 +118,7 @@ Nothing is installed system-wide and no system PHP is touched.
 ### B1. Download and unpack
 
 ```bash
-VER=v1.7.6; ARCH=$(uname -m)
+VER=v1.8.0; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 curl -fsSLO $BASE/$TARBALL
@@ -397,7 +397,7 @@ QUEUE_CONNECTION=askr
 BROADCAST_CONNECTION=askr
 ```
 
-Version the package with the server: `askr-laravel` `1.7.x` goes with an Askr `1.7.x`
+Version the package with the server: `askr-laravel` `1.8.x` goes with an Askr `1.8.x`
 server. Full walkthrough, including the queue and scheduler sidecars:
 **[LARAVEL.md](LARAVEL.md)**.
 

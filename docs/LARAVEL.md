@@ -74,7 +74,7 @@ That's it — the service provider is auto-discovered. Nothing to add to
 > you're in with `docker compose up` — worker mode and a response cache already set.
 
 **Versions track the server.** The package is released alongside Askr with the same
-version number, so pair `askr-laravel` `1.7.x` with an Askr `1.7.x` server. They're
+version number, so pair `askr-laravel` `1.8.x` with an Askr `1.8.x` server. They're
 loosely coupled — the drivers talk to whatever regions the running server exposes — but
 a feature added in a given release needs both halves at that version.
 [Automatic page caching](#automatic-page-caching) needs `^1.4`.
@@ -289,7 +289,7 @@ It's behind a build feature, so the default build is unaffected:
 
 ```bash
 # use the published -full image/tarball (durable L2 + observ compiled in) …
-docker pull ghcr.io/kwhorne/askr:1.7-full
+docker pull ghcr.io/kwhorne/askr:1.8-full
 # … or build it yourself
 cargo build --release --features sql-backend
 ```

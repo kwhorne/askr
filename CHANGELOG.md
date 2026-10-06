@@ -5,6 +5,18 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.0 — 2026-10-06
+
+Four ways for Askr to say what it already knows. `askr why <url>` explains what the
+server decided about one request — cacheable or not and why, which address it believed,
+which site, hit or miss — from the code that made each decision. `askr top` shows what
+each route costs, live, across every worker. `[worker] paranoid_sample` watches for state
+bleed in production and puts what keeps growing in `/api/status`. And `[reload] verify`
+has the canary replay what the old code recently answered, so a deploy that breaks a
+page stops before the fleet rolls — where a quiet canary window used to say
+"inconclusive" and roll on. All four are off until asked for; nothing changes on
+upgrade.
+
 ### Added
 
 - **Verified reloads: `[reload] verify = true`.** The canary gate judges the new worker
