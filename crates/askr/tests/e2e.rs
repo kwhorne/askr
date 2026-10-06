@@ -812,16 +812,23 @@ root = "{ROOT}/current/public"
 workers = "2"
 [worker]
 script = "{ROOT}/current/worker.php"
+[admin]
+listen = "127.0.0.1:{ADMIN}"
 "#,
     );
+    s.wait_admin();
     assert_eq!(get(s.port, "/").body, "release a");
+    let before = s.worker_pids();
     let next = dir.join("app/current.next");
     std::os::unix::fs::symlink(dir.join("app/releases/b"), &next).unwrap();
     std::fs::rename(&next, &current).unwrap();
     s.signal(libc::SIGHUP);
+    // A reload rolls one worker at a time, with a pause between, so "release b" from one
+    // request only means the first worker has rolled. Wait for the whole fleet: no worker
+    // from before the reload left.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline && get(s.port, "/").body != "release b" {
-        std::thread::sleep(Duration::from_millis(200));
+    while Instant::now() < deadline && s.worker_pids().iter().any(|p| before.contains(p)) {
+        std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(
         (get(s.port, "/").body, get(s.port, "/asset.txt").body),
