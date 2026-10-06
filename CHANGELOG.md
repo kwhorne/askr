@@ -5,6 +5,28 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.2 — 2026-10-06
+
+Dependency updates, each checked for what it touches rather than only built. No
+behaviour changes and nothing to configure.
+
+### Changed
+
+- **`minisign-verify` 0.3.0** — the library that checks the signature `askr upgrade`
+  verifies before it installs anything. Its 0.2.5 → 0.3.0 diff is one file: the
+  little-endian helpers rewritten from `unsafe` pointer copies to safe slice copies;
+  Ed25519, BLAKE2b, SHA-512 and the verification itself are byte-for-byte unchanged.
+  Run against a real release, it accepts the 1.8.0 tarball with the embedded key and
+  rejects a copy with one byte changed, as 0.2.5 does.
+
+- **OpenTelemetry 0.33** (`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`,
+  feature `otel`), bumped together — one at a time they do not build. No code change.
+  Checked against a real OTLP collector: the same traces as 0.32 arrive, `http.request`
+  with `request.read`, `php.execute` and `response.build` under it.
+
+- **Minor and patch updates**: `cc` 1.6.0, `hyper-util` 0.1.21, `clap` 4.6.7,
+  `tokio-rustls` 0.26.6, `libc` 0.2.190, `quinn` 0.11.12.
+
 ## 1.8.1 — 2026-10-06
 
 `askr` on the `PATH` in the Docker image, so the commands 1.8.0 added for a running
