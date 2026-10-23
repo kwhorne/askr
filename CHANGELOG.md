@@ -5,6 +5,35 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Security
+
+- **PHP 8.5.12** (from 8.5.8), the libphp every release and image embeds. Four releases
+  of fixes, of which these reach extensions Askr's Laravel build includes:
+  - **OpenSSL**: TLS hostname verification fell back to the certificate's CN after a SAN
+    mismatch (CVE-2026-91769), and a heap buffer overflow on a crafted wildcard CN
+    (CVE-2026-91767) — both in PHP's own client-side checks, so any outgoing HTTPS from
+    the application.
+  - **HTTP stream wrapper**: credentials leaked across origins on redirect
+    (CVE-2026-91766); out-of-bounds reads on an empty `Location` (CVE-2026-93682) and in
+    `convert.*` filters (CVE-2026-92842).
+  - **mysqlnd** (`pdo_mysql`): packet overreads in the wire protocol (CVE-2025-1218).
+  - **Phar**: TAR entry injection through an integer overflow (CVE-2026-6103), and a
+    crash through recursive symlinks (CVE-2026-7260).
+  - **BCMath**: out-of-bounds write in `bccomp()` (CVE-2026-17544). **GD**: libgd update
+    (CVE-2026-9672).
+  - **Core**: state corruption after a bailout (GHSA-w8hw-w9fx-j79w,
+    GHSA-6wmf-4rv5-p3rp) — the mechanism worker mode recovers from a fatal error with.
+  Plus fixes in extensions Askr does not build (FPM, SOAP, pgsql, Windows I/O) and
+  stability fixes across DOM, intl and the optimizer.
+
+### Changed
+
+- **The PHP tarball is checked before it is built.** `build-libphp.sh` downloaded
+  `php-X.tar.gz` and unpacked it as it came. It now verifies the SHA-256 php.net
+  publishes — pinned beside the version — and stops on a mismatch, removing the file, so a
+  truncated download or a tampered mirror cannot become the PHP every release embeds.
+  Tried with a substitute tarball: the build stops and says which checksum it expected.
+
 ### Internal
 
 - **The release smoke checks no longer race for a port.** `laravel-smoke.sh` and

@@ -39,6 +39,11 @@ PROFILE=laravel ./scripts/build-libphp.sh
 
 Override the PHP version with `PHP_VERSION=8.4.x ./scripts/build-libphp.sh`.
 
+The tarball is checked against its SHA-256 before it is unpacked, and a mismatch stops
+the build. The pinned version carries its checksum in the script; for another version,
+pass the one php.net publishes as `PHP_SHA256=…`, or the script looks it up from
+php.net's release API and says that it did.
+
 ### Ubuntu
 
 Install the dependency dev libraries first — PHP's `configure` finds them via

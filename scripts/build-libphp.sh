@@ -26,7 +26,14 @@
 #   PROFILE=laravel ./scripts/build-libphp.sh
 set -euo pipefail
 
-PHP_VERSION="${PHP_VERSION:-8.5.8}"
+PHP_VERSION="${PHP_VERSION:-8.5.12}"
+# SHA-256 of php-$PHP_VERSION.tar.gz, as php.net publishes it
+# (https://www.php.net/releases/index.php?json&version=8.5). Pinned with the version, so a
+# tarball that is not the one released — a truncated download, a tampered mirror — stops
+# the build instead of becoming the PHP every Askr release embeds. Overriding PHP_VERSION
+# needs a matching PHP_SHA256, or the build looks it up from php.net and says so.
+PHP_SHA256_PINNED="81a0f450349e84b08eb43faa85f8a4c835684f3cc1c50471775d1317a046c525"
+PHP_VERSION_PINNED="8.5.12"
 PROFILE="${PROFILE:-minimal}"
 OS="$(uname -s)"
 
@@ -130,6 +137,30 @@ fi
 
 # --- PHP ------------------------------------------------------------------
 fetch "https://www.php.net/distributions/php-$PHP_VERSION.tar.gz" "php-$PHP_VERSION.tar.gz"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+if [ -n "${PHP_SHA256:-}" ]; then
+    WANT="$PHP_SHA256"
+elif [ "$PHP_VERSION" = "$PHP_VERSION_PINNED" ]; then
+    WANT="$PHP_SHA256_PINNED"
+else
+    echo ">> no checksum pinned for PHP $PHP_VERSION; asking php.net (set PHP_SHA256 to pin it)"
+    WANT="$(curl -fsSL "https://www.php.net/releases/index.php?json&version=$PHP_VERSION" |
+        python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(s["sha256"] for s in d["source"] if s["filename"].endswith(".tar.gz")))')"
+fi
+GOT="$(sha256_of "php-$PHP_VERSION.tar.gz")"
+if [ "$GOT" != "$WANT" ]; then
+    echo "!! php-$PHP_VERSION.tar.gz checksum mismatch" >&2
+    echo "   expected $WANT" >&2
+    echo "   got      $GOT" >&2
+    echo "   Removed it; run again to download afresh. If it fails again, do not build." >&2
+    rm -f "php-$PHP_VERSION.tar.gz"
+    exit 1
+fi
+echo ">> php-$PHP_VERSION.tar.gz sha256 verified"
 [ -d "$SRC" ] || tar xzf "php-$PHP_VERSION.tar.gz"
 cd "$SRC"
 
