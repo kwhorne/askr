@@ -5,6 +5,14 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.3 — 2026-10-23
+
+A security release: PHP 8.5.12, the libphp every release and image embeds, with the
+OpenSSL, HTTP stream wrapper, mysqlnd, Phar, BCMath and GD fixes of four PHP releases —
+and the PHP tarball is now checked against php.net's checksum before it is built. Take
+it if your application makes outgoing HTTPS requests or opens archives, which is most of
+them.
+
 ### Security
 
 - **PHP 8.5.12** (from 8.5.8), the libphp every release and image embeds. Four releases
