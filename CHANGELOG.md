@@ -5,6 +5,41 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.4 — 2026-10-23
+
+A security release for the TLS stack: rustls 0.23.46 and the certificate verification
+and root store under it, with four RustSec advisories that appeared this week. Take it if
+Askr terminates TLS or uses `--acme`.
+
+### Security
+
+- **rustls 0.23.46** (from 0.23.45). Of its four advisories, GHSA-w44r-93j7-qv28 — an
+  unauthenticated ServerHello could force later key exchange to X25519 only — reaches
+  Askr's outgoing TLS (ACME, the `askr why` probe). The others do not: Brotli certificate
+  decompression (GHSA-h2v8-394m-p7vv) is off in the whole dependency tree, Askr does not
+  use ECH (GHSA-vp88-798v-h67f), and it does not log session values (GHSA-c8m5-c952-6cm4).
+  The release also hardens the server side, which is Askr's TLS listener: protected
+  `change_cipher_spec` records rejected, early data only for the first PSK, tighter TLS 1.2
+  confidentiality limits, timely TLS 1.3 key updates.
+- **rustls-webpki 0.103.16**: certificate verification could accept distrusted
+  intermediates (RUSTSEC-2026-0382).
+- **webpki-roots / webpki-root-certs 1.0.11**: the bundled roots still trusted distrusted
+  emSign intermediates (RUSTSEC-2026-0381, RUSTSEC-2026-0383).
+- **ctutils 0.4.5**: non-constant-time mask generation and `u128` comparisons
+  (RUSTSEC-2026-0385), reached through `digest` (HMAC, MD5).
+
+`cargo audit` is clean.
+
+### Changed
+
+- **hyper 1.12.0**: HTTP/1 framing fixes — `Content-Length` is removed whenever
+  `Transfer-Encoding` is sent, and a `Connection: close` wins over a later keep-alive.
+- tokio 1.53.3, serde_json 1.0.154, sha2 0.11.1, cc, libc 0.2.191, OpenTelemetry 0.33.1.
+
+### Internal
+
+- CI's `setup-php` 2.40.0, the SHA checked against the upstream tag.
+
 ## 1.8.3 — 2026-10-23
 
 A security release: PHP 8.5.12, the libphp every release and image embeds, with the
