@@ -67,12 +67,15 @@ jobs:
           rustflags: "-D warnings"
 
       # The slowest step is compiling PHP; cache the install keyed on the build
-      # script (which pins the PHP version). Skip the build on a cache hit.
+      # script (which pins the PHP version). Skip the build on a cache hit. PHP's own
+      # upload tests come along, for the step that runs them.
       - name: Cache libphp
         id: libphp
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: vendor/php-build/install
+          path: |
+            vendor/php-build/install
+            vendor/php-build/php-*/tests/basic/rfc1867_*.phpt
           key: libphp-minimal-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
 
       - name: Build embedded libphp (minimal profile)
@@ -90,6 +93,14 @@ jobs:
       # built above, which is why they live in this job.
       - name: test (unit + end-to-end)
         run: cargo test --workspace
+
+      # PHP's own multipart-upload tests, with PHP as the oracle: per-request mode must
+      # pass every one, and worker mode must differ from PHP exactly where
+      # scripts/phpt-uploads.known says it does — no more, and no less.
+      - name: PHP upload tests (php-src rfc1867_*.phpt, both modes)
+        run: |
+          cargo build --bin askr
+          python3 scripts/phpt-uploads.py --askr target/debug/askr
 
       # The optional features are part of the published surface (they make up the
       # `-full` build), so they have to compile clean too — a default-only check

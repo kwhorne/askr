@@ -5,6 +5,26 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **File uploads in per-request mode.** Since 0.4.0 a `multipart/form-data` request in
+  per-request mode reached PHP with an empty `$_FILES`, an empty `$_POST` and an empty
+  `php://input` — silently, with no error and no log line. Askr's own multipart parser,
+  which worker mode needs to stream files to disk, ran in both modes and consumed the
+  body, and in per-request mode its result was never handed to PHP. It now runs in worker
+  mode only; in per-request mode the body goes to PHP whole, and PHP's own upload handler
+  fills `$_FILES` and `$_POST`, as under PHP-FPM. PHP's upload settings now apply there:
+  `upload_max_filesize` (default 2M) and `post_max_size` (8M) included.
+
+### Testing
+
+- **PHP's own upload tests, in CI.** `scripts/phpt-uploads.py` runs php-src's
+  `tests/basic/rfc1867_*.phpt` against Askr, with PHP as the oracle. Per-request mode
+  passes all 16 (3 before the fix). Worker mode is compared with PHP's answer to the same
+  request, and differs from it in 14 ways, each listed with its reason in
+  `scripts/phpt-uploads.known`: the run fails on a new divergence, and on a listed one
+  that has gone.
+
 ## 1.8.4 — 2026-10-23
 
 A security release for the TLS stack: rustls 0.23.46 and the certificate verification

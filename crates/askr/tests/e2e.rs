@@ -2254,6 +2254,61 @@ root = "{ROOT}"
     );
 }
 
+/// In per-request mode a file upload must reach PHP as it does under PHP-FPM: `$_FILES`
+/// and `$_POST` filled by PHP itself, and `move_uploaded_file()` accepting the file.
+///
+/// Until 1.8.5 Askr's own multipart parser ran in both modes, and consumed the body; in
+/// per-request mode its result was never handed to PHP. Every upload since 0.4.0 arrived
+/// as an empty `$_FILES`, an empty `$_POST` and an empty `php://input` — no error, no
+/// log line. Now the body goes to PHP whole and PHP's own handler parses it, so what
+/// happens to an upload is PHP's, by construction. `scripts/phpt-uploads.py` holds the
+/// rest of that to PHP's own upload tests; this pins the request a browser makes.
+#[test]
+fn a_file_upload_reaches_php_in_per_request_mode() {
+    let dir = unique_dir("upload-per-request");
+    let app = r#"<?php
+$f = $_FILES['doc'] ?? null;
+$dest = sys_get_temp_dir() . '/askr-e2e-upload-' . getmypid();
+$moved = $f && move_uploaded_file($f['tmp_name'], $dest);
+echo 'note=' . ($_POST['note'] ?? '(missing)')
+    . '|name=' . ($f['name'] ?? '(missing)')
+    . '|size=' . ($f['size'] ?? '-')
+    . '|error=' . ($f['error'] ?? '-')
+    . '|moved=' . ($moved ? 'yes' : 'no')
+    . '|content=' . ($moved ? file_get_contents($dest) : '-');
+if ($moved) { unlink($dest); }
+"#;
+    let config = r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+"#;
+    let s = Server::start_in(dir, &[("index.php", app)], config);
+
+    let b = "----askr-e2e-boundary";
+    let body = format!(
+        "--{b}\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhello\r\n\
+         --{b}\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\
+         Content-Type: text/plain\r\n\r\nfile body\r\n--{b}--\r\n"
+    );
+    let r = request_with_body(
+        s.port,
+        "POST",
+        "/",
+        &[(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={b}"),
+        )],
+        &body,
+    );
+    assert_eq!(r.status, 200, "log:\n{}", s.log_contents());
+    assert_eq!(
+        r.body.trim(),
+        "note=hello|name=a.txt|size=9|error=0|moved=yes|content=file body",
+        "the upload must arrive as PHP-FPM delivers it"
+    );
+}
+
 /// `exit()` anywhere in the app must end the request, not the worker.
 ///
 /// Since PHP 8.0, exit() is an internal "unwind exit", not a bailout: it unwinds

@@ -997,11 +997,21 @@ where
 
     // multipart/form-data → stream files to temp paths (constant memory) and
     // collect fields, instead of buffering the whole body in RAM (#uploads).
+    //
+    // Worker mode only. There the worker script builds its request from `$r['post']` and
+    // `$r['files']`, which this parser fills while streaming the files to disk. In
+    // per-request mode the body goes to PHP whole, as a form post's does, and PHP's own
+    // multipart handler fills `$_POST` and `$_FILES`: everything about uploads —
+    // `move_uploaded_file()`, `upload_max_filesize`, `max_file_uploads`, the error codes —
+    // is then PHP's, by construction. Until 1.8.5 this parser ran in both modes, and in
+    // per-request mode its result was never handed to PHP: every upload arrived as an
+    // empty `$_POST` and `$_FILES` and an empty `php://input`, silently.
     let multipart_boundary = parts
         .headers
         .get(hyper::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .filter(|ct| ct.starts_with("multipart/form-data"))
+        .filter(|_| config.worker_script.is_some())
         .and_then(|ct| multer::parse_boundary(ct).ok());
 
     // `_upload_temp_paths` is an RAII guard: it unlinks the streamed temp files
@@ -1012,7 +1022,7 @@ where
             Ok(parsed) => {
                 let mut request = cgi::build_request(
                     &parts,
-                    Vec::new(), // body consumed while streaming; PHP uses $_POST/$_FILES
+                    Vec::new(), // consumed while streaming; the worker gets post_fields/files
                     &cgi::Context {
                         docroot,
                         script: &script,

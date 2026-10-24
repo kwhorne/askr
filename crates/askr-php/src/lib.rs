@@ -229,8 +229,9 @@ pub struct Request {
     /// The full `$_SERVER` map (CGI-style: REQUEST_METHOD, REQUEST_URI,
     /// SCRIPT_NAME, HTTP_* headers, DOCUMENT_ROOT, HTTPS, …).
     pub server_vars: Vec<(String, String)>,
-    /// Parsed `multipart/form-data` non-file fields (worker mode). When present,
-    /// these are the POST parameters (the raw body was consumed while streaming).
+    /// Parsed `multipart/form-data` non-file fields — worker mode only, where the worker
+    /// script reads them as `$r['post']` (the raw body was consumed while streaming). In
+    /// per-request mode a multipart body stays in `body` and PHP parses it itself.
     pub post_fields: Vec<(String, String)>,
     /// Uploaded files streamed to temp paths (worker mode) — the `$_FILES` seam.
     pub files: Vec<UploadedFile>,

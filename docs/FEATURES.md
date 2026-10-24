@@ -520,10 +520,17 @@ per test file: perfect isolation (no state bleed between files), parallelism, an
 no cold boot per file. Point `--runner` at `examples/askr-test.php` for
 PHPUnit/Pest, or omit it to run files directly. Exits non-zero if any file fails.
 
-## 8. File uploads that stream to disk (0.4.0)
+## 8. File uploads (0.4.0; per-request mode 1.8.5)
 
-`multipart/form-data` is streamed, not buffered: each file part goes straight to
-a temp file, so a large upload costs **constant memory** (a 32 MB upload no
+**Per-request mode** hands the body to PHP, and PHP's own upload handler fills `$_FILES`
+and `$_POST` — exactly as under PHP-FPM: `move_uploaded_file()`, `upload_max_filesize`
+(PHP's default is 2M), `post_max_size` (8M), `max_file_uploads` and the `UPLOAD_ERR_*`
+codes all behave as PHP documents them, because it is PHP doing it. CI runs PHP's own
+upload tests against it, which it passes. (Before 1.8.5, uploads in this mode arrived
+empty.)
+
+**Worker mode** streams `multipart/form-data` instead of buffering it: each file part goes
+straight to a temp file, so a large upload costs **constant memory** (a 32 MB upload no
 longer holds 32 MB in RAM), and form fields are parsed to POST params. Askr hands
 PHP the `$_FILES`-shaped metadata and `examples/laravel-worker.php` rebuilds them
 as Laravel `UploadedFile`s in test mode — so uploads work in worker mode:
@@ -539,8 +546,15 @@ path is verified, not assumed: if it already exists and isn't a `0700` directory
 owned by the server's own uid — which on a shared host it may not be — Askr logs a
 warning and uses a private `askr-uploads-<uid>-<pid>` beside it instead, and refuses
 uploads if neither can be made safe.
-The `--max-body-size` limit is enforced on the stream (`413` above it); set PHP's
-`upload_max_filesize`/`post_max_size` via `[worker] ini` if your app checks them.
+The `--max-body-size` limit is enforced on the stream (`413` above it).
+
+Worker mode's parser is Askr's, not PHP's, and it differs from PHP in ways CI keeps a list
+of ([`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known), checked against PHP's
+own upload tests on every push): PHP's upload INI settings are not applied to it,
+`is_uploaded_file()` and `move_uploaded_file()` do not accept its files (Laravel's test-mode
+`UploadedFile` moves them with `rename()`), a file's `name` is the path the client sent
+rather than its basename, and a malformed body is a `400` where PHP would warn. In
+per-request mode none of that applies.
 
 ## 9. Compression, logging & observability (0.4.1)
 
