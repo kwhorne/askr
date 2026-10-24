@@ -5,6 +5,12 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.5 — 2026-10-24
+
+A fix for file uploads in per-request mode, which have arrived empty since 0.4.0. Take it
+if you run Askr without a worker script and your app accepts uploads — and read the
+upgrade note first: PHP's own upload limits now apply, and their defaults are small.
+
 ### Fixed
 
 - **File uploads in per-request mode.** Since 0.4.0 a `multipart/form-data` request in
@@ -14,7 +20,9 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   body, and in per-request mode its result was never handed to PHP. It now runs in worker
   mode only; in per-request mode the body goes to PHP whole, and PHP's own upload handler
   fills `$_FILES` and `$_POST`, as under PHP-FPM. PHP's upload settings now apply there:
-  `upload_max_filesize` (default 2M) and `post_max_size` (8M) included.
+  `upload_max_filesize` (default 2M) and `post_max_size` (8M) included. Verified with a
+  real upload over HTTP: `move_uploaded_file()` accepts the file, and a 3 MB upload under
+  the defaults gets `UPLOAD_ERR_INI_SIZE` until `[worker] ini` raises the limit.
 
 ### Testing
 

@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.8.4; ARCH=$(uname -m)
+VER=v1.8.5; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.8.4     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.8.5     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.8` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.8.4-full`) are the same server built with the optional features
+The `-full` tags (`1.8.5-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,28 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.8.5
+
+**In per-request mode (no `[worker] script`), check your upload limits before you take
+it.** Uploads in that mode arrived empty from 0.4.0 until now; they now reach PHP, and PHP
+handles them as PHP-FPM does — so PHP's own limits apply, and PHP's defaults are
+`upload_max_filesize = 2M` and `post_max_size = 8M`. A larger file arrives in `$_FILES`
+with error `1` (`UPLOAD_ERR_INI_SIZE`); a larger body leaves `$_POST` and `$_FILES` empty.
+Raise them with the engine's ini lines, which apply in both modes despite the section's
+name:
+
+```toml
+[worker]
+ini = "upload_max_filesize=64M\npost_max_size=64M"
+```
+
+(or `--ini`, or `ASKR_PHP_INI`). Keep `[server] max_body_size` at least as large; Askr
+answers `413` above it before PHP sees the request.
+
+**Worker mode is unchanged.** Its uploads are parsed by Askr, which does not apply those
+PHP settings; where it differs from PHP is listed in
+[`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known).
 
 ### To 1.8.4
 
