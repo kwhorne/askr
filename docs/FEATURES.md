@@ -548,7 +548,7 @@ warning and uses a private `askr-uploads-<uid>-<pid>` beside it instead, and ref
 uploads if neither can be made safe.
 The `--max-body-size` limit is enforced on the stream (`413` above it).
 
-**PHP's upload settings apply in worker mode too** (from 1.8.8), read from the worker's own
+**PHP's upload settings apply in worker mode too** (from 1.9.0), read from the worker's own
 engine — its php.ini and `[worker] ini` — and applied as PHP applies them:
 `upload_max_filesize` (PHP's default 2M: a larger file is an entry with
 `UPLOAD_ERR_INI_SIZE` and no temp file), a `MAX_FILE_SIZE` form field

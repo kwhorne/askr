@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.8.7; ARCH=$(uname -m)
+VER=v1.9.0; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.8.7     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.9.0     # or :1.7 to follow patches
 ```
 
-Pin the **exact** version in production and bump it deliberately. `:1.8` follows
+Pin the **exact** version in production and bump it deliberately. `:1.9` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.8.7-full`) are the same server built with the optional features
+The `-full` tags (`1.9.0-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,40 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.9.0
+
+**If your app runs in worker mode and accepts uploads, check `upload_max_filesize` and
+`post_max_size` before you take it.** Worker mode used to accept any file up to
+`max_body_size` (16M by default) whatever php.ini said; it now applies PHP's upload
+settings as PHP does, and PHP's defaults are small:
+
+| Setting | PHP's default | Over it, the app sees |
+| --- | --- | --- |
+| `upload_max_filesize` | 2M | the file with error `1` (`UPLOAD_ERR_INI_SIZE`) and no content — in Laravel `isValid()` is false and validation fails with "failed to upload" |
+| `post_max_size` | 8M | no fields and no files at all |
+| `max_file_uploads` | 20 | the files past it missing |
+
+To keep taking what you took before, raise them — the engine's ini lines apply in both
+modes — and keep `max_body_size` at least as large:
+
+```toml
+[server]
+max_body_size = "64M"
+
+[worker]
+ini = "upload_max_filesize=64M\npost_max_size=64M"
+```
+
+After the upgrade the worker's startup line shows the limits in force
+(`upload_max_filesize=… post_max_size=…`), and Askr logs a warning naming the setting
+whenever one refuses an upload — look for `upload:` in the log after deploying.
+
+Also in worker mode: a file's `type` is now what PHP gives — the part's Content-Type up
+to any `;`, and empty when the client sent none (it was `application/octet-stream`).
+Laravel's `getClientMimeType()` then falls back to `application/octet-stream` itself.
+
+Per-request mode is unchanged: PHP has applied these settings there since 1.8.5.
 
 ### To 1.8.7
 

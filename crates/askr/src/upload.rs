@@ -212,7 +212,7 @@ pub fn limits() -> UploadLimits {
 ///   file over either is kept as an entry with `UPLOAD_ERR_INI_SIZE` (1) or
 ///   `UPLOAD_ERR_FORM_SIZE` (2), and no temp file, size or type.
 ///
-/// Until 1.8.8 none of these applied in worker mode: any file up to `max_body_size` was
+/// Until 1.9.0 none of these applied in worker mode: any file up to `max_body_size` was
 /// accepted, whatever the app's php.ini said, and the limits an app configured — and
 /// Laravel reports in its validation messages — were not the ones that held.
 pub async fn parse<S, E>(

@@ -2438,7 +2438,7 @@ root = "{ROOT}"
 /// `upload_max_filesize` is UPLOAD_ERR_INI_SIZE, and files past `max_file_uploads` are
 /// dropped.
 ///
-/// Until 1.8.8 Askr's parser ignored them: any file up to `max_body_size` was accepted,
+/// Until 1.9.0 Askr's parser ignored them: any file up to `max_body_size` was accepted,
 /// whatever the ini said. Here the settings travel the whole way — `[worker] ini`, the
 /// engine, the parser — which the parser's unit tests, given the limits directly, cannot
 /// show.

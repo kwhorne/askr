@@ -5,6 +5,13 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.0 — 2026-10-25
+
+Worker mode now applies PHP's upload settings, as per-request mode has since 1.8.5:
+uploads behave the same in both modes, and as under PHP-FPM. **Read the upgrade note
+before taking it if your app runs in worker mode and accepts files over 2 MB** — PHP's
+default `upload_max_filesize` now holds there.
+
 ### Changed
 
 - **PHP's upload settings now hold in worker mode.** Askr's own multipart parser, which
