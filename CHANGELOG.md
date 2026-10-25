@@ -5,6 +5,12 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.1 — 2026-10-25
+
+A fix for forms in worker mode: in any form with a file input — the forms that post
+multipart — checkbox arrays (`tags[]`) and nested fields (`user[name]`, `user[avatar]`)
+never reached the app. Take it if you run Laravel, or any worker script, in worker mode.
+
 ### Fixed
 
 - **Worker mode: a multipart form's `[]` and nested fields reach the app.** `$r['post']`

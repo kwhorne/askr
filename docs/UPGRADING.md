@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.9.0; ARCH=$(uname -m)
+VER=v1.9.1; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.9.0     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.9.1     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.9` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.9.0-full`) are the same server built with the optional features
+The `-full` tags (`1.9.1-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,19 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.9.1
+
+**With `examples/laravel-worker.php`: take it, and if you copied the worker into your app,
+take its new file-nesting block too** (the `parse_str()` over `$r['files']`). Without it,
+`$request->input('tags')` and `$request->input('user')` now work in multipart forms, but
+nested file inputs such as `user[avatar]` still don't reach `$request->file('user.avatar')`.
+
+**With your own worker script:** `$r['post']` is now shaped as PHP shapes `$_POST` —
+`tags[]` is `$r['post']['tags']`, a list; `user[name]` is `$r['post']['user']['name']`; a
+`.` or space in a top-level name is `_`. Code that read the raw names
+(`$r['post']['tags[]']`) has to read PHP's shape instead. `$r['files']` is unchanged: a
+flat list with each `field` as sent.
 
 ### To 1.9.0
 
