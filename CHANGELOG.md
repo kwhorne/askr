@@ -5,6 +5,12 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.6 — 2026-10-25
+
+A security release for worker mode: an uploaded file's `name` was the filename as the
+client sent it, path and all. Take it if you run a worker script other than
+`examples/laravel-worker.php` that handles uploads; the Laravel worker was not exposed.
+
 ### Security
 
 - **In worker mode an uploaded file's `name` is its basename, as in PHP.** Until now

@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.8.5; ARCH=$(uname -m)
+VER=v1.8.6; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.8.5     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.8.6     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.8` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.8.5-full`) are the same server built with the optional features
+The `-full` tags (`1.8.6-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,19 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.8.6
+
+**If you run your own worker script and it handles uploads, take it — and check that
+script.** `$r['files'][..]['name']` is now the file's basename, as PHP's `$_FILES` gives
+it; until now it was the filename as the client sent it, so it could be
+`../../public/shell.php`. Code that built a path from it could write outside its upload
+directory. The name as sent is in the new `full_path` key: never use it as a path.
+
+**With `examples/laravel-worker.php`, nothing to change.** Symfony already stripped the
+path, so Laravel was not exposed. If you copied the worker into your app, take the one-line
+change to `$f['full_path'] ?? $f['name']` so `getClientOriginalPath()` keeps a folder
+upload's path; without it, from 1.8.6 that returns only the basename.
 
 ### To 1.8.5
 
