@@ -5,6 +5,31 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Changed
+
+- **PHP's upload settings now hold in worker mode.** Askr's own multipart parser, which
+  worker mode uses to stream files to disk, ignored them: any file up to `max_body_size`
+  (16M by default) was accepted, whatever the app's php.ini said, and the limits an app
+  configured — and Laravel's validation messages quote — were not the ones that held.
+  The parser now reads `upload_max_filesize`, `post_max_size`, `max_file_uploads` and
+  `file_uploads` from the worker's engine and applies them, and a `MAX_FILE_SIZE` form
+  field, as PHP's own parser does: a file over a limit arrives with `UPLOAD_ERR_INI_SIZE`
+  or `UPLOAD_ERR_FORM_SIZE` and nothing kept, files past `max_file_uploads` are dropped,
+  a body over `post_max_size` leaves no fields and no files. **PHP's default
+  `upload_max_filesize` is 2M**: an app that takes larger files in worker mode must raise
+  it with `[worker] ini`. A refused upload is logged with the setting that refused it,
+  and the worker's startup line shows the limits in force. A file's `type` is now what
+  PHP gives too: the part's Content-Type up to any `;`, and empty when it had none
+  (it was `application/octet-stream`) or the file was refused.
+
+  Checked against PHP's own upload tests: `$_FILES` and `$_POST` now match PHP's in all
+  five that exercise these settings, and `rfc1867_file_upload_disabled` passes and has
+  left `scripts/phpt-uploads.known`; the other four still differ only in
+  `is_uploaded_file()` and PHP's startup warning. Unit tests for each rule, each failing
+  when its rule is removed; an e2e test that the limits travel from `[worker] ini` to the
+  parser (failing without that); verified by hand in CoW mode; and a Laravel smoke probe
+  that a 3 MB file reaches Laravel as `UPLOAD_ERR_INI_SIZE` (failing against 1.8.7).
+
 ## 1.8.7 — 2026-10-25
 
 Faster stops, reloads and recycles. A draining worker used to wait out its full 10-second

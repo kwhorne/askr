@@ -548,13 +548,28 @@ warning and uses a private `askr-uploads-<uid>-<pid>` beside it instead, and ref
 uploads if neither can be made safe.
 The `--max-body-size` limit is enforced on the stream (`413` above it).
 
+**PHP's upload settings apply in worker mode too** (from 1.8.8), read from the worker's own
+engine — its php.ini and `[worker] ini` — and applied as PHP applies them:
+`upload_max_filesize` (PHP's default 2M: a larger file is an entry with
+`UPLOAD_ERR_INI_SIZE` and no temp file), a `MAX_FILE_SIZE` form field
+(`UPLOAD_ERR_FORM_SIZE`), `max_file_uploads` (20: later files are dropped),
+`post_max_size` (8M: a larger body leaves no fields and no files) and `file_uploads`. To
+take larger files, raise them, and keep `max_body_size` at least as large:
+
+```toml
+[worker]
+ini = "upload_max_filesize=64M\npost_max_size=64M"
+```
+
+Askr logs a warning when one of them refuses an upload, naming the setting.
+
 Worker mode's parser is Askr's, not PHP's, and it differs from PHP in ways CI keeps a list
 of ([`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known), checked against PHP's
-own upload tests on every push): PHP's upload INI settings are not applied to it,
-`is_uploaded_file()` and `move_uploaded_file()` do not accept its files (Laravel's test-mode
-`UploadedFile` moves them with `rename()`), and a malformed body is a `400` where PHP
-would warn. In per-request mode none of that applies. A file's `name` is its basename and
-`full_path` the name as the client sent it, as in PHP (from 1.8.6).
+own upload tests on every push): `is_uploaded_file()` and `move_uploaded_file()` do not
+accept its files (Laravel's test-mode `UploadedFile` moves them with `rename()`), PHP's
+upload warnings are Askr log lines rather than PHP warnings, and a malformed body is a
+`400` where PHP would warn. In per-request mode none of that applies. A file's `name` is
+its basename and `full_path` the name as the client sent it, as in PHP (from 1.8.6).
 
 ## 9. Compression, logging & observability (0.4.1)
 

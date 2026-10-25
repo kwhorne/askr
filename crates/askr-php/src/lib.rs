@@ -17,6 +17,12 @@ extern "C" {
     fn askr_php_eval(code: *const c_char, out: *mut *mut c_char, out_len: *mut usize) -> c_int;
     fn askr_php_free(p: *mut c_char);
     fn askr_php_run_script(script: *const c_char) -> c_int;
+    fn askr_php_upload_limits(
+        file_uploads: *mut c_int,
+        upload_max_filesize: *mut i64,
+        max_file_uploads: *mut i64,
+        post_max_size: *mut i64,
+    );
 
     #[allow(clippy::too_many_arguments)]
     fn askr_php_handle(
@@ -44,6 +50,27 @@ extern "C" {
 pub struct Interpreter {
     // Not Send/Sync: the Zend engine is thread-local (non-ZTS).
     _not_send: PhantomData<*const ()>,
+}
+
+/// PHP's upload settings (`file_uploads`, `upload_max_filesize`, `max_file_uploads`,
+/// `post_max_size`), for a multipart parser that is not PHP's to apply as PHP does.
+/// Sizes are in bytes; `0` means no limit, as in PHP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadLimits {
+    pub file_uploads: bool,
+    pub upload_max_filesize: i64,
+    pub max_file_uploads: i64,
+    pub post_max_size: i64,
+}
+
+impl UploadLimits {
+    /// PHP's own defaults: uploads on, 2M a file, 20 files, 8M a request.
+    pub const PHP_DEFAULTS: UploadLimits = UploadLimits {
+        file_uploads: true,
+        upload_max_filesize: 2 * 1024 * 1024,
+        max_file_uploads: 20,
+        post_max_size: 8 * 1024 * 1024,
+    };
 }
 
 /// The result of evaluating PHP code.
@@ -131,6 +158,20 @@ impl Interpreter {
         // SAFETY: FFI into the shim on this thread; `c` outlives the call.
         let rc = unsafe { askr_php_run_script(c.as_ptr()) };
         Ok(rc as i32)
+    }
+
+    /// The engine's upload settings, as its php.ini (and Askr's `ini` lines) set them.
+    pub fn upload_limits(&self) -> UploadLimits {
+        let (mut on, mut file, mut files, mut post) = (0, 0i64, 0i64, 0i64);
+        // SAFETY: the engine is started (this Interpreter exists) and the shim only reads
+        // its settings into the four out-parameters.
+        unsafe { askr_php_upload_limits(&mut on, &mut file, &mut files, &mut post) };
+        UploadLimits {
+            file_uploads: on != 0,
+            upload_max_filesize: file,
+            max_file_uploads: files,
+            post_max_size: post,
+        }
     }
 
     /// Report the embedded engine's `PHP_VERSION`.
@@ -253,7 +294,8 @@ pub struct UploadedFile {
     /// The client's filename as sent, path included, as PHP's `['full_path']` — a folder
     /// upload (`webkitdirectory`) sends `photos/2024/a.jpg`. Never safe to use as a path.
     pub full_path: String,
-    /// The declared MIME type.
+    /// The part's Content-Type up to any `;`, as PHP gives `type`; empty if it had none or
+    /// the file was refused.
     pub content_type: String,
     /// Absolute path to the temp file the server wrote.
     pub tmp_path: String,

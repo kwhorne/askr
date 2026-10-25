@@ -88,7 +88,7 @@ The `$request` array Askr passes the handler:
 | `headers` | the full CGI `$_SERVER` map (REQUEST_METHOD, HTTP_*, HTTPS, CONTENT_TYPE, …) |
 | `body` | raw request body |
 | `post` | a `multipart/form-data` body's fields, `name => value`, names as sent (`tags[]` is not nested, and a repeated name keeps its last value); empty for any other body, which stays in `body` |
-| `files` | a `multipart/form-data` body's files, a list of `field` (the form field's name, as sent), `name` (the file's basename, as PHP's `$_FILES` gives it), `full_path` (the filename as the client sent it, path included — never use it as a path), `type`, `tmp_name`, `size`, `error` (`UPLOAD_ERR_*`) |
+| `files` | a `multipart/form-data` body's files, a list of `field` (the form field's name, as sent), `name` (the file's basename, as PHP's `$_FILES` gives it), `full_path` (the filename as the client sent it, path included — never use it as a path), `type` (the part's Content-Type up to any `;`, empty if it had none), `tmp_name`, `size`, `error` (`UPLOAD_ERR_*`: a file refused by `upload_max_filesize` or `MAX_FILE_SIZE` is here with its error and no `tmp_name`, `size` or `type`). PHP's upload settings apply, as in PHP: see [File uploads](FEATURES.md#8-file-uploads-040-per-request-mode-185) |
 
 The handler produces its response the normal PHP way — `echo`/`print` for the
 body, `header()` for headers, `http_response_code()` for the status — all

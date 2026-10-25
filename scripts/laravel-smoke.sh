@@ -78,7 +78,8 @@ Illuminate\Support\Facades\Route::post('/_askr_upload', fn (Illuminate\Http\Requ
     'name' => $r->file('doc')?->getClientOriginalName(),
     'path' => method_exists(Symfony\Component\HttpFoundation\File\UploadedFile::class, 'getClientOriginalPath')
         ? $r->file('doc')?->getClientOriginalPath() : 'n/a',
-    'content' => $r->file('doc')?->get(),
+    'content' => $r->file('doc')?->isValid() ? $r->file('doc')->get() : null,
+    'error' => $r->file('doc')?->getError(),
 ]))->withoutMiddleware([
     Illuminate\Foundation\Http\Middleware\PreventRequestForgery::class,
     Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class,
@@ -211,6 +212,13 @@ j=$(curl -s --http1.1 -F note=hello -F "doc=@$WORK/upload.txt;filename=photos/20
 n=$(echo "$j" | field name); pa=$(echo "$j" | field path)
 check "an upload reaches Laravel with its field and content" "$([ "$(echo "$j" | field note)" = hello ] && [ "$(echo "$j" | field content)" = "file body" ] && echo ok || echo "$j")"
 check "an upload's name is its basename, its path kept beside it" "$([ "$n" = a.txt ] && { [ "$pa" = photos/2024/a.txt ] || [ "$pa" = n/a ]; } && echo ok || echo "name = $n, path = $pa")"
+
+# PHP's upload_max_filesize holds in worker mode too (default 2M): a 3 MB file reaches
+# Laravel as UPLOAD_ERR_INI_SIZE, not as a file.
+head -c 3145728 /dev/zero > "$WORK/big.bin"
+j=$(curl -s --http1.1 -F "doc=@$WORK/big.bin" "$BASE/_askr_upload")
+e=$(echo "$j" | field error)
+check "a file over upload_max_filesize is UPLOAD_ERR_INI_SIZE, as PHP has it" "$([ "$e" = 1 ] && echo ok || echo "getError() = $e")"
 
 if [ "$fails" -gt 0 ]; then
   echo "$fails probe(s) failed"; logs; exit 1

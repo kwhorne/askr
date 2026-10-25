@@ -1001,6 +1001,8 @@ pub(crate) fn run_cow(
     // Boot the interpreter on THIS thread (keep the process single-threaded so
     // the fork in cow_ready is safe).
     let _interp = askr_php::Interpreter::new().map_err(|e| anyhow::anyhow!("php init: {e}"))?;
+    // Read before the fork, so every CoW worker inherits them.
+    crate::upload::set_limits(_interp.upload_limits());
     crate::cache::register_bridge();
     crate::queue::register_bridge();
     crate::broadcast::register_bridge();

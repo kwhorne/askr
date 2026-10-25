@@ -1051,7 +1051,21 @@ where
     // when this handler returns *or* when its future is cancelled (client
     // disconnect during PHP execution). Held to end of scope on purpose.
     let (request, _upload_temp_paths) = if let Some(boundary) = multipart_boundary {
-        match crate::upload::parse(body.into_data_stream(), &boundary, max).await {
+        let content_length = parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        let limits = crate::upload::limits();
+        match crate::upload::parse(
+            body.into_data_stream(),
+            &boundary,
+            max,
+            content_length,
+            &limits,
+        )
+        .await
+        {
             Ok(parsed) => {
                 let mut request = cgi::build_request(
                     &parts,

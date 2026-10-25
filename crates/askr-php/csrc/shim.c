@@ -280,6 +280,17 @@ int askr_php_startup(void) {
     return 0;
 }
 
+/* PHP's upload settings, as the started engine has them, for Askr's own multipart parser
+ * (worker mode). All four are PHP_INI_SYSTEM or PHP_INI_PERDIR: ini_set() cannot change
+ * them while a script runs, so what startup read is what applies to every request. */
+void askr_php_upload_limits(int *file_uploads, long long *upload_max_filesize,
+                            long long *max_file_uploads, long long *post_max_size) {
+    *file_uploads = PG(file_uploads) ? 1 : 0;
+    *upload_max_filesize = (long long)PG(upload_max_filesize);
+    *max_file_uploads = (long long)INI_INT("max_file_uploads");
+    *post_max_size = (long long)SG(post_max_size);
+}
+
 void askr_php_shutdown(void) {
     php_module_shutdown();
     sapi_shutdown();

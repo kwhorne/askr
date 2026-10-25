@@ -2434,6 +2434,79 @@ root = "{ROOT}"
     );
 }
 
+/// In worker mode PHP's upload settings hold, as the app's php.ini sets them: a file over
+/// `upload_max_filesize` is UPLOAD_ERR_INI_SIZE, and files past `max_file_uploads` are
+/// dropped.
+///
+/// Until 1.8.8 Askr's parser ignored them: any file up to `max_body_size` was accepted,
+/// whatever the ini said. Here the settings travel the whole way — `[worker] ini`, the
+/// engine, the parser — which the parser's unit tests, given the limits directly, cannot
+/// show.
+#[test]
+fn a_worker_applies_php_s_upload_limits_from_its_ini() {
+    let dir = unique_dir("upload-limits");
+    let worker = r#"<?php
+while (askr_handle_request(function ($r) {
+    foreach ($r['files'] as $f) {
+        echo $f['field'], ' ', $f['error'], ' ', $f['size'], "\n";
+    }
+    return 200;
+})) {}
+"#;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+
+[worker]
+script = "{}"
+ini = "upload_max_filesize=4\nmax_file_uploads=3"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let s = Server::start_in(dir.clone(), &[("index.php", "<?php")], &config);
+
+    let b = "----askr-e2e-boundary";
+    let part = |field: &str, content: &str| {
+        format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{field}.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\n{content}\r\n"
+        )
+    };
+    let body = [
+        part("a", "123"),
+        part("big", "12345"),
+        part("c", "12"),
+        part("d", "1"),
+        format!("--{b}--\r\n"),
+    ]
+    .concat();
+    let r = request_with_body(
+        s.port,
+        "POST",
+        "/",
+        &[(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={b}"),
+        )],
+        &body,
+    );
+    assert_eq!(r.status, 200, "log:\n{}", s.log_contents());
+    assert_eq!(
+        r.body.trim(),
+        "a 0 3\nbig 1 0\nc 0 2",
+        "big is over upload_max_filesize; d is past max_file_uploads"
+    );
+    assert!(
+        s.log_has("upload_max_filesize"),
+        "the operator is told which setting refused it:\n{}",
+        s.log_contents()
+    );
+}
+
 /// In worker mode an uploaded file's `name` is its basename, as in PHP's `$_FILES`, and
 /// the path the client sent is in `full_path`.
 ///

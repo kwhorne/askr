@@ -110,6 +110,7 @@ impl Php {
                 }
                 let _php = match Interpreter::new() {
                     Ok(p) => {
+                        crate::upload::set_limits(p.upload_limits());
                         let _ = ready_tx.send(Ok(()));
                         p
                     }
@@ -122,7 +123,14 @@ impl Php {
                 crate::queue::register_bridge();
                 crate::broadcast::register_bridge();
                 crate::bleed::register_bridge();
-                tracing::info!("embedded PHP ready (worker mode), running worker script");
+                let limits = crate::upload::limits();
+                tracing::info!(
+                    upload_max_filesize = limits.upload_max_filesize,
+                    post_max_size = limits.post_max_size,
+                    max_file_uploads = limits.max_file_uploads,
+                    file_uploads = limits.file_uploads,
+                    "embedded PHP ready (worker mode), running worker script"
+                );
 
                 register_stream_callbacks();
                 let mut bridge = WorkerBridge {

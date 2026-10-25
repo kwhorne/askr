@@ -16,7 +16,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use tokio::io::AsyncWriteExt;
 
-use askr_php::UploadedFile;
+use askr_php::{UploadLimits, UploadedFile};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -183,90 +183,193 @@ fn unique_name() -> String {
     format!("askr-{}-{}-{}.upload", std::process::id(), nanos, n)
 }
 
-/// Parse a multipart body from a byte stream. Files go to temp paths (bounded by
-/// `max_total`); non-file fields are collected in memory (also bounded).
-pub async fn parse<S, E>(stream: S, boundary: &str, max_total: usize) -> Result<Parsed, UploadError>
+static LIMITS: OnceLock<UploadLimits> = OnceLock::new();
+
+/// Record PHP's upload settings for this process. Called once by whatever started the
+/// engine, right after it started — the worker's PHP thread, or the CoW template before it
+/// forks (its children inherit the value).
+pub fn set_limits(limits: UploadLimits) {
+    let _ = LIMITS.set(limits);
+}
+
+/// PHP's upload settings for this process: the engine's, or PHP's defaults if no engine
+/// reported them.
+pub fn limits() -> UploadLimits {
+    LIMITS.get().copied().unwrap_or(UploadLimits::PHP_DEFAULTS)
+}
+
+/// Parse a multipart body from a byte stream. Files go to temp paths; fields are collected
+/// in memory. `max_total` is Askr's `max_body_size`, refused with a 413 above it.
+///
+/// PHP's upload settings are applied as PHP's own parser (`main/rfc1867.c`) applies them,
+/// so a worker sees what `$_FILES` and `$_POST` would say:
+///
+/// - **`post_max_size`**: a body over it leaves no fields and no files at all.
+/// - **`file_uploads = 0`**: file parts are dropped; fields still arrive.
+/// - **`max_file_uploads`**: file parts past it are dropped (an empty file input does not
+///   count, as in PHP).
+/// - **`upload_max_filesize`**, then a **`MAX_FILE_SIZE`** field sent before the file: a
+///   file over either is kept as an entry with `UPLOAD_ERR_INI_SIZE` (1) or
+///   `UPLOAD_ERR_FORM_SIZE` (2), and no temp file, size or type.
+///
+/// Until 1.8.8 none of these applied in worker mode: any file up to `max_body_size` was
+/// accepted, whatever the app's php.ini said, and the limits an app configured — and
+/// Laravel reports in its validation messages — were not the ones that held.
+pub async fn parse<S, E>(
+    stream: S,
+    boundary: &str,
+    max_total: usize,
+    content_length: Option<u64>,
+    limits: &UploadLimits,
+) -> Result<Parsed, UploadError>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
     E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
 {
+    let max_total = max_total as u64;
+    if content_length.is_some_and(|n| n > max_total) {
+        return Err(UploadError::TooLarge);
+    }
+    let post_max = u64::try_from(limits.post_max_size)
+        .ok()
+        .filter(|&n| n > 0 && n < max_total);
+    if let (Some(len), Some(post_max)) = (content_length, post_max) {
+        if len > post_max {
+            return Ok(over_post_max(Some(len), post_max));
+        }
+    }
+    // A body without a Content-Length is measured as it streams, against the lower limit.
     let constraints = multer::Constraints::new()
-        .size_limit(multer::SizeLimit::new().whole_stream(max_total as u64));
+        .size_limit(multer::SizeLimit::new().whole_stream(post_max.unwrap_or(max_total)));
     let mut mp = multer::Multipart::with_constraints(stream, boundary.to_string(), constraints);
 
     let mut fields = Vec::new();
     let mut files = Vec::new();
     let mut temp_paths = TempFiles::default();
+    // As PHP counts: down from max_file_uploads, one per file part that gets a temp file.
+    let mut uploads_left = limits.max_file_uploads;
+    let upload_max = limits.upload_max_filesize;
+    let mut form_max: i64 = 0;
+    let too_large = |e: multer::Error| match (e, post_max) {
+        (multer::Error::StreamSizeExceeded { .. }, Some(post_max)) => Ok(post_max),
+        (e, _) => Err(map_err(e)),
+    };
 
     loop {
         let field = match mp.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
-            Err(e) => return Err(map_err(e)),
+            Err(e) => return too_large(e).map(|pm| over_post_max(None, pm)),
         };
         let name = field.name().unwrap_or("").to_string();
-        let file_name = field.file_name().map(|s| s.to_string());
+        let Some(file_name) = field.file_name().map(|s| s.to_string()) else {
+            // A normal field → collect its text value. A MAX_FILE_SIZE field limits the
+            // files that come after it, as in PHP (strtoll of its value; 0 is no limit).
+            let bytes = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => return too_large(e).map(|pm| over_post_max(None, pm)),
+            };
+            let value = String::from_utf8_lossy(&bytes).into_owned();
+            if name.eq_ignore_ascii_case("MAX_FILE_SIZE") {
+                form_max = strtoll(&value);
+            }
+            fields.push((name, value));
+            continue;
+        };
+        if !limits.file_uploads {
+            continue;
+        }
+        if uploads_left <= 0 {
+            if uploads_left == 0 {
+                uploads_left -= 1;
+                tracing::warn!(
+                    max_file_uploads = limits.max_file_uploads,
+                    "upload: more files than max_file_uploads; the rest are dropped, as PHP \
+                     drops them"
+                );
+            }
+            continue;
+        }
+        // PHP's type: the part's Content-Type as sent, up to any ';' — or nothing.
         let content_type = field
-            .content_type()
-            .map(|m| m.to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
+            .headers()
+            .get(hyper::header::CONTENT_TYPE)
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+            .map(|t| t.split(';').next().unwrap_or("").to_string())
+            .unwrap_or_default();
+        let cancelled = |error: i32| UploadedFile {
+            field_name: name.clone(),
+            file_name: basename(&file_name).to_string(),
+            full_path: file_name.clone(),
+            error,
+            ..UploadedFile::default()
+        };
 
-        match file_name {
-            // Empty filename ⇒ the browser submitted a file input with nothing
-            // chosen. PHP surfaces this in $_FILES with UPLOAD_ERR_NO_FILE (4) and
-            // no temp file, so Laravel's `$request->hasFile()` returns false. Match
-            // that instead of fabricating a 0-byte upload with error=OK.
-            Some(ref fname) if fname.is_empty() => {
-                files.push(UploadedFile {
-                    field_name: name,
-                    file_name: String::new(),
-                    full_path: String::new(),
-                    content_type,
-                    tmp_path: String::new(),
-                    size: 0,
-                    error: 4, // UPLOAD_ERR_NO_FILE
-                });
-            }
-            // A file part → stream to a temp file.
-            Some(file_name) => {
-                let tmp = temp_dir()
-                    .map_err(|e| UploadError::Parse(format!("temp file: {e}")))?
-                    .join(unique_name());
-                let mut out = create_temp_file(&tmp)
-                    .await
-                    .map_err(|e| UploadError::Parse(format!("temp file: {e}")))?;
-                temp_paths.push(tmp.clone());
-                let mut size = 0usize;
-                let mut field = field;
-                loop {
-                    match field.chunk().await {
-                        Ok(Some(chunk)) => {
-                            size += chunk.len();
-                            if out.write_all(&chunk).await.is_err() {
-                                return Err(UploadError::Parse("temp write failed".into()));
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(e) => return Err(map_err(e)),
+        // Empty filename ⇒ the browser submitted a file input with nothing chosen. PHP
+        // surfaces this in $_FILES with UPLOAD_ERR_NO_FILE (4) and no temp file, so
+        // Laravel's `$request->hasFile()` returns false. Match that instead of
+        // fabricating a 0-byte upload with error=OK.
+        if file_name.is_empty() {
+            files.push(cancelled(4));
+            continue;
+        }
+
+        // A file part → stream to a temp file.
+        uploads_left -= 1;
+        let tmp = temp_dir()
+            .map_err(|e| UploadError::Parse(format!("temp file: {e}")))?
+            .join(unique_name());
+        let mut out = create_temp_file(&tmp)
+            .await
+            .map_err(|e| UploadError::Parse(format!("temp file: {e}")))?;
+        temp_paths.push(tmp.clone());
+        let mut size = 0u64;
+        let mut error = 0; // UPLOAD_ERR_OK
+        let mut field = field;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    let total = size + chunk.len() as u64;
+                    if upload_max > 0 && total > upload_max as u64 {
+                        error = 1; // UPLOAD_ERR_INI_SIZE
+                        tracing::warn!(
+                            field = %name,
+                            upload_max_filesize = upload_max,
+                            "upload: a file over upload_max_filesize; the app sees \
+                             UPLOAD_ERR_INI_SIZE (raise it with `[worker] ini`)"
+                        );
+                        break;
                     }
+                    if form_max != 0 && total as i128 > form_max as i128 {
+                        error = 2; // UPLOAD_ERR_FORM_SIZE
+                        break;
+                    }
+                    if out.write_all(&chunk).await.is_err() {
+                        return Err(UploadError::Parse("temp write failed".into()));
+                    }
+                    size = total;
                 }
-                let _ = out.flush().await;
-                files.push(UploadedFile {
-                    field_name: name,
-                    file_name: basename(&file_name).to_string(),
-                    full_path: file_name,
-                    content_type,
-                    tmp_path: tmp.to_string_lossy().into_owned(),
-                    size,
-                    error: 0, // UPLOAD_ERR_OK
-                });
-            }
-            // A normal field → collect its text value.
-            None => {
-                let bytes = field.bytes().await.map_err(map_err)?;
-                fields.push((name, String::from_utf8_lossy(&bytes).into_owned()));
+                Ok(None) => break,
+                Err(e) => return too_large(e).map(|pm| over_post_max(None, pm)),
             }
         }
+        let _ = out.flush().await;
+        if error != 0 {
+            // Not kept, as PHP keeps nothing of it; the rest of the part is skipped.
+            drop(out);
+            let _ = tokio::fs::remove_file(&tmp).await;
+            files.push(cancelled(error));
+            continue;
+        }
+        files.push(UploadedFile {
+            field_name: name,
+            file_name: basename(&file_name).to_string(),
+            full_path: file_name,
+            content_type,
+            tmp_path: tmp.to_string_lossy().into_owned(),
+            size: size as usize,
+            error,
+        });
     }
 
     Ok(Parsed {
@@ -274,6 +377,48 @@ where
         files,
         temp_paths,
     })
+}
+
+/// What PHP makes of a body over `post_max_size`: no fields and no files.
+fn over_post_max(len: Option<u64>, post_max: u64) -> Parsed {
+    tracing::warn!(
+        bytes = ?len,
+        post_max_size = post_max,
+        "upload: a body over post_max_size; the app sees no fields and no files, as PHP \
+         would show it (raise it with `[worker] ini`)"
+    );
+    Parsed {
+        fields: Vec::new(),
+        files: Vec::new(),
+        temp_paths: TempFiles::default(),
+    }
+}
+
+/// C's `strtoll(s, NULL, 10)`, which PHP applies to a `MAX_FILE_SIZE` field: leading
+/// whitespace, a sign, then digits for as long as they last; 0 if there are none, and
+/// clamped at the ends of `i64` rather than overflowing.
+fn strtoll(s: &str) -> i64 {
+    let s = s.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let (neg, digits) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let mut n: i64 = 0;
+    for b in digits.bytes().take_while(u8::is_ascii_digit) {
+        let d = (b - b'0') as i64;
+        n = match n.checked_mul(10).and_then(|n| {
+            if neg {
+                n.checked_sub(d)
+            } else {
+                n.checked_add(d)
+            }
+        }) {
+            Some(n) => n,
+            None => return if neg { i64::MIN } else { i64::MAX },
+        };
+    }
+    n
 }
 
 /// A client's filename without its directory part, by PHP's rule (`php_ap_basename` in
@@ -303,6 +448,239 @@ fn map_err(e: multer::Error) -> UploadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A body as a stream, in chunks of `chunk` bytes, as a slow client sends it.
+    struct Body(std::collections::VecDeque<Bytes>);
+
+    impl Stream for Body {
+        type Item = Result<Bytes, std::io::Error>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Ready(self.0.pop_front().map(Ok))
+        }
+    }
+
+    const B: &str = "----askr-test";
+
+    /// A multipart body: `(name, filename, content-type, content)`, a field if no filename.
+    fn body(parts: &[(&str, Option<&str>, Option<&str>, &str)]) -> String {
+        let mut s = String::new();
+        for (name, file, ty, content) in parts {
+            s += &format!("--{B}\r\nContent-Disposition: form-data; name=\"{name}\"");
+            if let Some(f) = file {
+                s += &format!("; filename=\"{f}\"");
+            }
+            if let Some(t) = ty {
+                s += &format!("\r\nContent-Type: {t}");
+            }
+            s += &format!("\r\n\r\n{content}\r\n");
+        }
+        s + &format!("--{B}--\r\n")
+    }
+
+    async fn run(
+        body: &str,
+        chunk: usize,
+        content_length: bool,
+        limits: UploadLimits,
+    ) -> Result<Parsed, UploadError> {
+        let chunks = body
+            .as_bytes()
+            .chunks(chunk)
+            .map(Bytes::copy_from_slice)
+            .collect();
+        let len = content_length.then_some(body.len() as u64);
+        parse(Body(chunks), B, 1 << 20, len, &limits).await
+    }
+
+    fn ok(r: Result<Parsed, UploadError>) -> Parsed {
+        match r {
+            Ok(p) => p,
+            Err(UploadError::TooLarge) => panic!("413"),
+            Err(UploadError::Parse(e)) => panic!("400: {e}"),
+        }
+    }
+
+    const LIMITS: UploadLimits = UploadLimits::PHP_DEFAULTS;
+
+    /// `upload_max_filesize`: a file over it is an entry with UPLOAD_ERR_INI_SIZE and
+    /// nothing else — no temp file, size or type — and the files around it are kept.
+    #[tokio::test]
+    async fn a_file_over_upload_max_filesize_is_ini_size_and_kept_nowhere() {
+        let b = body(&[
+            ("a", Some("a.txt"), Some("text/plain"), "1"),
+            (
+                "big",
+                Some("big.bin"),
+                Some("application/x-big"),
+                "0123456789",
+            ),
+            ("c", Some("c.txt"), Some("text/plain"), "333"),
+        ]);
+        let limits = UploadLimits {
+            upload_max_filesize: 5,
+            ..LIMITS
+        };
+        let p = ok(run(&b, 3, true, limits).await);
+        let got: Vec<_> = p
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.field_name.as_str(),
+                    f.error,
+                    f.size,
+                    f.content_type.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a", 0, 1, "text/plain"),
+                ("big", 1, 0, ""),
+                ("c", 0, 3, "text/plain")
+            ]
+        );
+        assert_eq!(p.files[1].tmp_path, "");
+        assert_eq!(p.files[1].file_name, "big.bin");
+        assert_eq!(p.temp_paths.paths.iter().filter(|t| t.exists()).count(), 2);
+    }
+
+    /// `MAX_FILE_SIZE`, as a form sends it before its file inputs: UPLOAD_ERR_FORM_SIZE.
+    /// After a file it is too late for that file, as in PHP; `upload_max_filesize` wins
+    /// when both are crossed by the same bytes.
+    #[tokio::test]
+    async fn a_max_file_size_field_limits_the_files_after_it() {
+        let b = body(&[
+            ("early", Some("e.txt"), None, "22"),
+            ("MAX_FILE_SIZE", None, None, " 1"),
+            ("one", Some("1.txt"), None, "1"),
+            ("two", Some("2.txt"), None, "22"),
+        ]);
+        let p = ok(run(&b, 64, true, LIMITS).await);
+        let got: Vec<_> = p
+            .files
+            .iter()
+            .map(|f| (f.field_name.as_str(), f.error))
+            .collect();
+        assert_eq!(got, [("early", 0), ("one", 0), ("two", 2)]);
+        assert_eq!(p.fields, [("MAX_FILE_SIZE".to_string(), " 1".to_string())]);
+
+        let limits = UploadLimits {
+            upload_max_filesize: 1,
+            ..LIMITS
+        };
+        let p = ok(run(&b, 64, true, limits).await);
+        assert_eq!(
+            p.files[2].error, 1,
+            "INI_SIZE before FORM_SIZE, as PHP checks"
+        );
+    }
+
+    /// `max_file_uploads`: the files past it are dropped; an empty file input is not
+    /// counted, as PHP does not count it.
+    #[tokio::test]
+    async fn files_past_max_file_uploads_are_dropped_and_empty_inputs_do_not_count() {
+        let b = body(&[
+            ("a", Some("a.txt"), None, "1"),
+            ("none", Some(""), Some("application/octet-stream"), ""),
+            ("b", Some("b.txt"), None, "2"),
+            ("c", Some("c.txt"), None, "3"),
+            ("after", None, None, "kept"),
+        ]);
+        let limits = UploadLimits {
+            max_file_uploads: 2,
+            ..LIMITS
+        };
+        let p = ok(run(&b, 64, true, limits).await);
+        let got: Vec<_> = p
+            .files
+            .iter()
+            .map(|f| (f.field_name.as_str(), f.error, f.content_type.as_str()))
+            .collect();
+        assert_eq!(got, [("a", 0, ""), ("none", 4, ""), ("b", 0, "")]);
+        assert_eq!(p.fields, [("after".to_string(), "kept".to_string())]);
+    }
+
+    /// `file_uploads = 0`: no files at all; the fields still arrive.
+    #[tokio::test]
+    async fn with_file_uploads_off_files_are_dropped_and_fields_kept() {
+        let b = body(&[
+            ("note", None, None, "hello"),
+            ("doc", Some("a.txt"), None, "x"),
+        ]);
+        let limits = UploadLimits {
+            file_uploads: false,
+            ..LIMITS
+        };
+        let p = ok(run(&b, 64, true, limits).await);
+        assert!(p.files.is_empty());
+        assert_eq!(p.fields, [("note".to_string(), "hello".to_string())]);
+    }
+
+    /// `post_max_size`: a body over it leaves no fields and no files — declared by its
+    /// Content-Length, or found while streaming one without. Askr's own `max_body_size`
+    /// is still a 413.
+    #[tokio::test]
+    async fn a_body_over_post_max_size_leaves_nothing_and_max_body_size_is_a_413() {
+        let b = body(&[
+            ("note", None, None, "hello"),
+            ("doc", Some("a.txt"), None, &"x".repeat(200)),
+        ]);
+        let limits = UploadLimits {
+            post_max_size: 100,
+            ..LIMITS
+        };
+        for content_length in [true, false] {
+            let p = ok(run(&b, 16, content_length, limits).await);
+            assert!(
+                p.fields.is_empty() && p.files.is_empty(),
+                "content_length {content_length}"
+            );
+            assert_eq!(p.temp_paths.paths.iter().filter(|t| t.exists()).count(), 0);
+        }
+        // Declared over the limit, the body is not read at all: here it never arrives.
+        let p = ok(parse(Body(Default::default()), B, 1 << 20, Some(200), &limits).await);
+        assert!(p.fields.is_empty() && p.files.is_empty());
+
+        let chunks = std::iter::once(Bytes::from(b.clone())).collect();
+        let r = parse(Body(chunks), B, 64, Some(b.len() as u64), &limits).await;
+        assert!(matches!(r, Err(UploadError::TooLarge)));
+    }
+
+    /// PHP's `type`: the part's Content-Type as sent, up to any ';' — and nothing when the
+    /// part has none (not `application/octet-stream`).
+    #[tokio::test]
+    async fn the_type_is_the_content_type_as_sent_up_to_a_semicolon() {
+        let b = body(&[
+            ("a", Some("a.txt"), Some("text/plain; charset=utf-8"), "1"),
+            ("b", Some("b.txt"), Some("text/plain-file3;"), "1"),
+            ("c", Some("c.txt"), None, "1"),
+        ]);
+        let p = ok(run(&b, 64, true, LIMITS).await);
+        let got: Vec<_> = p.files.iter().map(|f| f.content_type.as_str()).collect();
+        assert_eq!(got, ["text/plain", "text/plain-file3", ""]);
+    }
+
+    #[test]
+    fn max_file_size_is_read_as_strtoll_reads_it() {
+        for (s, n) in [
+            ("100", 100),
+            ("  42abc", 42),
+            ("+7", 7),
+            ("-3", -3),
+            ("abc", 0),
+            ("", 0),
+            ("1e3", 1),
+            ("99999999999999999999", i64::MAX),
+            ("-99999999999999999999", i64::MIN),
+        ] {
+            assert_eq!(strtoll(s), n, "{s:?}");
+        }
+    }
 
     /// The cases php-src's own upload tests send, and the ones an attacker would.
     #[test]
