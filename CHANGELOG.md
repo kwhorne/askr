@@ -5,6 +5,12 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.8.7 — 2026-10-25
+
+Faster stops, reloads and recycles. A draining worker used to wait out its full 10-second
+deadline whenever a client held an idle keep-alive connection, which behind a proxy is
+always; now it closes idle connections at once and finishes only what is in flight.
+
 ### Fixed
 
 - **A stop, reload or recycle no longer waits 10 seconds for idle connections.** A

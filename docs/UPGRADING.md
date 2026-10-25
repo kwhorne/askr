@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.8.6; ARCH=$(uname -m)
+VER=v1.8.7; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.8.6     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.8.7     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.8` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.8.6-full`) are the same server built with the optional features
+The `-full` tags (`1.8.7-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,18 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.8.7
+
+**Nothing to change.** Stops, reloads and recycles no longer wait 10 seconds per worker
+for idle keep-alive connections; a request in flight still finishes. Two things you may
+notice:
+
+- **SSE streams end when their worker drains**, and `EventSource` reconnects on its own,
+  to a worker that is staying. A page that shows connection state from the `error` event
+  will show a brief reconnect on every deploy.
+- If a deploy script or health check waited a fixed 10+ seconds after a reload because
+  that was how long it took, the wait can come down.
 
 ### To 1.8.6
 
