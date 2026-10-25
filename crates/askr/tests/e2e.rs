@@ -2434,6 +2434,103 @@ root = "{ROOT}"
     );
 }
 
+/// In worker mode `$r['post']` is what PHP's `$_POST` would be for the same multipart body:
+/// `tags[]` appends, `user[name]` nests, a repeated name keeps its last value, `.` and ` `
+/// in a top-level name become `_`.
+///
+/// Until 1.9.1 each name was a key as sent: `tags[]` a key of its own, the second `tags[]`
+/// overwriting the first. Laravel then saw neither `tags` nor `user` in any form with a
+/// file input — those are the forms that post multipart. The oracle here is PHP itself:
+/// the same body, sent to a per-request server, where PHP's own parser builds `$_POST`.
+/// A second request shows nothing carries over, and that the worker's own `$_POST` is
+/// never written — ext/filter's input filter would write it, and keep every request's
+/// fields there for the next.
+#[test]
+fn a_worker_s_post_fields_are_shaped_as_php_shapes_post() {
+    let b = "----askr-e2e-boundary";
+    let field = |name: &str, value: &str| {
+        format!("--{b}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+    };
+    let body = [
+        field("tags[]", "a"),
+        field("tags[]", "b"),
+        field("note", "hi"),
+        field("note", "again"),
+        field("user[name]", "kh"),
+        field("user[roles][]", "admin"),
+        field("a.b", "1"),
+        field("x y", "2"),
+        field("arr[k.l]", "3"),
+        format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\nx\r\n--{b}--\r\n"
+        ),
+    ]
+    .concat();
+    let post = |port: u16, body: &str| {
+        let r = request_with_body(
+            port,
+            "POST",
+            "/",
+            &[(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={b}"),
+            )],
+            body,
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.body.trim().to_string()
+    };
+
+    // PHP's own answer.
+    let config = r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+"#;
+    let php = Server::start_in(
+        unique_dir("post-shape-php"),
+        &[("index.php", "<?php echo json_encode($_POST);")],
+        config,
+    );
+    let want = post(php.port, &body);
+    assert!(want.contains(r#""tags":["a","b"]"#), "PHP's own: {want}");
+
+    let dir = unique_dir("post-shape-worker");
+    let worker = r#"<?php
+while (askr_handle_request(function ($r) {
+    echo json_encode($r['post']), '|', count($_POST);
+    return 200;
+})) {}
+"#;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+workers = "1"
+
+[worker]
+script = "{}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let w = Server::start_in(dir.clone(), &[("index.php", "<?php")], &config);
+    assert_eq!(
+        post(w.port, &body),
+        format!("{want}|0"),
+        "as PHP shapes $_POST"
+    );
+    let second = [field("only", "this"), format!("--{b}--\r\n")].concat();
+    assert_eq!(
+        post(w.port, &second),
+        r#"{"only":"this"}|0"#,
+        "nothing carries over to the next request"
+    );
+}
+
 /// In worker mode PHP's upload settings hold, as the app's php.ini sets them: a file over
 /// `upload_max_filesize` is UPLOAD_ERR_INI_SIZE, and files past `max_file_uploads` are
 /// dropped.

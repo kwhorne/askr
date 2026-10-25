@@ -5,6 +5,20 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **Worker mode: a multipart form's `[]` and nested fields reach the app.** `$r['post']`
+  had each field's name as a key exactly as sent, so `tags[]` was a key of its own, a
+  second `tags[]` overwrote the first, and `user[name]` was never nested. Laravel saw
+  neither `tags` nor `user` — in any form with a file input, since those are the forms
+  that post multipart. `$r['post']` is now registered by PHP's own rules
+  (`php_register_variable_safe`), exactly as PHP builds `$_POST` from the same body —
+  checked against PHP itself in `a_worker_s_post_fields_are_shaped_as_php_shapes_post`,
+  which fails on the old code with `"tags[]":"b"`. `examples/laravel-worker.php` nests
+  the files the same way (`user[avatar]` reaches `$request->file('user.avatar')`; only
+  `name` and `name[]` worked before), and the Laravel smoke checks both. A worker script
+  that read raw names from `$r['post']` (`$r['post']['tags[]']`) gets PHP's shape now.
+
 ## 1.9.0 — 2026-10-25
 
 Worker mode now applies PHP's upload settings, as per-request mode has since 1.8.5:

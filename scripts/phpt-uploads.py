@@ -18,7 +18,7 @@ Each test runs the way php-src's run-tests.php runs it: the first `Content-Type:
 `--POST_RAW--` is the header, the remaining lines are the body joined with "\\n", and
 `--INI--` is the php.ini. In per-request mode the output must match `--EXPECT--`, or
 `--EXPECTF--` with its placeholders. In worker mode the test script runs inside a worker
-that builds `$_POST` and `$_FILES` from `$r` with PHP's own variable parser, and its
+that takes `$_POST` from `$r` and builds `$_FILES` with PHP's own variable parser, and its
 output must match per-request mode's for the same request (see `run_one`).
 
 Known divergences are listed by name in `scripts/phpt-uploads.known` — a test there is
@@ -36,8 +36,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # bracket rules (parse_str), so a difference here is a difference in what Askr parsed.
 WORKER = r"""<?php
 $test = getenv('ASKR_PHPT_SCRIPT');
-// One query string per attribute, through PHP's own variable parser — `[]`, nesting and
-// name mangling then work exactly as when PHP registers `$_POST` and `$_FILES` itself.
+// `$r['post']` is registered by PHP's own rules already. The files are a flat list, so
+// they are nested here as PHP nests `$_FILES`: one query string per attribute, through
+// PHP's own variable parser — `[]`, nesting and name mangling work as in PHP.
 function askr_phpt_parse(array $pairs): array {
     $q = [];
     foreach ($pairs as [$k, $v]) {
@@ -47,7 +48,7 @@ function askr_phpt_parse(array $pairs): array {
     return $out;
 }
 while (askr_handle_request(function (array $r) use ($test): int {
-    $_POST = askr_phpt_parse(array_map(null, array_keys($r['post'] ?? []), $r['post'] ?? []));
+    $_POST = $r['post'] ?? [];
     $_FILES = [];
     foreach (['name', 'full_path', 'type', 'tmp_name', 'error', 'size'] as $k) {
         $pairs = [];

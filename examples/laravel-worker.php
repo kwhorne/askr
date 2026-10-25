@@ -90,24 +90,26 @@ $handler = function (array $r) use ($app, $kernel): int {
             parse_str($r['body'], $post);
         }
     }
-    $files = [];
-    foreach ($r['files'] ?? [] as $f) {
+    // Files, nested the way PHP nests $_FILES: one parse_str() of every field name, by
+    // PHP's own rules for brackets — `photos[]` appends, `user[avatar]` nests — with each
+    // file's index as its leaf, then the index swapped for the file.
+    $uploads = $names = [];
+    foreach ($r['files'] ?? [] as $i => $f) {
         // The name as sent, path included: Symfony keeps only its basename as the client's
         // name, and the whole of it for getClientOriginalPath() (folder uploads).
-        $uploaded = new Illuminate\Http\UploadedFile(
+        $uploads[$i] = new Illuminate\Http\UploadedFile(
             $f['tmp_name'],
             $f['full_path'] ?? $f['name'],
             $f['type'] ?: null,
             $f['error'] ?? 0,
             true // test mode
         );
-        $field = $f['field'];
-        if (str_ends_with($field, '[]')) {
-            $files[substr($field, 0, -2)][] = $uploaded;
-        } else {
-            $files[$field] = $uploaded;
-        }
+        $names[] = rawurlencode($f['field']) . '=' . $i;
     }
+    parse_str(implode('&', $names), $files);
+    array_walk_recursive($files, function (&$leaf) use ($uploads) {
+        $leaf = $uploads[(int) $leaf];
+    });
 
     $request = Illuminate\Http\Request::create(
         $r['uri'],

@@ -26,6 +26,7 @@
 #include <zend_API.h>
 #include <zend_exceptions.h>
 #include <SAPI.h>
+#include <php_variables.h>
 
 #include <signal.h>
 #include <stdbool.h>
@@ -665,11 +666,33 @@ static PHP_FUNCTION(askr_handle_request) {
     add_assoc_zval(&request, "headers", &headers);
     add_assoc_stringl(&request, "body", w_body ? w_body : "", w_body_len);
 
-    /* Parsed multipart POST fields → $request['post']. */
+    /* Parsed multipart POST fields → $request['post'], registered as PHP registers $_POST
+     * from a multipart body (main/rfc1867.c): no more than max_input_vars of them, and by
+     * PHP's own rules for names — `tags[]` appends, `user[name]` nests, a repeated name
+     * keeps its last value, `.` and ` ` in a top-level name become `_`. Until 1.9.1 each
+     * name was a key as sent, so `tags[]` was a key of its own and the second `tags[]`
+     * overwrote the first.
+     *
+     * Not through sapi_module.input_filter, as rfc1867.c goes: ext/filter's filter
+     * registers a POST variable into the real $_POST and its own filter_input() store and
+     * returns 0 — in a worker, one PHP request that never ends, both would grow with every
+     * request and carry each one's fields into the next. What that skips is filter.default,
+     * which PHP has deprecated.
+     *
+     * The over-limit warning goes to stderr: raised here, inside askr_handle_request(), an
+     * app's error handler would turn it into an exception in the middle of the worker
+     * loop. */
     zval post;
     array_init(&post);
+    zend_long max_vars = PG(max_input_vars);
     for (int i = 0; i < w_npost; i++) {
-        add_assoc_string(&post, w_pnames[i], w_pvalues[i] ? w_pvalues[i] : "");
+        const char *v = w_pvalues[i] ? w_pvalues[i] : "";
+        if (i < max_vars) {
+            php_register_variable_safe(w_pnames[i], v, strlen(v), &post);
+        } else if (i == max_vars) {
+            fprintf(stderr, "askr: request has more than max_input_vars (" ZEND_LONG_FMT
+                    ") POST fields; the rest are dropped, as PHP drops them\n", max_vars);
+        }
     }
     add_assoc_zval(&request, "post", &post);
 
