@@ -70,7 +70,9 @@ Illuminate\Support\Facades\Route::get('/_askr_probe', fn (Illuminate\Http\Reques
 ]));
 
 // An upload, as Laravel sees it: the file's name, the path a folder upload sent with it,
-// its content, and a field beside it. No CSRF token: the probe is not a form.
+// its content, and a field beside it. No CSRF token: the probe is not a form. The CSRF
+// middleware is named per version (Laravel 13: PreventRequestForgery); a name that does
+// not exist in this one is only a string.
 Illuminate\Support\Facades\Route::post('/_askr_upload', fn (Illuminate\Http\Request $r) => response()->json([
     'note' => $r->input('note'),
     'name' => $r->file('doc')?->getClientOriginalName(),
@@ -78,6 +80,7 @@ Illuminate\Support\Facades\Route::post('/_askr_upload', fn (Illuminate\Http\Requ
         ? $r->file('doc')?->getClientOriginalPath() : 'n/a',
     'content' => $r->file('doc')?->get(),
 ]))->withoutMiddleware([
+    Illuminate\Foundation\Http\Middleware\PreventRequestForgery::class,
     Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class,
     Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class,
 ]);
