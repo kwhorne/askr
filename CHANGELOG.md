@@ -5,6 +5,19 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Security
+
+- **In worker mode an uploaded file's `name` is its basename, as in PHP.** Until now
+  `$r['files'][..]['name']` was the filename exactly as the client sent it, so it could
+  be `../../public/shell.php`, where PHP's `$_FILES` would say `shell.php` (RFC 7578: a
+  path in a filename must not be used). A worker script that built a path from it could
+  be made to write outside its upload directory. `examples/laravel-worker.php` was not
+  exposed — Symfony's `UploadedFile` strips the path itself — but a hand-written worker
+  could be. The name as sent is now in `full_path`, as PHP has it since 8.1, and the
+  Laravel worker passes that on, so `getClientOriginalPath()` still sees a folder
+  upload's path. PHP's own `rfc1867_multiple_webkitdirectory` test now passes in worker
+  mode, and has left `scripts/phpt-uploads.known`.
+
 ## 1.8.5 — 2026-10-24
 
 A fix for file uploads in per-request mode, which have arrived empty since 0.4.0. Take it

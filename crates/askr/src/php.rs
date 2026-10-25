@@ -361,7 +361,7 @@ impl WorkerBridge {
 /// hot path (hundreds of short-lived allocs/s at high RPS). The shim copies every
 /// pointer (`dup_cstr`) before returning, so a buffer only has to stay valid until
 /// its own next reuse — distinct slots hold the pointers a single call needs live
-/// at once (`set_meta`=3, `add_file`=4).
+/// at once (`set_meta`=3, `add_file`=5).
 #[derive(Default)]
 struct CStrArena {
     bufs: Vec<Vec<u8>>,
@@ -426,13 +426,16 @@ fn load_request(req: &Request) {
                 }
             }
             for f in &req.files {
-                if let (Some(field), Some(name), Some(ty), Some(tmp)) = (
+                if let (Some(field), Some(name), Some(full), Some(ty), Some(tmp)) = (
                     a.cstr(0, &f.field_name),
                     a.cstr(1, &f.file_name),
-                    a.cstr(2, &f.content_type),
-                    a.cstr(3, &f.tmp_path),
+                    a.cstr(2, &f.full_path),
+                    a.cstr(3, &f.content_type),
+                    a.cstr(4, &f.tmp_path),
                 ) {
-                    askr_php::worker::askr_req_add_file(field, name, ty, tmp, f.size, f.error);
+                    askr_php::worker::askr_req_add_file(
+                        field, name, full, ty, tmp, f.size, f.error,
+                    );
                 }
             }
         }

@@ -552,9 +552,9 @@ Worker mode's parser is Askr's, not PHP's, and it differs from PHP in ways CI ke
 of ([`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known), checked against PHP's
 own upload tests on every push): PHP's upload INI settings are not applied to it,
 `is_uploaded_file()` and `move_uploaded_file()` do not accept its files (Laravel's test-mode
-`UploadedFile` moves them with `rename()`), a file's `name` is the path the client sent
-rather than its basename, and a malformed body is a `400` where PHP would warn. In
-per-request mode none of that applies.
+`UploadedFile` moves them with `rename()`), and a malformed body is a `400` where PHP
+would warn. In per-request mode none of that applies. A file's `name` is its basename and
+`full_path` the name as the client sent it, as in PHP (from 1.8.6).
 
 ## 9. Compression, logging & observability (0.4.1)
 

@@ -87,6 +87,8 @@ The `$request` array Askr passes the handler:
 | `query` | raw query string |
 | `headers` | the full CGI `$_SERVER` map (REQUEST_METHOD, HTTP_*, HTTPS, CONTENT_TYPE, …) |
 | `body` | raw request body |
+| `post` | a `multipart/form-data` body's fields, `name => value`, names as sent (`tags[]` is not nested, and a repeated name keeps its last value); empty for any other body, which stays in `body` |
+| `files` | a `multipart/form-data` body's files, a list of `field` (the form field's name, as sent), `name` (the file's basename, as PHP's `$_FILES` gives it), `full_path` (the filename as the client sent it, path included — never use it as a path), `type`, `tmp_name`, `size`, `error` (`UPLOAD_ERR_*`) |
 
 The handler produces its response the normal PHP way — `echo`/`print` for the
 body, `header()` for headers, `http_response_code()` for the status — all

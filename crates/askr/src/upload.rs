@@ -220,6 +220,7 @@ where
                 files.push(UploadedFile {
                     field_name: name,
                     file_name: String::new(),
+                    full_path: String::new(),
                     content_type,
                     tmp_path: String::new(),
                     size: 0,
@@ -252,7 +253,8 @@ where
                 let _ = out.flush().await;
                 files.push(UploadedFile {
                     field_name: name,
-                    file_name,
+                    file_name: basename(&file_name).to_string(),
+                    full_path: file_name,
                     content_type,
                     tmp_path: tmp.to_string_lossy().into_owned(),
                     size,
@@ -274,6 +276,21 @@ where
     })
 }
 
+/// A client's filename without its directory part, by PHP's rule (`php_ap_basename` in
+/// `main/rfc1867.c`): what follows the last `/` or `\`, whichever comes later — `\`
+/// too, on every platform, because browsers on Windows have sent `C:\Users\…`.
+///
+/// Until 1.8.6 worker mode handed the filename over as sent, so `$r['files'][..]['name']`
+/// could be `../../public/shell.php`, or a folder upload's `photos/2024/a.jpg`, where
+/// PHP's `$_FILES` has `shell.php` and `a.jpg`. The path the client sent is still there,
+/// as `full_path`, as in PHP.
+fn basename(file_name: &str) -> &str {
+    match file_name.rfind(['/', '\\']) {
+        Some(i) => &file_name[i + 1..],
+        None => file_name,
+    }
+}
+
 fn map_err(e: multer::Error) -> UploadError {
     match e {
         multer::Error::StreamSizeExceeded { .. } | multer::Error::FieldSizeExceeded { .. } => {
@@ -286,6 +303,25 @@ fn map_err(e: multer::Error) -> UploadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cases php-src's own upload tests send, and the ones an attacker would.
+    #[test]
+    fn a_filename_loses_its_directory_part_as_php_strips_it() {
+        for (sent, name) in [
+            ("file1.txt", "file1.txt"),
+            ("directory/subdirectory/file2.txt", "file2.txt"),
+            ("C:\\foo\\bar/file3.txt", "file3.txt"),
+            ("C:\\Users\\kh\\cv.pdf", "cv.pdf"),
+            ("a/b\\c.txt", "c.txt"),
+            ("../../public/shell.php", "shell.php"),
+            ("..\\..\\shell.php", "shell.php"),
+            ("dir/", ""),
+            ("blåbær/søknad.pdf", "søknad.pdf"),
+            ("", ""),
+        ] {
+            assert_eq!(basename(sent), name, "{sent:?}");
+        }
+    }
 
     /// `/tmp/askr-uploads` is a fixed path any local user can create first. Every
     /// result the old version needed was discarded: `create()` on an existing

@@ -54,7 +54,7 @@ while (askr_handle_request(function (array $r) use ($test): int {
         foreach ($r['files'] ?? [] as $f) {
             $at = strcspn($f['field'], '[');
             $pairs[] = [substr($f['field'], 0, $at) . "[$k]" . substr($f['field'], $at),
-                        $k === 'full_path' ? $f['name'] : $f[$k]];
+                        $f[$k]];
         }
         $one = askr_phpt_parse($pairs);
         if (in_array($k, ['error', 'size'], true)) {

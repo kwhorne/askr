@@ -19,6 +19,5 @@ worker rfc1867_max_file_size               neither MAX_FILE_SIZE (UPLOAD_ERR_FOR
 worker rfc1867_max_file_uploads_empty_files is_uploaded_file() is false for the worker's files, and an empty file part keeps its Content-Type
 worker rfc1867_missing_boundary            no "Missing boundary" warning
 worker rfc1867_missing_boundary_2          a body that ends mid-part is a 400; PHP keeps the part with UPLOAD_ERR_PARTIAL
-worker rfc1867_multiple_webkitdirectory    a file's name is the client's path as sent; PHP's "name" is its basename, the path is in "full_path"
 worker rfc1867_post_max_filesize           upload_max_filesize is not honoured (UPLOAD_ERR_INI_SIZE)
 worker rfc1867_post_max_size               post_max_size is not honoured; PHP warns and leaves $_POST and $_FILES empty

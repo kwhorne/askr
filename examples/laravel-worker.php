@@ -92,9 +92,11 @@ $handler = function (array $r) use ($app, $kernel): int {
     }
     $files = [];
     foreach ($r['files'] ?? [] as $f) {
+        // The name as sent, path included: Symfony keeps only its basename as the client's
+        // name, and the whole of it for getClientOriginalPath() (folder uploads).
         $uploaded = new Illuminate\Http\UploadedFile(
             $f['tmp_name'],
-            $f['name'],
+            $f['full_path'] ?? $f['name'],
             $f['type'] ?: null,
             $f['error'] ?? 0,
             true // test mode

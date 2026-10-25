@@ -68,6 +68,19 @@ Illuminate\Support\Facades\Route::get('/_askr_probe', fn (Illuminate\Http\Reques
     'ip' => $r->ip(),
     'protocol' => $r->server('SERVER_PROTOCOL'),
 ]));
+
+// An upload, as Laravel sees it: the file's name, the path a folder upload sent with it,
+// its content, and a field beside it. No CSRF token: the probe is not a form.
+Illuminate\Support\Facades\Route::post('/_askr_upload', fn (Illuminate\Http\Request $r) => response()->json([
+    'note' => $r->input('note'),
+    'name' => $r->file('doc')?->getClientOriginalName(),
+    'path' => method_exists(Symfony\Component\HttpFoundation\File\UploadedFile::class, 'getClientOriginalPath')
+        ? $r->file('doc')?->getClientOriginalPath() : 'n/a',
+    'content' => $r->file('doc')?->get(),
+]))->withoutMiddleware([
+    Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class,
+    Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class,
+]);
 PHP
 # A cached route table would not contain the probe.
 rm -f "$WORK/app/bootstrap/cache/config.php" "$WORK/app/bootstrap/cache/routes"*.php
@@ -187,6 +200,14 @@ check "HTTP/2: it really was HTTP/2" "$([ "$p" = HTTP/2.0 ] && echo ok || echo "
 j=$(curl -s --http1.1 -H "X-Forwarded-For: 203.0.113.9" "$BASE/_askr_probe")
 ip=$(echo "$j" | field ip)
 check "behind a trusted proxy, request()->ip() is the client" "$([ "$ip" = 203.0.113.9 ] && echo ok || echo "ip() = $ip")"
+
+# The file's name is its basename; the path a folder upload sends is kept beside it, for
+# getClientOriginalPath() (Symfony 7.1+; "n/a" before it).
+printf 'file body' > "$WORK/upload.txt"
+j=$(curl -s --http1.1 -F note=hello -F "doc=@$WORK/upload.txt;filename=photos/2024/a.txt" "$BASE/_askr_upload")
+n=$(echo "$j" | field name); pa=$(echo "$j" | field path)
+check "an upload reaches Laravel with its field and content" "$([ "$(echo "$j" | field note)" = hello ] && [ "$(echo "$j" | field content)" = "file body" ] && echo ok || echo "$j")"
+check "an upload's name is its basename, its path kept beside it" "$([ "$n" = a.txt ] && { [ "$pa" = photos/2024/a.txt ] || [ "$pa" = n/a ]; } && echo ok || echo "name = $n, path = $pa")"
 
 if [ "$fails" -gt 0 ]; then
   echo "$fails probe(s) failed"; logs; exit 1

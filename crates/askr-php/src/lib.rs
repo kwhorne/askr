@@ -247,8 +247,12 @@ pub struct Request {
 pub struct UploadedFile {
     /// The form field name (e.g. `avatar`, or `photos[]`).
     pub field_name: String,
-    /// The client's original filename.
+    /// The client's filename without any directory part, as PHP's `$_FILES[..]['name']`:
+    /// what follows the last `/` or `\`. RFC 7578 says not to use a path a client sends.
     pub file_name: String,
+    /// The client's filename as sent, path included, as PHP's `['full_path']` — a folder
+    /// upload (`webkitdirectory`) sends `photos/2024/a.jpg`. Never safe to use as a path.
+    pub full_path: String,
     /// The declared MIME type.
     pub content_type: String,
     /// Absolute path to the temp file the server wrote.
@@ -366,6 +370,7 @@ pub mod worker {
         pub fn askr_req_add_file(
             field: *const c_char,
             file_name: *const c_char,
+            full_path: *const c_char,
             content_type: *const c_char,
             tmp_path: *const c_char,
             size: usize,

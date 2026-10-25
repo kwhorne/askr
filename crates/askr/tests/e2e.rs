@@ -2309,6 +2309,73 @@ root = "{ROOT}"
     );
 }
 
+/// In worker mode an uploaded file's `name` is its basename, as in PHP's `$_FILES`, and
+/// the path the client sent is in `full_path`.
+///
+/// Until 1.8.6 `$r['files'][..]['name']` was the filename as sent. A worker script that
+/// built a path from it — `move_uploaded_file()`-style code ported from `$_FILES`, where
+/// PHP has already stripped the directory — could be sent `../../public/shell.php` and
+/// write outside its upload directory. RFC 7578: don't use a path the client supplies.
+#[test]
+fn a_worker_gets_an_uploaded_file_s_basename_as_its_name() {
+    let dir = unique_dir("upload-basename");
+    let worker = r#"<?php
+while (askr_handle_request(function ($r) {
+    foreach ($r['files'] as $f) {
+        echo $f['field'], ': name=', $f['name'], ' full_path=', $f['full_path'], "\n";
+    }
+    return 200;
+})) {}
+"#;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+
+[worker]
+script = "{}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let s = Server::start_in(dir.clone(), &[("index.php", "<?php")], &config);
+
+    let b = "----askr-e2e-boundary";
+    let part = |field: &str, file: &str| {
+        format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{file}\"\r\n\
+             Content-Type: text/plain\r\n\r\nx\r\n"
+        )
+    };
+    let body = [
+        part("evil", "../../public/shell.php"),
+        part("win", "C:\\Users\\kh\\cv.pdf"),
+        part("folder[]", "photos/2024/a.jpg"),
+        format!("--{b}--\r\n"),
+    ]
+    .concat();
+    let r = request_with_body(
+        s.port,
+        "POST",
+        "/",
+        &[(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={b}"),
+        )],
+        &body,
+    );
+    assert_eq!(r.status, 200, "log:\n{}", s.log_contents());
+    assert_eq!(
+        r.body.trim(),
+        "evil: name=shell.php full_path=../../public/shell.php\n\
+         win: name=cv.pdf full_path=C:\\Users\\kh\\cv.pdf\n\
+         folder[]: name=a.jpg full_path=photos/2024/a.jpg",
+        "the name is the basename, as PHP's $_FILES has it"
+    );
+}
+
 /// `exit()` anywhere in the app must end the request, not the worker.
 ///
 /// Since PHP 8.0, exit() is an internal "unwind exit", not a bailout: it unwinds

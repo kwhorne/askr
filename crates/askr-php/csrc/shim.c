@@ -461,6 +461,7 @@ static int    w_warn_files;
 typedef struct {
     char  *field;
     char  *name;
+    char  *full_path;
     char  *type;
     char  *tmp;
     size_t size;
@@ -488,7 +489,7 @@ void askr_req_reset(void) {
     for (int i = 0; i < w_npost; i++) { free(w_pnames[i]); free(w_pvalues[i]); }
     w_npost = 0;
     for (int i = 0; i < w_nfiles; i++) {
-        free(w_files[i].field); free(w_files[i].name);
+        free(w_files[i].field); free(w_files[i].name); free(w_files[i].full_path);
         free(w_files[i].type);  free(w_files[i].tmp);
     }
     w_nfiles = 0;
@@ -507,11 +508,12 @@ void askr_req_add_post(const char *name, const char *value) {
     }
 }
 
-void askr_req_add_file(const char *field, const char *file_name, const char *content_type,
-                       const char *tmp_path, size_t size, int error) {
+void askr_req_add_file(const char *field, const char *file_name, const char *full_path,
+                       const char *content_type, const char *tmp_path, size_t size, int error) {
     if (w_nfiles < ASKR_MAX_FILES) {
         w_files[w_nfiles].field = dup_cstr(field);
         w_files[w_nfiles].name = dup_cstr(file_name);
+        w_files[w_nfiles].full_path = dup_cstr(full_path);
         w_files[w_nfiles].type = dup_cstr(content_type);
         w_files[w_nfiles].tmp = dup_cstr(tmp_path);
         w_files[w_nfiles].size = size;
@@ -668,6 +670,7 @@ static PHP_FUNCTION(askr_handle_request) {
         array_init(&f);
         add_assoc_string(&f, "field", w_files[i].field ? w_files[i].field : "");
         add_assoc_string(&f, "name", w_files[i].name ? w_files[i].name : "");
+        add_assoc_string(&f, "full_path", w_files[i].full_path ? w_files[i].full_path : "");
         add_assoc_string(&f, "type", w_files[i].type ? w_files[i].type : "");
         add_assoc_string(&f, "tmp_name", w_files[i].tmp ? w_files[i].tmp : "");
         add_assoc_long(&f, "size", (zend_long)w_files[i].size);
