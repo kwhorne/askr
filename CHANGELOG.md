@@ -5,6 +5,12 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.2 — 2026-10-25
+
+Worker mode's uploads are uploads to PHP now: `move_uploaded_file()` and
+`is_uploaded_file()` accept them, so a worker script written for PHP-FPM handles files
+unchanged, and Laravel's worker uses ordinary `UploadedFile`s instead of test-mode ones.
+
 ### Fixed
 
 - **Worker mode: `move_uploaded_file()` and `is_uploaded_file()` accept the request's

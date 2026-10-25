@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.9.1; ARCH=$(uname -m)
+VER=v1.9.2; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.9.1     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.9.2     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.9` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.9.1-full`) are the same server built with the optional features
+The `-full` tags (`1.9.2-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,20 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.9.2
+
+**Nothing to change with the shipped worker** (`/opt/askr/examples/laravel-worker.php`, or
+the tarball's): it and the binary come together.
+
+**If you copied `laravel-worker.php` into your app, upgrade Askr first, then the copy.**
+The new worker builds ordinary `UploadedFile`s instead of test-mode ones, which relies on
+Askr 1.9.2 telling PHP about the uploads: on 1.9.1 or earlier every upload would fail
+`isValid()`. Keeping your old copy on 1.9.2 works as before.
+
+**With your own worker script:** `move_uploaded_file($f['tmp_name'], …)` and
+`is_uploaded_file()` now work as under PHP-FPM, for the files of the request being
+handled. If you moved files with `rename()` to get round them, either still works.
 
 ### To 1.9.1
 
