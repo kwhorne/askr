@@ -641,6 +641,44 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_askr_handle_request, 0, 0, 1)
     ZEND_ARG_INFO(0, handler)
 ZEND_END_ARG_INFO()
 
+/* PHP's record of this request's uploads, SG(rfc1867_uploaded_files): the table
+ * is_uploaded_file() and move_uploaded_file() consult, and that PHP's own multipart parser
+ * fills (main/rfc1867.c). A worker's request never goes through that parser — Askr streamed
+ * the files — so the table was empty, and both functions refused every file the worker was
+ * handed. Until 1.9.2 a worker script written for PHP-FPM could not move an upload.
+ *
+ * Filled as rfc1867.c fills it (the path as key and as value, released by the table), with
+ * the files that arrived intact, for exactly one request: emptied the moment the handler
+ * returns, so no file is ever "uploaded" in the next. Deleting the files is not done here:
+ * Askr's own guard removes whatever the request did not move. */
+static void askr_free_upload_name(zval *el) {
+    zend_string_release_ex(Z_STR_P(el), 0);
+}
+
+static void askr_uploads_begin(void) {
+    for (int i = 0; i < w_nfiles; i++) {
+        if (w_files[i].error != 0 || !w_files[i].tmp || !w_files[i].tmp[0]) {
+            continue;
+        }
+        if (!SG(rfc1867_uploaded_files)) {
+            ALLOC_HASHTABLE(SG(rfc1867_uploaded_files));
+            zend_hash_init(SG(rfc1867_uploaded_files), 8, NULL, askr_free_upload_name, 0);
+        }
+        zend_string *path = zend_string_init(w_files[i].tmp, strlen(w_files[i].tmp), 0);
+        if (!zend_hash_add_ptr(SG(rfc1867_uploaded_files), path, path)) {
+            zend_string_release_ex(path, 0);
+        }
+    }
+}
+
+static void askr_uploads_end(void) {
+    if (SG(rfc1867_uploaded_files)) {
+        zend_hash_destroy(SG(rfc1867_uploaded_files));
+        FREE_HASHTABLE(SG(rfc1867_uploaded_files));
+        SG(rfc1867_uploaded_files) = NULL;
+    }
+}
+
 static PHP_FUNCTION(askr_handle_request) {
     zval *handler;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -716,9 +754,11 @@ static PHP_FUNCTION(askr_handle_request) {
     /* $handler($request) */
     zval retval, params[1];
     ZVAL_COPY_VALUE(&params[0], &request);
+    askr_uploads_begin();
     if (call_user_function(NULL, NULL, handler, &retval, 1, params) == SUCCESS) {
         zval_ptr_dtor(&retval);
     }
+    askr_uploads_end();
     zval_ptr_dtor(&request);
 
     /* exit()/die() must end the REQUEST, not the worker.

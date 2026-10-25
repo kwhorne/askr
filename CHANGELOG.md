@@ -5,6 +5,21 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **Worker mode: `move_uploaded_file()` and `is_uploaded_file()` accept the request's
+  uploads.** PHP consults a table of the request's uploads that its own multipart parser
+  fills; a worker's files never go through that parser, so both functions refused every
+  one of them, and a worker script written for PHP-FPM could not move an upload. The shim
+  now fills that table with the request's intact files before the handler runs, as
+  `main/rfc1867.c` does, and empties it when the handler returns — so a file from an
+  earlier request, or any other file, is still refused. Four more of PHP's own upload
+  tests pass in worker mode and have left `scripts/phpt-uploads.known` (eight remain).
+  `a_worker_can_move_its_own_uploads_and_nothing_else` fails with either half removed.
+  `examples/laravel-worker.php` no longer builds its files in test mode: `isValid()`
+  checks they are uploads and `->move()` is `move_uploaded_file()`, as under PHP-FPM; the
+  Laravel smoke moves one.
+
 ## 1.9.1 — 2026-10-25
 
 A fix for forms in worker mode: in any form with a file input — the forms that post

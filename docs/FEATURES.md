@@ -532,8 +532,9 @@ empty.)
 **Worker mode** streams `multipart/form-data` instead of buffering it: each file part goes
 straight to a temp file, so a large upload costs **constant memory** (a 32 MB upload no
 longer holds 32 MB in RAM), and form fields are parsed to POST params. Askr hands
-PHP the `$_FILES`-shaped metadata and `examples/laravel-worker.php` rebuilds them
-as Laravel `UploadedFile`s in test mode — so uploads work in worker mode:
+PHP the `$_FILES`-shaped metadata — the files are this request's uploads to PHP too, so
+`is_uploaded_file()` and `move_uploaded_file()` accept them (from 1.9.2) — and
+`examples/laravel-worker.php` rebuilds them as Laravel `UploadedFile`s:
 
 ```php
 $request->file('avatar')->store('avatars');   // just works
@@ -565,10 +566,8 @@ Askr logs a warning when one of them refuses an upload, naming the setting.
 
 Worker mode's parser is Askr's, not PHP's, and it differs from PHP in ways CI keeps a list
 of ([`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known), checked against PHP's
-own upload tests on every push): `is_uploaded_file()` and `move_uploaded_file()` do not
-accept its files (Laravel's test-mode `UploadedFile` moves them with `rename()`), PHP's
-upload warnings are Askr log lines rather than PHP warnings, and a malformed body is a
-`400` where PHP would warn. In per-request mode none of that applies. A file's `name` is
+own upload tests on every push): PHP's upload warnings are Askr log lines rather than PHP
+warnings, and a malformed body is a `400` where PHP would warn. In per-request mode none of that applies. A file's `name` is
 its basename and `full_path` the name as the client sent it, as in PHP (from 1.8.6).
 
 ## 9. Compression, logging & observability (0.4.1)

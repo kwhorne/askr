@@ -83,6 +83,13 @@ Illuminate\Support\Facades\Route::post('/_askr_upload', fn (Illuminate\Http\Requ
     'tags' => $r->input('tags'),
     'user' => $r->input('user'),
     'avatar' => $r->file('user.avatar')?->getClientOriginalName(),
+    // Last: moving it is the end of it. ->move() is move_uploaded_file(), as under FPM.
+    'moved' => $r->file('doc')?->isValid() ? (function ($f) {
+        $to = $f->move(sys_get_temp_dir(), 'askr-probe-' . bin2hex(random_bytes(6)));
+        $body = file_get_contents($to->getPathname());
+        unlink($to->getPathname());
+        return $body;
+    })($r->file('doc')) : null,
 ]))->withoutMiddleware([
     Illuminate\Foundation\Http\Middleware\PreventRequestForgery::class,
     Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class,
@@ -214,6 +221,7 @@ printf 'file body' > "$WORK/upload.txt"
 j=$(curl -s --http1.1 -F note=hello -F "doc=@$WORK/upload.txt;filename=photos/2024/a.txt" "$BASE/_askr_upload")
 n=$(echo "$j" | field name); pa=$(echo "$j" | field path)
 check "an upload reaches Laravel with its field and content" "$([ "$(echo "$j" | field note)" = hello ] && [ "$(echo "$j" | field content)" = "file body" ] && echo ok || echo "$j")"
+check "an upload is valid and moves as under PHP-FPM (move_uploaded_file)" "$([ "$(echo "$j" | field moved)" = "file body" ] && echo ok || echo "moved = $(echo "$j" | field moved)")"
 check "an upload's name is its basename, its path kept beside it" "$([ "$n" = a.txt ] && { [ "$pa" = photos/2024/a.txt ] || [ "$pa" = n/a ]; } && echo ok || echo "name = $n, path = $pa")"
 
 # A form with a file input posts multipart: its checkboxes (tags[]) and nested inputs

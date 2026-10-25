@@ -2434,6 +2434,101 @@ root = "{ROOT}"
     );
 }
 
+/// In worker mode `is_uploaded_file()` and `move_uploaded_file()` accept the request's own
+/// uploads, as under PHP-FPM — and only those: not a file from the request before, not an
+/// arbitrary file on disk.
+///
+/// Until 1.9.2 both refused every file a worker was handed: PHP consults a table its own
+/// multipart parser fills, and a worker's upload never goes through that parser. A worker
+/// script written for PHP-FPM could not move an upload; Laravel's worker got around it only
+/// by building its files in test mode. The table guards `move_uploaded_file()` against
+/// moving anything else, so it must be filled with exactly this request's files.
+#[test]
+fn a_worker_can_move_its_own_uploads_and_nothing_else() {
+    let dir = unique_dir("upload-move");
+    let worker = r#"<?php
+$prev = null;
+while (askr_handle_request(function ($r) use (&$prev) {
+    $out = [];
+    foreach ($r['files'] as $f) {
+        $line = $f['field'] . ' uploaded=' . (int) is_uploaded_file($f['tmp_name']);
+        if (str_starts_with($f['field'], 'move')) {
+            $dest = sys_get_temp_dir() . '/askr-e2e-moved-' . getmypid() . '-' . $f['field'];
+            $line .= ' moved=' . (int) move_uploaded_file($f['tmp_name'], $dest)
+                . ' content=' . file_get_contents($dest)
+                . ' again=' . (int) is_uploaded_file($f['tmp_name']);
+            unlink($dest);
+        } else {
+            $prev = $f['tmp_name'];
+        }
+        $out[] = $line;
+    }
+    if ($r['files'] === [] && $prev !== null) {
+        $out[] = 'previous uploaded=' . (int) is_uploaded_file($prev);
+    }
+    $out[] = 'arbitrary uploaded=' . (int) is_uploaded_file(__FILE__)
+        . ' moved=' . (int) @move_uploaded_file(__FILE__, __FILE__ . '.moved');
+    echo implode("\n", $out);
+    return 200;
+})) {}
+"#;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+workers = "1"
+
+[worker]
+script = "{}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let s = Server::start_in(dir.clone(), &[("index.php", "<?php")], &config);
+
+    let b = "----askr-e2e-boundary";
+    let upload = |port: u16, parts: &[(&str, &str)]| {
+        let mut body = String::new();
+        for (field, content) in parts {
+            body += &format!(
+                "--{b}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{field}.txt\"\r\n\
+                 Content-Type: text/plain\r\n\r\n{content}\r\n"
+            );
+        }
+        body += &format!("--{b}--\r\n");
+        let r = request_with_body(
+            port,
+            "POST",
+            "/",
+            &[(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={b}"),
+            )],
+            &body,
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.body.trim().to_string()
+    };
+    assert_eq!(
+        upload(s.port, &[("move", "moved body"), ("keep", "k")]),
+        "move uploaded=1 moved=1 content=moved body again=0\n\
+         keep uploaded=1\n\
+         arbitrary uploaded=0 moved=0",
+        "this request's files are uploads; a moved one is not any more; nothing else is"
+    );
+    assert_eq!(
+        upload(s.port, &[]),
+        "previous uploaded=0\narbitrary uploaded=0 moved=0",
+        "the previous request's file is not an upload of this one"
+    );
+    assert!(
+        dir.join("worker.php").exists(),
+        "the arbitrary file was not moved"
+    );
+}
+
 /// In worker mode `$r['post']` is what PHP's `$_POST` would be for the same multipart body:
 /// `tags[]` appends, `user[name]` nests, a repeated name keeps its last value, `.` and ` `
 /// in a top-level name become `_`.

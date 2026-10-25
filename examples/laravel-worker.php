@@ -68,10 +68,11 @@ $handler = function (array $r) use ($app, $kernel): int {
         }
     }
 
-    // Multipart uploads: Askr streamed each file to a temp path and parsed the
-    // form fields. Rebuild them as Laravel UploadedFile instances in *test* mode
-    // so ->store()/->move() use rename() instead of move_uploaded_file() (the
-    // request didn't go through PHP's rfc1867 handler). This is the Octane model.
+    // Multipart uploads: Askr streamed each file to a temp path and parsed the form
+    // fields. The files are this request's uploads to PHP too — is_uploaded_file() and
+    // move_uploaded_file() accept them — so they become ordinary UploadedFiles, as under
+    // PHP-FPM: isValid() checks they are uploads, ->move() moves them as PHP does. (Until
+    // 1.9.2 PHP did not know them, and this built them in test mode to get round it.)
     $post = $r['post'] ?? [];
 
     // Askr parses multipart bodies (it has to, to stream the files to disk), but a
@@ -101,8 +102,7 @@ $handler = function (array $r) use ($app, $kernel): int {
             $f['tmp_name'],
             $f['full_path'] ?? $f['name'],
             $f['type'] ?: null,
-            $f['error'] ?? 0,
-            true // test mode
+            $f['error'] ?? 0
         );
         $names[] = rawurlencode($f['field']) . '=' . $i;
     }
