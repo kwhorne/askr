@@ -118,7 +118,16 @@ swap — cache, sessions and queued jobs belong to `current/public`, not to a re
 
 Workers restart **one at a time**, each draining in-flight requests before
 exiting; the master keeps the listen socket open and waits for each fresh worker
-to boot before rolling the next. With `opcache.validate_timestamps=0`, fresh
+to boot before rolling the next.
+
+A draining worker stops accepting and asks every open connection to close once it has
+finished what it is serving: an idle keep-alive connection closes at once, an HTTP/1.1
+request in flight gets its whole response and then `Connection: close`, an HTTP/2
+connection gets `GOAWAY` and finishes its open streams, and an SSE stream is ended (the
+browser's `EventSource` reconnects, to a worker that is staying). The drain is bounded at
+10 seconds; a request still running then is cut off. Before 1.8.7 a worker waited for
+every connection to end, so any idle keep-alive connection — behind a proxy there always
+is one — held each stop, reload and recycle for the full 10 seconds. With `opcache.validate_timestamps=0`, fresh
 workers recompile the new code — old workers keep serving the old code until
 they roll.
 

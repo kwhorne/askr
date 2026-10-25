@@ -5,6 +5,19 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **A stop, reload or recycle no longer waits 10 seconds for idle connections.** A
+  draining worker waited for every open connection to end, and nothing asked an idle
+  keep-alive connection to — behind nginx or a load balancer there always is one — so each
+  worker sat out the full 10-second drain deadline. Now every connection is told to close
+  once it has finished what it is serving: HTTP/1.1 finishes the response in flight and
+  closes, an idle connection closes at once, HTTP/2 gets `GOAWAY`. SSE streams, which
+  never finish by themselves, are ended; `EventSource` reconnects to a worker that is
+  staying. Measured with four workers and 32 idle keep-alive connections: a reload took
+  15.8 s and now 2.2 s; a stop with one idle connection 10.0 s and now 0.02 s. A request in
+  flight still gets its whole answer (`a_stop_closes_idle_connections_at_once_and_finishes_requests_in_flight`).
+
 ## 1.8.6 — 2026-10-25
 
 A security release for worker mode: an uploaded file's `name` was the filename as the

@@ -235,6 +235,9 @@ pub(crate) struct Runtime {
     served: AtomicUsize,
     recycle_after: usize,
     shutdown: Notify,
+    /// Set when this worker starts draining: every open connection is watching it, and
+    /// is told to finish what it is serving and close (see [`serve_io`]).
+    drain: tokio::sync::watch::Sender<bool>,
     active: AtomicUsize,
     tls: Option<TlsAcceptor>,
     sse: SseHub,
@@ -396,6 +399,7 @@ pub async fn run(
         served: AtomicUsize::new(0),
         recycle_after,
         shutdown: Notify::new(),
+        drain: tokio::sync::watch::Sender::new(false),
         active: AtomicUsize::new(0),
         tls,
         sse: SseHub::default(),
@@ -520,12 +524,23 @@ pub async fn run(
         }
     }
 
-    // Drain: let in-flight connections finish (bounded).
+    // Drain: ask every connection to finish what it is serving and close — an idle
+    // keep-alive one closes at once, an SSE stream is ended — and wait for them (bounded). Until 1.8.7 nothing
+    // asked, so any idle keep-alive connection (behind a proxy there always is one) held
+    // every stop, reload and recycle for the whole deadline.
+    rt.drain.send_replace(true);
+    rt.sse.close_all();
     let deadline = Instant::now() + Duration::from_secs(10);
     while rt.active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     Ok(())
+}
+
+/// Resolves once the worker has started draining (at once, if it already has).
+async fn drained(drain: &mut tokio::sync::watch::Receiver<bool>) {
+    // An error means the sender is gone, which happens only with the worker itself.
+    let _ = drain.wait_for(|d| *d).await;
 }
 
 /// Handle one connection: optionally TLS-terminate, then serve HTTP/1.1 or
@@ -534,7 +549,13 @@ async fn serve_conn(stream: tokio::net::TcpStream, rt: Arc<Runtime>, peer: Socke
     if let Some(acceptor) = rt.tls.clone() {
         // Bound the handshake so a slow/malicious client can't hold a slot open.
         let handshake_to = Duration::from_secs(rt.config.tls_handshake_timeout);
-        match tokio::time::timeout(handshake_to, acceptor.accept(stream)).await {
+        // A handshake still under way when the worker drains has no request to finish.
+        let mut drain = rt.drain.subscribe();
+        let handshake = tokio::select! {
+            r = tokio::time::timeout(handshake_to, acceptor.accept(stream)) => r,
+            _ = drained(&mut drain) => return,
+        };
+        match handshake {
             Ok(Ok(tls)) => serve_io(TokioIo::new(tls), rt, peer).await,
             Ok(Err(e)) => tracing::debug!(error = %e, "TLS handshake failed"),
             Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
@@ -549,6 +570,7 @@ where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     let header_read_to = Duration::from_secs(rt.config.header_read_timeout);
+    let mut drain = rt.drain.subscribe();
     // Wrap handle so every response — whatever branch produced it — is logged.
     let service = service_fn(move |req: Request<Incoming>| {
         let rt = rt.clone();
@@ -594,7 +616,18 @@ where
         .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(header_read_to);
-    if let Err(e) = builder.serve_connection_with_upgrades(io, service).await {
+    let conn = builder.serve_connection_with_upgrades(io, service);
+    tokio::pin!(conn);
+    // When the worker drains: HTTP/1 finishes the response in flight, if any, and closes;
+    // HTTP/2 sends GOAWAY and finishes its open streams. An idle connection closes now.
+    let served = tokio::select! {
+        r = conn.as_mut() => r,
+        _ = drained(&mut drain) => {
+            conn.as_mut().graceful_shutdown();
+            conn.await
+        }
+    };
+    if let Err(e) = served {
         tracing::debug!(error = %e, "connection closed");
     }
 }

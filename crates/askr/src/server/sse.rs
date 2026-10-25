@@ -49,6 +49,13 @@ impl SseHub {
         }
     }
 
+    /// End every stream this worker holds, for a drain. A stream never finishes by
+    /// itself, so it would hold the drain to its deadline; ended, the client's
+    /// `EventSource` reconnects — to a worker that is not going away.
+    pub(super) fn close_all(&self) {
+        self.channels.lock().unwrap().clear();
+    }
+
     pub(super) fn ping(&self) {
         let msg = Bytes::from_static(b": ping\n\n");
         // Keep-alive sweep (~15 s): prune dead subscribers and empty channels.

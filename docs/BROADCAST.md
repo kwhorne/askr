@@ -83,6 +83,9 @@ reconnects automatically.
   fork), so publishes from any process are visible to all.
 - Each worker runs a background task that **tails the ring** every 50 ms and
   pushes matching events to the SSE connections it holds locally.
+- A worker that drains (stop, reload, recycle) **ends its SSE streams**; `EventSource`
+  reconnects on its own, to a worker that is staying. Listen for its `error` event if you
+  show connection state.
 - SSE responses are true **streaming bodies** — the connection stays open and
   frames are written as events arrive.
 
