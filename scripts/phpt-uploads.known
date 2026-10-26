@@ -7,6 +7,5 @@
 #
 # Every request in worker mode is sent with CRLF line endings, as real clients send it;
 # the php-src tests use bare LF, which PHP tolerates and Askr's parser (RFC 2046) does not.
-
-worker rfc1867_anonymous_upload             a file part without a name is dropped; PHP lists it in $_FILES under a numeric key
-worker rfc1867_malicious_input              a field name with text after "]" is handed over as written; PHP drops the upload
+#
+# Empty since 1.9.5: worker mode passes every test, as per-request mode does.

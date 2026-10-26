@@ -564,12 +564,17 @@ ini = "upload_max_filesize=64M\npost_max_size=64M"
 
 Askr logs a warning when one of them refuses an upload, naming the setting.
 
-Worker mode's parser is Askr's, not PHP's, and it differs from PHP in ways CI keeps a list
-of ([`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known), checked against PHP's
-own upload tests on every push). A file part without a name is dropped, where PHP lists it
-under a numeric key. A field name with text after its `]` reaches the app as written, where
-PHP drops it. Where a body stops making sense, Askr stops reading it and the app gets the
-parts before that point; PHP skips ahead. In per-request mode none of that applies.
+Worker mode's parser is Askr's, not PHP's. CI runs PHP's own upload tests against it on every
+push, and from 1.9.5 it passes all of them, as per-request mode does. Any divergence would be
+listed in [`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known), and that file is
+empty. Its files are those PHP lists in `$_FILES`:
+- **A file part without a name** is listed under a number, counted from 0 in each request.
+- **A file part whose name PHP will not repair** is dropped, along with every file part
+  after it, as PHP drops them. Such a name has brackets that do not close as they open, or
+  text after a `]`.
+
+Where a body stops making sense, Askr stops reading it and the app gets the parts before that
+point; PHP skips ahead.
 
 A body that ends before its closing boundary is what PHP makes of it (from 1.9.3): a file it
 ends in is `UPLOAD_ERR_PARTIAL`, a field it ends in keeps what arrived. A file's `name` is its

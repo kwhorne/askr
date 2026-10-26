@@ -2629,6 +2629,147 @@ script = "{}"
     );
 }
 
+/// In worker mode the files are those PHP lists in `$_FILES`: a file part without a name is
+/// listed under a number, counted from 0 in each request; a file part whose name PHP will
+/// not repair (brackets that do not close as they open, or text after a `]`) is dropped, and
+/// so is every file part after it, as PHP drops them.
+///
+/// Until 1.9.5 a nameless file reached the worker with an empty name, which no worker could
+/// list, and `foo[]bar` reached it as sent, for the worker's own parser to repair into
+/// `foo[]`. The oracle is PHP itself, per request; the worker nests `$r['files']` as
+/// `examples/laravel-worker.php` does, by PHP's bracket rules.
+#[test]
+fn a_worker_s_files_are_those_php_lists() {
+    let b = "----askr-e2e-boundary";
+    let ct = format!("multipart/form-data; boundary={b}");
+    let file = |name: Option<&str>, filename: &str| {
+        let name = name.map(|n| format!("; name=\"{n}\"")).unwrap_or_default();
+        format!(
+            "--{b}\r\nContent-Disposition: form-data{name}; filename=\"{filename}\"\r\n\
+             Content-Type: text/plain\r\n\r\nx\r\n"
+        )
+    };
+    let field = |name: &str| {
+        format!("--{b}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\nv\r\n")
+    };
+    let end = format!("--{b}--\r\n");
+    let cases = [
+        // Without names, among named ones.
+        [
+            file(None, "a.txt"),
+            file(Some("doc"), "d.txt"),
+            file(None, "b.txt"),
+            end.clone(),
+        ]
+        .concat(),
+        // Names PHP keeps.
+        [
+            file(Some("a[]"), "1.txt"),
+            file(Some("a[]"), "2.txt"),
+            file(Some("u[x][y]"), "3.txt"),
+            file(Some("w[]"), ""),
+            end.clone(),
+        ]
+        .concat(),
+        // Names PHP will not repair, each followed by a file it would keep.
+        [
+            file(Some("foo[]bar"), "1.txt"),
+            file(Some("ok"), "2.txt"),
+            end.clone(),
+        ]
+        .concat(),
+        [
+            file(Some("a[b"), "1.txt"),
+            field("note"),
+            file(Some("ok"), "2.txt"),
+            end.clone(),
+        ]
+        .concat(),
+        [file(Some("a]b"), "1.txt"), file(None, "2.txt"), end.clone()].concat(),
+        [
+            file(Some("a[b]c[d]"), "1.txt"),
+            file(Some("ok"), ""),
+            end.clone(),
+        ]
+        .concat(),
+        [file(Some("a[b]]"), "1.txt"), end.clone()].concat(),
+        // A field is not a file: its name is PHP's to read as it reads any.
+        [field("foo[]bar"), file(Some("ok"), "2.txt"), end.clone()].concat(),
+    ];
+    let post = |port: u16, body: &str| {
+        let r = request_with_body(port, "POST", "/", &[("Content-Type", ct.as_str())], body);
+        assert_eq!(r.status, 200, "{body:?}: {}", r.body);
+        r.body.trim().to_string()
+    };
+    // The files, with each temp path as "tmp" (or "" where there is none), and the fields.
+    let show = r#"$tmp = function ($v) use (&$tmp) { return is_array($v) ? array_map($tmp, $v) : ($v === '' ? '' : 'tmp'); };
+    foreach ($files as $k => $f) { $files[$k]['tmp_name'] = $tmp($f['tmp_name']); }
+    echo json_encode($files), "\n", json_encode($post);"#;
+
+    let php = Server::start_in(
+        unique_dir("files-listed-php"),
+        &[(
+            "index.php",
+            &format!("<?php\n$files = $_FILES; $post = $_POST;\n{show}"),
+        )],
+        r#"
+[server]
+listen = "127.0.0.1:{PORT}"
+root = "{ROOT}"
+"#,
+    );
+    let want: Vec<String> = cases.iter().map(|body| post(php.port, body)).collect();
+    assert!(
+        want[0].starts_with(r#"{"0":{"name":"a.txt""#),
+        "PHP's own: {want:#?}"
+    );
+
+    let dir = unique_dir("files-listed-worker");
+    // $_FILES from $r['files'], nested by PHP's own bracket rules: one parse_str() per
+    // attribute, as the php-src harness does it (scripts/phpt-uploads.py).
+    let worker = format!(
+        r#"<?php
+while (askr_handle_request(function ($r) {{
+    $files = [];
+    foreach (['name', 'full_path', 'type', 'tmp_name', 'error', 'size'] as $k) {{
+        $q = [];
+        foreach ($r['files'] as $f) {{
+            $at = strcspn($f['field'], '[');
+            $key = substr($f['field'], 0, $at) . "[$k]" . substr($f['field'], $at);
+            $q[] = rawurlencode($key) . '=' . rawurlencode((string) $f[$k]);
+        }}
+        parse_str(implode('&', $q), $one);
+        if (in_array($k, ['error', 'size'], true)) {{
+            array_walk_recursive($one, function (&$x) {{ $x = (int) $x; }});
+        }}
+        $files = array_replace_recursive($files, $one);
+    }}
+    $post = $r['post'];
+    {show}
+    return 200;
+}})) {{}}
+"#
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+workers = "1"
+
+[worker]
+script = "{}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let w = Server::start_in(dir.clone(), &[("index.php", "<?php")], &config);
+    for (body, want) in cases.iter().zip(&want) {
+        assert_eq!(&post(w.port, body), want, "{body:?}");
+    }
+}
+
 /// In worker mode PHP's warnings about a multipart body are raised as PHP raises them: at
 /// request startup ("PHP Request Startup: …", in Unknown on line 0), in the order PHP
 /// meets them, and past the app's error handler — here one that throws, as Laravel's does.

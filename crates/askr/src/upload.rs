@@ -313,6 +313,8 @@ where
         limits.max_multipart_body_parts
     };
     let mut parts_left = parts_limit;
+    let mut skip_files = false;
+    let mut anonymous: u32 = 0;
     // The part the body may have ended in: the last one read, if it is kept as it arrived.
     let mut last: Option<Last> = None;
     let stop = |e: multer::Error| match failure(e) {
@@ -439,10 +441,12 @@ where
             continue;
         }
         // A file part, or a part with neither a name nor a filename, which PHP takes for one
-        // as far as its upload count.
-        let skip = if !limits.file_uploads {
-            true
+        // as far as its upload count. Once PHP passes over a file part it passes over every
+        // one after it: its flag for that is never cleared (`skip_upload` in rfc1867.c).
+        if !limits.file_uploads {
+            skip_files = true;
         } else if uploads_left <= 0 {
+            skip_files = true;
             if uploads_left == 0 {
                 uploads_left -= 1;
                 warnings.push(startup(
@@ -450,10 +454,7 @@ where
                     fields.len(),
                 ));
             }
-            true
-        } else {
-            false
-        };
+        }
         let Some(file_name) = file_name else {
             warnings.push(startup(
                 "File Upload Mime headers garbled".into(),
@@ -461,10 +462,22 @@ where
             ));
             break;
         };
-        if skip {
+        // A file without a name is listed under a number, counted in the request.
+        let name = name.unwrap_or_else(|| {
+            anonymous += 1;
+            (anonymous - 1).to_string()
+        });
+        if !skip_files && !php_keeps_file_name(&name) {
+            tracing::warn!(
+                field = %name,
+                "upload: a file field whose name PHP will not repair; it and every file \
+                 after it are dropped, as PHP drops them"
+            );
+            skip_files = true;
+        }
+        if skip_files {
             continue;
         }
-        let name = name.unwrap_or_default();
         // PHP's type: the part's Content-Type as sent, up to any ';' — or nothing.
         let content_type = field
             .headers()
@@ -579,6 +592,28 @@ impl Parsed {
             warnings: Vec::new(),
         }
     }
+}
+
+/// Whether PHP keeps a file field's name as it is (rfc1867.c: "never repair potential
+/// malicious user input"): every `[` closed by a `]`, never a `]` before its `[`, and
+/// nothing after a `]` but another `[`. A file under any other name is not PHP's to list.
+fn php_keeps_file_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    let mut depth = 0i64;
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'[' {
+            depth += 1;
+        } else if c == b']' {
+            depth -= 1;
+            if b.get(i + 1).is_some_and(|&next| next != b'[') {
+                return false;
+            }
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    depth == 0
 }
 
 /// A warning as PHP's parser raises most: "PHP Request Startup: " before it.
@@ -1302,6 +1337,54 @@ mod tests {
         );
         let fits = format!("multipart/form-data; boundary={}", "x".repeat(5116));
         assert!(boundary(&fits).is_ok());
+    }
+
+    /// rfc1867.c's rule for a file field's name, and the numbers a nameless file is given.
+    #[test]
+    fn a_file_field_s_name_is_kept_by_php_s_rule() {
+        for (name, kept) in [
+            ("doc", true),
+            ("a[]", true),
+            ("a[b][c]", true),
+            ("a[b][]", true),
+            ("", true),
+            ("0", true),
+            ("foo[]bar", false),
+            ("a[b]c[d]", false),
+            ("a[b", false),
+            ("a]b", false),
+            ("a[b]]", false),
+            ("a][", false),
+            ("a[[b]]", false),
+        ] {
+            assert_eq!(php_keeps_file_name(name), kept, "{name:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nameless_file_is_numbered_and_a_file_php_will_not_repair_ends_the_files() {
+        let nameless = |file: &str| {
+            format!("--{B}\r\nContent-Disposition: form-data; filename=\"{file}\"\r\n\r\nx\r\n")
+        };
+        let b = [
+            nameless("a.txt"),
+            body(&[("doc", Some("d.txt"), None, "x")]).replace(&format!("--{B}--\r\n"), ""),
+            nameless("b.txt"),
+            body(&[
+                ("foo[]bar", Some("1.txt"), None, "x"),
+                ("note", None, None, "kept"),
+                ("ok", Some("2.txt"), None, "x"),
+            ]),
+        ]
+        .concat();
+        let p = ok(run(&b, 64, true, LIMITS).await);
+        let got: Vec<_> = p
+            .files
+            .iter()
+            .map(|f| (f.field_name.as_str(), f.file_name.as_str()))
+            .collect();
+        assert_eq!(got, [("0", "a.txt"), ("doc", "d.txt"), ("1", "b.txt")]);
+        assert_eq!(p.fields, [("note".to_string(), "kept".to_string())]);
     }
 
     #[test]
