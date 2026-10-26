@@ -5,6 +5,29 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.5 — 2026-10-26
+
+Worker mode now passes every one of PHP's own upload tests, as per-request mode does.
+`scripts/phpt-uploads.known` is empty.
+
+### Fixed
+
+- **Worker mode: a file part without a name is listed as PHP lists it.** It reached the
+  worker with an empty `field`, which no worker could list. PHP lists it under a number,
+  counted from 0 in each request, and Askr now gives it that number too. A worker that nests
+  `$r['files']` by PHP's rules, as `examples/laravel-worker.php` does, finds it at
+  `$_FILES[0]`.
+- **Worker mode: a file part whose name PHP will not repair is dropped, with every file part
+  after it.** Such a name has brackets that don't close as they open, or text after a `]`,
+  as in `foo[]bar`. It reached the worker as sent, and the worker's own `parse_str()`
+  repaired `foo[]bar` into `foo[]`. PHP never repairs such a name: it drops the file, and
+  every file part after it in the request, since its skip flag is never cleared. Askr now
+  does the same, with a warning in its log. A field with such a name is unaffected, as in
+  PHP.
+- `a_worker_s_files_are_those_php_lists` compares 8 bodies with per-request PHP, and fails
+  on 1.9.4. `rfc1867_anonymous_upload` and `rfc1867_malicious_input` pass in worker mode,
+  the last two of php-src's 16 upload tests to do so.
+
 ## 1.9.4 — 2026-10-26
 
 In worker mode, PHP's warnings about a multipart body are raised as PHP raises them, and

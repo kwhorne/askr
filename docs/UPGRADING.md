@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.9.4; ARCH=$(uname -m)
+VER=v1.9.5; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.9.4     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.9.5     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.9` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.9.4-full`) are the same server built with the optional features
+The `-full` tags (`1.9.5-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,15 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.9.5
+
+**Nothing to change with `examples/laravel-worker.php`.** A file uploaded without a field
+name now reaches Laravel under a number, as under PHP-FPM.
+
+**With your own worker script:** a file in `$r['files']` can now have a number as its
+`field`. A file whose field name PHP will not repair (`foo[]bar`) is no longer there, and
+neither is any file after it in the same request, as under PHP.
 
 ### To 1.9.4
 
