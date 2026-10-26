@@ -58,7 +58,7 @@ impl Drop for TempFiles {
 pub enum UploadError {
     /// The stream (or a field) exceeded the configured size limit → 413.
     TooLarge,
-    /// Malformed multipart body → 400.
+    /// The body could not be read, or an upload could not be stored → 400.
     Parse(String),
 }
 
@@ -215,6 +215,12 @@ pub fn limits() -> UploadLimits {
 /// Until 1.9.0 none of these applied in worker mode: any file up to `max_body_size` was
 /// accepted, whatever the app's php.ini said, and the limits an app configured — and
 /// Laravel reports in its validation messages — were not the ones that held.
+///
+/// A body that ends before its closing boundary is what PHP makes of it too: a file it ends
+/// in is `UPLOAD_ERR_PARTIAL` (3), a field it ends in keeps what arrived, and the parts
+/// before it are kept. A body that stops making sense part-way leaves the parts before that
+/// point. PHP's parser never refuses a body, and until 1.9.3 both were a 400 here, which the
+/// app never saw.
 pub async fn parse<S, E>(
     stream: S,
     boundary: &str,
@@ -239,41 +245,97 @@ where
         }
     }
     // A body without a Content-Length is measured as it streams, against the lower limit.
-    let constraints = multer::Constraints::new()
-        .size_limit(multer::SizeLimit::new().whole_stream(post_max.unwrap_or(max_total)));
-    let mut mp = multer::Multipart::with_constraints(stream, boundary.to_string(), constraints);
+    let end_name = format!("askr-body-end-{}", unique_name());
+    let body = Ended {
+        body: Some(stream),
+        end: Some(Bytes::from(format!(
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{end_name}\"\r\n\r\n"
+        ))),
+        read: 0,
+        limit: post_max.unwrap_or(max_total),
+    };
+    let mut mp = multer::Multipart::new(body, boundary.to_string());
 
-    let mut fields = Vec::new();
-    let mut files = Vec::new();
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut files: Vec<UploadedFile> = Vec::new();
     let mut temp_paths = TempFiles::default();
     // As PHP counts: down from max_file_uploads, one per file part that gets a temp file.
     let mut uploads_left = limits.max_file_uploads;
     let upload_max = limits.upload_max_filesize;
     let mut form_max: i64 = 0;
-    let too_large = |e: multer::Error| match (e, post_max) {
-        (multer::Error::StreamSizeExceeded { .. }, Some(post_max)) => Ok(post_max),
-        (e, _) => Err(map_err(e)),
+    // The part the body may have ended in: the last one read, if it is kept as it arrived.
+    let mut last: Option<Last> = None;
+    let stop = |e: multer::Error| match failure(e, post_max) {
+        Failure::OverPostMax(post_max) => Err(Ok(over_post_max(None, post_max))),
+        Failure::Refused(e) => Err(Err(e)),
+        Failure::Malformed(e) => Ok(e),
     };
 
-    loop {
+    'parts: loop {
         let field = match mp.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
-            Err(e) => return too_large(e).map(|pm| over_post_max(None, pm)),
+            Err(e) => match stop(e) {
+                Ok(e) => {
+                    malformed(&e);
+                    break;
+                }
+                Err(r) => return r,
+            },
         };
+        if field.name() == Some(end_name.as_str()) {
+            // The body ended inside the last part (see [`Ended`]).
+            match last {
+                Some(Last::File(i)) => {
+                    let f = &mut files[i];
+                    let _ = tokio::fs::remove_file(&f.tmp_path).await;
+                    cut_short(&f.field_name);
+                    *f = UploadedFile {
+                        field_name: std::mem::take(&mut f.field_name),
+                        file_name: std::mem::take(&mut f.file_name),
+                        full_path: std::mem::take(&mut f.full_path),
+                        error: 3, // UPLOAD_ERR_PARTIAL
+                        ..UploadedFile::default()
+                    };
+                }
+                Some(Last::Field(i, ref bytes)) => {
+                    cut_short(&fields[i].0);
+                    fields[i].1 =
+                        String::from_utf8_lossy(rest_of_field(bytes, boundary)).into_owned();
+                }
+                None => {}
+            }
+            break;
+        }
+        last = None;
         let name = field.name().unwrap_or("").to_string();
         let Some(file_name) = field.file_name().map(|s| s.to_string()) else {
             // A normal field → collect its text value. A MAX_FILE_SIZE field limits the
             // files that come after it, as in PHP (strtoll of its value; 0 is no limit).
+            let named = field.name().is_some();
             let bytes = match field.bytes().await {
                 Ok(b) => b,
-                Err(e) => return too_large(e).map(|pm| over_post_max(None, pm)),
+                Err(e) => match stop(e) {
+                    Ok(e) => {
+                        // The body ended before this field's data began: PHP keeps the
+                        // field, empty.
+                        if named && matches!(e, multer::Error::IncompleteFieldData { .. }) {
+                            cut_short(&name);
+                            fields.push((name, String::new()));
+                        } else {
+                            malformed(&e);
+                        }
+                        break;
+                    }
+                    Err(r) => return r,
+                },
             };
             let value = String::from_utf8_lossy(&bytes).into_owned();
             if name.eq_ignore_ascii_case("MAX_FILE_SIZE") {
                 form_max = strtoll(&value);
             }
             fields.push((name, value));
+            last = Some(Last::Field(fields.len() - 1, bytes));
             continue;
         };
         if !limits.file_uploads {
@@ -350,7 +412,21 @@ where
                     size = total;
                 }
                 Ok(None) => break,
-                Err(e) => return too_large(e).map(|pm| over_post_max(None, pm)),
+                Err(e) => match stop(e) {
+                    Ok(e) => {
+                        drop(out);
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                        if matches!(e, multer::Error::IncompleteFieldData { .. }) {
+                            // The body ended before this file's data began.
+                            cut_short(&name);
+                            files.push(cancelled(3)); // UPLOAD_ERR_PARTIAL
+                        } else {
+                            malformed(&e);
+                        }
+                        break 'parts;
+                    }
+                    Err(r) => return r,
+                },
             }
         }
         let _ = out.flush().await;
@@ -370,6 +446,7 @@ where
             size: size as usize,
             error,
         });
+        last = Some(Last::File(files.len() - 1));
     }
 
     Ok(Parsed {
@@ -377,6 +454,137 @@ where
         files,
         temp_paths,
     })
+}
+
+/// The body as it arrives, then — once it has ended without error — the start of one more
+/// part, named for this request alone.
+///
+/// A body that ends before its closing boundary leaves the parser inside a part, where it
+/// can only fail and say nothing of what arrived. With this tail the part the body ended in
+/// ends as a part does, and the next part to arrive is this one: the sign that the body
+/// ended inside the last. A body that does end with its closing boundary is never read as
+/// far as this tail. One that ends between parts, or in a part's headers, still fails, as
+/// the tail is no header and no part data there.
+///
+/// It also measures the body against `limit`, which a measure inside the parser would
+/// count the tail against.
+struct Ended<S> {
+    body: Option<S>,
+    end: Option<Bytes>,
+    read: u64,
+    limit: u64,
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// A body over [`Ended`]'s limit.
+#[derive(Debug)]
+struct OverLimit;
+
+impl std::fmt::Display for OverLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("body over its size limit")
+    }
+}
+
+impl std::error::Error for OverLimit {}
+
+impl<S, E> Stream for Ended<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: Into<BoxError>,
+{
+    type Item = Result<Bytes, BoxError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        if let Some(body) = this.body.as_mut() {
+            match std::pin::Pin::new(body).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.read += chunk.len() as u64;
+                    if this.read <= this.limit {
+                        return Poll::Ready(Some(Ok(chunk)));
+                    }
+                    this.body = None;
+                    this.end = None;
+                    return Poll::Ready(Some(Err(Box::new(OverLimit))));
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    this.body = None;
+                    this.end = None;
+                    return Poll::Ready(Some(Err(e.into())));
+                }
+                Poll::Ready(None) => this.body = None,
+            }
+        }
+        Poll::Ready(this.end.take().map(Ok))
+    }
+}
+
+/// The last part read, kept as it arrived: the body may have ended inside it.
+enum Last {
+    /// An index into the fields, and the field's bytes as they arrived.
+    Field(usize, Bytes),
+    /// An index into the files.
+    File(usize),
+}
+
+/// What an error from the parser means for the request.
+enum Failure {
+    /// The body is over `post_max_size`: PHP's empty `$_POST` and `$_FILES`.
+    OverPostMax(u64),
+    /// Over `max_body_size`, or the body could not be read: the app does not see it.
+    Refused(UploadError),
+    /// The body stops making sense here: the app gets the parts before, as PHP's parser,
+    /// which never refuses a body, would give it at least those.
+    Malformed(multer::Error),
+}
+
+fn failure(e: multer::Error, post_max: Option<u64>) -> Failure {
+    match e {
+        multer::Error::StreamReadFailed(e) if e.is::<OverLimit>() => match post_max {
+            Some(post_max) => Failure::OverPostMax(post_max),
+            None => Failure::Refused(UploadError::TooLarge),
+        },
+        multer::Error::StreamReadFailed(e) => {
+            Failure::Refused(UploadError::Parse(format!("failed to read the body: {e}")))
+        }
+        e => Failure::Malformed(e),
+    }
+}
+
+fn malformed(e: &multer::Error) {
+    tracing::warn!(
+        error = %e,
+        "upload: a multipart body that stops making sense part-way; the app sees the parts \
+         before that point"
+    );
+}
+
+fn cut_short(field: &str) {
+    tracing::warn!(
+        field,
+        "upload: a multipart body that ends inside a part; the app sees what PHP shows of \
+         it (a file is UPLOAD_ERR_PARTIAL)"
+    );
+}
+
+/// What PHP keeps of a field the body ended in (`multipart_buffer_read` in
+/// `main/rfc1867.c`): what arrived, short of a tail that could still have become the next
+/// boundary (`\n--` and the boundary), and of a `\r` before that tail.
+fn rest_of_field<'a>(value: &'a [u8], boundary: &str) -> &'a [u8] {
+    let next = format!("\n--{boundary}");
+    let next = next.as_bytes();
+    let from = value.len().saturating_sub(next.len());
+    match (from..value.len()).find(|&i| next.starts_with(&value[i..])) {
+        Some(i) => value[..i].strip_suffix(b"\r").unwrap_or(&value[..i]),
+        None => value,
+    }
 }
 
 /// What PHP makes of a body over `post_max_size`: no fields and no files.
@@ -433,15 +641,6 @@ fn basename(file_name: &str) -> &str {
     match file_name.rfind(['/', '\\']) {
         Some(i) => &file_name[i + 1..],
         None => file_name,
-    }
-}
-
-fn map_err(e: multer::Error) -> UploadError {
-    match e {
-        multer::Error::StreamSizeExceeded { .. } | multer::Error::FieldSizeExceeded { .. } => {
-            UploadError::TooLarge
-        }
-        other => UploadError::Parse(other.to_string()),
     }
 }
 
@@ -663,6 +862,170 @@ mod tests {
         let p = ok(run(&b, 64, true, LIMITS).await);
         let got: Vec<_> = p.files.iter().map(|f| f.content_type.as_str()).collect();
         assert_eq!(got, ["text/plain", "text/plain-file3", ""]);
+    }
+
+    /// A body that ends inside a file: UPLOAD_ERR_PARTIAL, nothing of it kept, and the parts
+    /// before it kept — however the body arrives, the tail that ends it in a chunk of its
+    /// own or not. A file exactly at upload_max_filesize is partial, not over it.
+    #[tokio::test]
+    async fn a_body_that_ends_inside_a_file_is_a_partial_upload() {
+        let b = body(&[
+            ("note", None, None, "hi"),
+            ("a", Some("a.txt"), Some("text/plain"), "123"),
+        ]);
+        let cut = format!(
+            "{}\r\n--{B}\r\nContent-Disposition: form-data; name=\"cut\"; filename=\"c.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\n4567",
+            b.strip_suffix(&format!("\r\n--{B}--\r\n")).unwrap()
+        );
+        let limits = UploadLimits {
+            upload_max_filesize: 4,
+            ..LIMITS
+        };
+        for chunk in [1, 3, 7, 4096] {
+            let p = ok(run(&cut, chunk, true, limits).await);
+            let got: Vec<_> = p
+                .files
+                .iter()
+                .map(|f| {
+                    (
+                        f.field_name.as_str(),
+                        f.error,
+                        f.size,
+                        f.content_type.as_str(),
+                        f.tmp_path.is_empty(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                got,
+                [("a", 0, 3, "text/plain", false), ("cut", 3, 0, "", true)],
+                "chunk {chunk}"
+            );
+            assert_eq!(p.files[1].file_name, "c.txt");
+            assert_eq!(p.fields, [("note".to_string(), "hi".to_string())]);
+            assert_eq!(
+                p.temp_paths.paths.iter().filter(|t| t.exists()).count(),
+                1,
+                "the partial file is not kept"
+            );
+        }
+
+        // Cut inside a file that is already over the limit: that error stands, and the file
+        // before it is whole.
+        let over = format!("{cut}89");
+        let p = ok(run(&over, 4096, true, limits).await);
+        let got: Vec<_> = p
+            .files
+            .iter()
+            .map(|f| (f.field_name.as_str(), f.error))
+            .collect();
+        assert_eq!(got, [("a", 0), ("cut", 1)]);
+    }
+
+    /// A body that ends inside a field: what arrived, short of a tail that could still have
+    /// been the next boundary, as PHP keeps it.
+    #[tokio::test]
+    async fn a_body_that_ends_inside_a_field_keeps_what_arrived() {
+        let start = format!("--{B}\r\nContent-Disposition: form-data; name=\"cut\"\r\n\r\n");
+        for (tail, want) in [
+            ("half", "half"),
+            ("half\r\n", "half"),
+            ("half\n", "half"),
+            ("half\r", "half\r"),
+            ("half\r\n--", "half"),
+            ("half\r\n------askr", "half"),
+            ("half\r\n----askr", "half\r\n----askr"),
+            ("half\r\n-x", "half\r\n-x"),
+            ("a\r\nb", "a\r\nb"),
+        ] {
+            for chunk in [1, 4096] {
+                let p = ok(run(&format!("{start}{tail}"), chunk, true, LIMITS).await);
+                assert_eq!(
+                    p.fields,
+                    [("cut".to_string(), want.to_string())],
+                    "{tail:?}, chunk {chunk}"
+                );
+            }
+        }
+    }
+
+    /// A body that ends before a part's data, or stops making sense, leaves the parts before
+    /// that point and is no error; a body that cannot be read still is one.
+    #[tokio::test]
+    async fn a_body_cut_between_parts_or_malformed_keeps_the_parts_before() {
+        let note = format!("--{B}\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n");
+        for (tail, fields, files) in [
+            ("", vec![("note", "hi")], vec![]),
+            (
+                "--x\r\nContent-Disposition: form-data; name=\"x\"\r\n",
+                vec![("note", "hi"), ("x", "")],
+                vec![],
+            ),
+            (
+                "--x\r\nContent-Disposition: form-data; name=\"x\"; filename=\"x.txt\"\r\n",
+                vec![("note", "hi")],
+                vec![("x", 3)],
+            ),
+            (
+                "--x\r\nnot a header\r\n\r\nx\r\n--x--\r\n",
+                vec![("note", "hi")],
+                vec![],
+            ),
+        ] {
+            let body = format!("{note}{}", tail.replace("--x", &format!("--{B}")));
+            for chunk in [1, 4096] {
+                let p = ok(run(&body, chunk, true, LIMITS).await);
+                let got: Vec<_> = p
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                assert_eq!(got, fields, "{tail:?}, chunk {chunk}");
+                let got: Vec<_> = p
+                    .files
+                    .iter()
+                    .map(|f| (f.field_name.as_str(), f.error))
+                    .collect();
+                assert_eq!(got, files, "{tail:?}, chunk {chunk}");
+            }
+        }
+
+        struct Broken(bool);
+        impl Stream for Broken {
+            type Item = Result<Bytes, std::io::Error>;
+            fn poll_next(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Self::Item>> {
+                let first = std::mem::replace(&mut self.0, false);
+                std::task::Poll::Ready(Some(if first {
+                    Ok(Bytes::from(format!("--{B}\r\n")))
+                } else {
+                    Err(std::io::Error::other("connection reset"))
+                }))
+            }
+        }
+        let r = parse(Broken(true), B, 1 << 20, None, &LIMITS).await;
+        assert!(matches!(r, Err(UploadError::Parse(_))));
+    }
+
+    /// The limit counts the body as it arrives, to the byte, and nothing Askr adds to it.
+    #[tokio::test]
+    async fn a_body_at_post_max_size_is_kept_and_one_byte_more_is_not() {
+        let b = body(&[("note", None, None, "hello")]);
+        let at = UploadLimits {
+            post_max_size: b.len() as i64,
+            ..LIMITS
+        };
+        let p = ok(run(&b, 5, false, at).await);
+        assert_eq!(p.fields, [("note".to_string(), "hello".to_string())]);
+        let under = UploadLimits {
+            post_max_size: b.len() as i64 - 1,
+            ..LIMITS
+        };
+        let p = ok(run(&b, 5, false, under).await);
+        assert!(p.fields.is_empty());
     }
 
     #[test]

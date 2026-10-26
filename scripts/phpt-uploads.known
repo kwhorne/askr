@@ -14,5 +14,4 @@ worker rfc1867_garbled_mime_headers         a part with no name becomes a field 
 worker rfc1867_invalid_boundary             no "Invalid boundary" warning
 worker rfc1867_malicious_input              a field name with text after "]" is handed over as written; PHP drops the upload
 worker rfc1867_missing_boundary             no "Missing boundary" warning
-worker rfc1867_missing_boundary_2           a body that ends mid-part is a 400; PHP keeps the part with UPLOAD_ERR_PARTIAL
 worker rfc1867_post_max_size                no "POST Content-Length … exceeds the limit" warning in the output (Askr logs it); $_POST and $_FILES match

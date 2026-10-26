@@ -2626,6 +2626,138 @@ script = "{}"
     );
 }
 
+/// In worker mode a body that ends before its closing boundary is what PHP makes of it: a
+/// file it ends in is UPLOAD_ERR_PARTIAL, a field it ends in keeps what arrived, the parts
+/// before it are kept, and the app runs.
+///
+/// Until 1.9.3 Askr answered such a body with a 400 and the app never saw it, where PHP
+/// hands the app what arrived — and a form that checks `UPLOAD_ERR_PARTIAL` to tell its
+/// user to try again never got to. The oracle is PHP itself, per request, for each body.
+#[test]
+fn a_worker_sees_a_body_cut_short_as_php_sees_it() {
+    let b = "----askr-e2e-boundary";
+    let field = |name: &str, value: &str| {
+        format!("--{b}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}")
+    };
+    let file = |name: &str, content: &str| {
+        format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{name}.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\n{content}"
+        )
+    };
+    let bodies = [
+        // Ends inside a file, after a field and a file that are whole.
+        [
+            field("note", "hi\r\n"),
+            file("a", "123\r\n"),
+            file("cut", "4567"),
+        ]
+        .concat(),
+        // Ends inside a file, after its last line break (php-src's rfc1867_missing_boundary_2).
+        file("cut", "1\r\n"),
+        // Ends inside a field: PHP keeps what arrived, line break and all.
+        [file("a", "123\r\n"), field("cut", "half\r\n")].concat(),
+        [file("a", "123\r\n"), field("cut", "half")].concat(),
+        // Ends inside a field, on what could have become the next boundary.
+        field("cut", "half\r\n--"),
+        field("cut", &format!("half\r\n--{}", &b[..6])),
+        field("cut", "half\r\n-x"),
+        // Ends inside a file that is already over upload_max_filesize: that error stands.
+        file("big", "12345"),
+        // Ends between parts, and in a part's headers.
+        [field("note", "hi\r\n"), format!("--{b}")].concat(),
+        [field("note", "hi\r\n"), format!("--{b}\r\n")].concat(),
+        [field("note", "hi\r\n"), format!("--{b}\r\nContent-Disp")].concat(),
+        [
+            field("note", "hi\r\n"),
+            format!("--{b}\r\nContent-Disposition: form-data; name=\"x\"\r\n"),
+        ]
+        .concat(),
+        [
+            field("note", "hi\r\n"),
+            format!("--{b}\r\nContent-Disposition: form-data; name=\"x\"; filename=\"x.txt\"\r\n"),
+        ]
+        .concat(),
+        // No part at all.
+        String::new(),
+        "a preamble and nothing else".to_string(),
+    ];
+    let post = |port: u16, body: &str| {
+        let r = request_with_body(
+            port,
+            "POST",
+            "/",
+            &[(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={b}"),
+            )],
+            body,
+        );
+        assert_eq!(r.status, 200, "{body:?}: {}", r.body);
+        r.body.trim().to_string()
+    };
+    let show = |files: &str, post: &str| {
+        format!(
+            r#"foreach ({files} as $k => $f) {{
+        echo $f['field'] ?? $k, ' ', $f['name'], ' ', $f['error'], ' ', $f['size'], ' [',
+            $f['type'], '] ', $f['tmp_name'] === '' ? '-' : 'tmp', "\n";
+    }}
+    echo json_encode({post});"#
+        )
+    };
+    let ini = "upload_max_filesize=4";
+
+    // PHP's own answers.
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+
+[worker]
+ini = "{ini}"
+"#
+    );
+    let php = Server::start_in(
+        unique_dir("cut-short-php"),
+        &[(
+            "index.php",
+            &format!("<?php\n{}", show("$_FILES", "$_POST")),
+        )],
+        &config,
+    );
+    let want: Vec<String> = bodies.iter().map(|body| post(php.port, body)).collect();
+    assert!(
+        want[0].contains("cut cut.txt 3 0 [] -"),
+        "PHP's own: {want:?}"
+    );
+
+    let dir = unique_dir("cut-short-worker");
+    let worker = format!(
+        "<?php\nwhile (askr_handle_request(function ($r) {{\n    {}\n    return 200;\n}})) {{}}\n",
+        show("$r['files']", "$r['post']")
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+workers = "1"
+
+[worker]
+script = "{}"
+ini = "{ini}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let w = Server::start_in(dir.clone(), &[("index.php", "<?php")], &config);
+    for (body, want) in bodies.iter().zip(&want) {
+        assert_eq!(&post(w.port, body), want, "{body:?}");
+    }
+}
+
 /// In worker mode PHP's upload settings hold, as the app's php.ini sets them: a file over
 /// `upload_max_filesize` is UPLOAD_ERR_INI_SIZE, and files past `max_file_uploads` are
 /// dropped.
