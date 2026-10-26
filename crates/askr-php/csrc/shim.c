@@ -285,11 +285,14 @@ int askr_php_startup(void) {
  * (worker mode). All four are PHP_INI_SYSTEM or PHP_INI_PERDIR: ini_set() cannot change
  * them while a script runs, so what startup read is what applies to every request. */
 void askr_php_upload_limits(int *file_uploads, long long *upload_max_filesize,
-                            long long *max_file_uploads, long long *post_max_size) {
+                            long long *max_file_uploads, long long *post_max_size,
+                            long long *max_input_vars, long long *max_multipart_body_parts) {
     *file_uploads = PG(file_uploads) ? 1 : 0;
     *upload_max_filesize = (long long)PG(upload_max_filesize);
     *max_file_uploads = (long long)INI_INT("max_file_uploads");
     *post_max_size = (long long)SG(post_max_size);
+    *max_input_vars = (long long)PG(max_input_vars);
+    *max_multipart_body_parts = (long long)INI_INT("max_multipart_body_parts");
 }
 
 void askr_php_shutdown(void) {
@@ -482,6 +485,16 @@ typedef struct {
 static w_file_t w_files[ASKR_MAX_FILES];
 static int      w_nfiles;
 
+/* What PHP's multipart parser would have warned about the body, in its order. */
+#define ASKR_MAX_WARNINGS 64
+typedef struct {
+    char  *message;
+    int    startup;
+    size_t before_field;
+} w_warning_t;
+static w_warning_t w_warnings[ASKR_MAX_WARNINGS];
+static int         w_nwarnings;
+
 static char *dup_cstr(const char *s) {
     if (!s) return NULL;
     size_t n = strlen(s) + 1;
@@ -505,6 +518,8 @@ void askr_req_reset(void) {
         free(w_files[i].type);  free(w_files[i].tmp);
     }
     w_nfiles = 0;
+    for (int i = 0; i < w_nwarnings; i++) free(w_warnings[i].message);
+    w_nwarnings = 0;
     free(w_body); w_body = NULL; w_body_len = 0; w_body_off_read = 0;
 }
 
@@ -517,6 +532,15 @@ void askr_req_add_post(const char *name, const char *value) {
         w_warn_post = 1;
         fprintf(stderr, "askr: request has >%d POST fields; extra dropped\n",
                 ASKR_MAX_POST);
+    }
+}
+
+void askr_req_add_warning(const char *message, int startup, size_t before_field) {
+    if (w_nwarnings < ASKR_MAX_WARNINGS) {
+        w_warnings[w_nwarnings].message = dup_cstr(message);
+        w_warnings[w_nwarnings].startup = startup;
+        w_warnings[w_nwarnings].before_field = before_field;
+        w_nwarnings++;
     }
 }
 
@@ -679,6 +703,48 @@ static void askr_uploads_end(void) {
     }
 }
 
+/* PHP reads a request's body before any of the app's code runs: its warnings about the
+ * body are raised at request startup, as "PHP Request Startup: …" in Unknown on line 0,
+ * shown only with display_startup_errors, and past any error handler, for none is set yet.
+ * A worker reads its request inside askr_handle_request(), with the app's handler set:
+ * Laravel's would make a warning an exception in the middle of the worker loop. Between
+ * askr_startup_enter() and askr_startup_leave() a warning is raised as at request startup.
+ * Until 1.9.4 they went to stderr, or nowhere. */
+typedef struct {
+    zval                  handler;
+    zend_error_handling_t handling;
+    zend_execute_data    *execute_data;
+    bool                  startup;
+} askr_startup_t;
+
+static void askr_startup_enter(askr_startup_t *s) {
+    ZVAL_COPY_VALUE(&s->handler, &EG(user_error_handler));
+    ZVAL_UNDEF(&EG(user_error_handler));
+    s->handling = EG(error_handling);
+    EG(error_handling) = EH_NORMAL;
+    s->execute_data = EG(current_execute_data);
+    EG(current_execute_data) = NULL;
+    s->startup = PG(during_request_startup);
+    PG(during_request_startup) = 1;
+}
+
+static void askr_startup_leave(askr_startup_t *s) {
+    PG(during_request_startup) = s->startup;
+    EG(current_execute_data) = s->execute_data;
+    EG(error_handling) = s->handling;
+    ZVAL_COPY_VALUE(&EG(user_error_handler), &s->handler);
+}
+
+/* A warning PHP's parser raises: through php_error_docref() as most are, or through the
+ * SAPI's error hook (php_error) as "Boundary too large" and its like are. */
+static void askr_raise_warning(const w_warning_t *w) {
+    if (w->startup) {
+        php_error_docref(NULL, E_WARNING, "%s", w->message);
+    } else {
+        php_error(E_WARNING, "%s", w->message);
+    }
+}
+
 static PHP_FUNCTION(askr_handle_request) {
     zval *handler;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -717,21 +783,36 @@ static PHP_FUNCTION(askr_handle_request) {
      * request and carry each one's fields into the next. What that skips is filter.default,
      * which PHP has deprecated.
      *
-     * The over-limit warning goes to stderr: raised here, inside askr_handle_request(), an
-     * app's error handler would turn it into an exception in the middle of the worker
-     * loop. */
+     * Askr's parser has applied max_input_vars already. The parser's warnings are raised
+     * here, among the fields as PHP raised them while reading the body, and as at request
+     * startup — as is a name nested past max_input_nesting_level, which PHP warns about
+     * (with display_errors off) while it registers that field. ext/filter registers each
+     * field twice, in its raw store and in $_POST, and PHP warns each time; with ext/filter
+     * loaded each field is registered once more here, into nothing, so the log says what
+     * PHP's says. */
     zval post;
     array_init(&post);
-    zend_long max_vars = PG(max_input_vars);
+    bool filter = zend_hash_str_exists(&module_registry, "filter", sizeof("filter") - 1);
+    askr_startup_t startup;
+    askr_startup_enter(&startup);
+    int next_warning = 0;
     for (int i = 0; i < w_npost; i++) {
-        const char *v = w_pvalues[i] ? w_pvalues[i] : "";
-        if (i < max_vars) {
-            php_register_variable_safe(w_pnames[i], v, strlen(v), &post);
-        } else if (i == max_vars) {
-            fprintf(stderr, "askr: request has more than max_input_vars (" ZEND_LONG_FMT
-                    ") POST fields; the rest are dropped, as PHP drops them\n", max_vars);
+        while (next_warning < w_nwarnings && w_warnings[next_warning].before_field <= (size_t)i) {
+            askr_raise_warning(&w_warnings[next_warning++]);
         }
+        const char *v = w_pvalues[i] ? w_pvalues[i] : "";
+        if (filter) {
+            zval raw;
+            array_init(&raw);
+            php_register_variable_safe(w_pnames[i], v, strlen(v), &raw);
+            zval_ptr_dtor(&raw);
+        }
+        php_register_variable_safe(w_pnames[i], v, strlen(v), &post);
     }
+    while (next_warning < w_nwarnings) {
+        askr_raise_warning(&w_warnings[next_warning++]);
+    }
+    askr_startup_leave(&startup);
     add_assoc_zval(&request, "post", &post);
 
     /* Uploaded files (streamed to temp paths) → $request['files']. */

@@ -16,7 +16,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use tokio::io::AsyncWriteExt;
 
-use askr_php::{UploadLimits, UploadedFile};
+use askr_php::{UploadLimits, UploadWarning, UploadedFile};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -28,6 +28,8 @@ pub struct Parsed {
     pub files: Vec<UploadedFile>,
     /// Temp files, unlinked when this guard drops (see [`TempFiles`]).
     pub temp_paths: TempFiles,
+    /// What PHP's parser would have warned about the body, in its order.
+    pub warnings: Vec<UploadWarning>,
 }
 
 /// Owns the on-disk temp paths for an upload and unlinks them on drop, so a
@@ -198,6 +200,15 @@ pub fn limits() -> UploadLimits {
     LIMITS.get().copied().unwrap_or(UploadLimits::PHP_DEFAULTS)
 }
 
+/// Whether a request's Content-Type is one PHP reads as a multipart form: its media type,
+/// up to the first `;`, `,` or space, in any case (`sapi_read_post_data` in `main/SAPI.c`).
+pub fn is_multipart(content_type: &str) -> bool {
+    let end = content_type
+        .find([';', ',', ' '])
+        .unwrap_or(content_type.len());
+    content_type[..end].eq_ignore_ascii_case("multipart/form-data")
+}
+
 /// Parse a multipart body from a byte stream. Files go to temp paths; fields are collected
 /// in memory. `max_total` is Askr's `max_body_size`, refused with a 413 above it.
 ///
@@ -211,6 +222,8 @@ pub fn limits() -> UploadLimits {
 /// - **`upload_max_filesize`**, then a **`MAX_FILE_SIZE`** field sent before the file: a
 ///   file over either is kept as an entry with `UPLOAD_ERR_INI_SIZE` (1) or
 ///   `UPLOAD_ERR_FORM_SIZE` (2), and no temp file, size or type.
+/// - **`max_input_vars`** and **`max_multipart_body_parts`**: the fields past the one, and
+///   the parts past the other, are dropped.
 ///
 /// Until 1.9.0 none of these applied in worker mode: any file up to `max_body_size` was
 /// accepted, whatever the app's php.ini said, and the limits an app configured — and
@@ -221,9 +234,14 @@ pub fn limits() -> UploadLimits {
 /// before it are kept. A body that stops making sense part-way leaves the parts before that
 /// point. PHP's parser never refuses a body, and until 1.9.3 both were a 400 here, which the
 /// app never saw.
+///
+/// The warnings PHP's parser raises on the way — a body over `post_max_size`, a missing or
+/// broken boundary, a part without a name, a limit reached — come back in
+/// [`Parsed::warnings`], for the worker to raise as PHP raises them. Until 1.9.4 they were
+/// lines in Askr's log, or nothing.
 pub async fn parse<S, E>(
     stream: S,
-    boundary: &str,
+    content_type: &str,
     max_total: usize,
     content_length: Option<u64>,
     limits: &UploadLimits,
@@ -241,35 +259,91 @@ where
         .filter(|&n| n > 0 && n < max_total);
     if let (Some(len), Some(post_max)) = (content_length, post_max) {
         if len > post_max {
-            return Ok(over_post_max(Some(len), post_max));
+            return Ok(over_post_max(len, post_max));
         }
     }
     // A body without a Content-Length is measured as it streams, against the lower limit.
-    let end_name = format!("askr-body-end-{}", unique_name());
-    let body = Ended {
+    let mut body = Ended {
         body: Some(stream),
-        end: Some(Bytes::from(format!(
-            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{end_name}\"\r\n\r\n"
-        ))),
+        end: None,
         read: 0,
-        limit: post_max.unwrap_or(max_total),
+        max: max_total,
+        post_max,
     };
+    let boundary = match boundary(content_type) {
+        Ok(b) => b,
+        Err(warning) => {
+            // As PHP checks post_max_size before the boundary, a body measured as it streams
+            // is measured first.
+            if content_length.is_none() && post_max.is_some() {
+                if let Err(e) = std::future::poll_fn(|cx| body.drain(cx)).await {
+                    return match failure(multer::Error::StreamReadFailed(e)) {
+                        Failure::OverPostMax(len, post_max) => Ok(over_post_max(len, post_max)),
+                        Failure::Refused(e) => Err(e),
+                        Failure::Malformed(_) => unreachable!("a read error is not malformed"),
+                    };
+                }
+            }
+            return Ok(Parsed {
+                warnings: vec![warning],
+                ..Parsed::empty()
+            });
+        }
+    };
+    let end_name = format!("askr-body-end-{}", unique_name());
+    body.end = Some(Bytes::from(format!(
+        "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{end_name}\"\r\n\r\n"
+    )));
     let mut mp = multer::Multipart::new(body, boundary.to_string());
 
     let mut fields: Vec<(String, String)> = Vec::new();
     let mut files: Vec<UploadedFile> = Vec::new();
     let mut temp_paths = TempFiles::default();
+    let mut warnings: Vec<UploadWarning> = Vec::new();
     // As PHP counts: down from max_file_uploads, one per file part that gets a temp file.
     let mut uploads_left = limits.max_file_uploads;
     let upload_max = limits.upload_max_filesize;
     let mut form_max: i64 = 0;
+    // And down from max_multipart_body_parts, one per part with a Content-Disposition.
+    let parts_limit = if limits.max_multipart_body_parts < 0 {
+        limits
+            .max_input_vars
+            .saturating_add(limits.max_file_uploads)
+    } else {
+        limits.max_multipart_body_parts
+    };
+    let mut parts_left = parts_limit;
     // The part the body may have ended in: the last one read, if it is kept as it arrived.
     let mut last: Option<Last> = None;
-    let stop = |e: multer::Error| match failure(e, post_max) {
-        Failure::OverPostMax(post_max) => Err(Ok(over_post_max(None, post_max))),
+    let stop = |e: multer::Error| match failure(e) {
+        Failure::OverPostMax(len, post_max) => Err(Ok(over_post_max(len, post_max))),
         Failure::Refused(e) => Err(Err(e)),
         Failure::Malformed(e) => Ok(e),
     };
+    // A field, as PHP adds one: no more than max_input_vars of them, and a warning at the
+    // first past it.
+    let add_field = |fields: &mut Vec<(String, String)>,
+                     warnings: &mut Vec<UploadWarning>,
+                     count: &mut i64,
+                     field: (String, String)| {
+        *count += 1;
+        if *count <= limits.max_input_vars {
+            fields.push(field);
+            return true;
+        }
+        if *count == limits.max_input_vars + 1 {
+            warnings.push(startup(
+                format!(
+                    "Input variables exceeded {}. To increase the limit change max_input_vars \
+                     in php.ini.",
+                    limits.max_input_vars
+                ),
+                fields.len(),
+            ));
+        }
+        false
+    };
+    let mut count = 0i64;
 
     'parts: loop {
         let field = match mp.next_field().await {
@@ -308,20 +382,45 @@ where
             break;
         }
         last = None;
-        let name = field.name().unwrap_or("").to_string();
-        let Some(file_name) = field.file_name().map(|s| s.to_string()) else {
+        // A part without a Content-Disposition is passed over, as PHP passes over it.
+        if !field
+            .headers()
+            .contains_key(hyper::header::CONTENT_DISPOSITION)
+        {
+            continue;
+        }
+        parts_left -= 1;
+        if parts_left < 0 {
+            warnings.push(startup(
+                format!(
+                    "Multipart body parts limit exceeded {}. To increase the limit change \
+                     max_multipart_body_parts in php.ini.",
+                    parts_limit as i32
+                ),
+                fields.len(),
+            ));
+            break;
+        }
+        let name = field.name().map(str::to_string);
+        let file_name = field.file_name().map(str::to_string);
+        if let (Some(name), None) = (&name, &file_name) {
             // A normal field → collect its text value. A MAX_FILE_SIZE field limits the
             // files that come after it, as in PHP (strtoll of its value; 0 is no limit).
-            let named = field.name().is_some();
+            let name = name.clone();
             let bytes = match field.bytes().await {
                 Ok(b) => b,
                 Err(e) => match stop(e) {
                     Ok(e) => {
                         // The body ended before this field's data began: PHP keeps the
                         // field, empty.
-                        if named && matches!(e, multer::Error::IncompleteFieldData { .. }) {
+                        if matches!(e, multer::Error::IncompleteFieldData { .. }) {
                             cut_short(&name);
-                            fields.push((name, String::new()));
+                            add_field(
+                                &mut fields,
+                                &mut warnings,
+                                &mut count,
+                                (name, String::new()),
+                            );
                         } else {
                             malformed(&e);
                         }
@@ -334,24 +433,38 @@ where
             if name.eq_ignore_ascii_case("MAX_FILE_SIZE") {
                 form_max = strtoll(&value);
             }
-            fields.push((name, value));
-            last = Some(Last::Field(fields.len() - 1, bytes));
-            continue;
-        };
-        if !limits.file_uploads {
-            continue;
-        }
-        if uploads_left <= 0 {
-            if uploads_left == 0 {
-                uploads_left -= 1;
-                tracing::warn!(
-                    max_file_uploads = limits.max_file_uploads,
-                    "upload: more files than max_file_uploads; the rest are dropped, as PHP \
-                     drops them"
-                );
+            if add_field(&mut fields, &mut warnings, &mut count, (name, value)) {
+                last = Some(Last::Field(fields.len() - 1, bytes));
             }
             continue;
         }
+        // A file part, or a part with neither a name nor a filename, which PHP takes for one
+        // as far as its upload count.
+        let skip = if !limits.file_uploads {
+            true
+        } else if uploads_left <= 0 {
+            if uploads_left == 0 {
+                uploads_left -= 1;
+                warnings.push(startup(
+                    "Maximum number of allowable file uploads has been exceeded".into(),
+                    fields.len(),
+                ));
+            }
+            true
+        } else {
+            false
+        };
+        let Some(file_name) = file_name else {
+            warnings.push(startup(
+                "File Upload Mime headers garbled".into(),
+                fields.len(),
+            ));
+            break;
+        };
+        if skip {
+            continue;
+        }
+        let name = name.unwrap_or_default();
         // PHP's type: the part's Content-Type as sent, up to any ';' — or nothing.
         let content_type = field
             .headers()
@@ -453,7 +566,68 @@ where
         fields,
         files,
         temp_paths,
+        warnings,
     })
+}
+
+impl Parsed {
+    fn empty() -> Parsed {
+        Parsed {
+            fields: Vec::new(),
+            files: Vec::new(),
+            temp_paths: TempFiles::default(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// A warning as PHP's parser raises most: "PHP Request Startup: " before it.
+fn startup(message: String, before_field: usize) -> UploadWarning {
+    UploadWarning {
+        message,
+        startup: true,
+        before_field,
+    }
+}
+
+/// The boundary in a multipart Content-Type, found as PHP finds it (`rfc1867_post_handler`
+/// in `main/rfc1867.c`): after the first `boundary` (in any case, if not in lower case) and
+/// the `=` after that; up to the closing quote if it is quoted, else up to the first `,` or
+/// `;`, spaces and all. PHP's warning if there is none, or it is unusable.
+fn boundary(content_type: &str) -> Result<&str, UploadWarning> {
+    let at = content_type
+        .find("boundary")
+        .or_else(|| content_type.to_ascii_lowercase().find("boundary"));
+    let Some(value) = at.and_then(|at| {
+        let rest = &content_type[at..];
+        rest.find('=').map(|eq| &rest[eq + 1..])
+    }) else {
+        return Err(startup(
+            "Missing boundary in multipart/form-data POST data".into(),
+            0,
+        ));
+    };
+    let value = match value.strip_prefix('"') {
+        Some(quoted) => match quoted.find('"') {
+            Some(end) => &quoted[..end],
+            None => {
+                return Err(startup(
+                    "Invalid boundary in multipart/form-data POST data".into(),
+                    0,
+                ))
+            }
+        },
+        None => &value[..value.find([',', ';']).unwrap_or(value.len())],
+    };
+    // FILLUNIT less "\r\n--": PHP's buffer could not hold a longer one.
+    if value.len() > 5 * 1024 - 4 {
+        return Err(UploadWarning {
+            message: "Boundary too large in multipart/form-data POST data".into(),
+            startup: false,
+            before_field: 0,
+        });
+    }
+    Ok(value)
 }
 
 /// The body as it arrives, then — once it has ended without error — the start of one more
@@ -466,28 +640,100 @@ where
 /// far as this tail. One that ends between parts, or in a part's headers, still fails, as
 /// the tail is no header and no part data there.
 ///
-/// It also measures the body against `limit`, which a measure inside the parser would
-/// count the tail against.
+/// It also measures the body, which a measure inside the parser would count the tail in:
+/// over `max` it is refused; over `post_max` it is read to its end, or to `max`, unparsed,
+/// so its length can be told as PHP tells it — Askr's per-request mode hands PHP a body
+/// without a Content-Length with its length as one.
 struct Ended<S> {
     body: Option<S>,
     end: Option<Bytes>,
     read: u64,
-    limit: u64,
+    max: u64,
+    post_max: Option<u64>,
 }
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// A body over [`Ended`]'s limit.
+/// A body over one of [`Ended`]'s limits.
 #[derive(Debug)]
-struct OverLimit;
+enum OverLimit {
+    /// Over `max_body_size`.
+    Body,
+    /// Over `post_max_size`, with its whole length and the limit.
+    PostMax(u64, u64),
+}
 
 impl std::fmt::Display for OverLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("body over its size limit")
+        match self {
+            OverLimit::Body => f.write_str("body over max_body_size"),
+            OverLimit::PostMax(..) => f.write_str("body over post_max_size"),
+        }
     }
 }
 
 impl std::error::Error for OverLimit {}
+
+impl<S, E> Ended<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: Into<BoxError>,
+{
+    /// The next chunk of the body: `None` at its end, an error over a limit.
+    fn poll_body(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Bytes, BoxError>>> {
+        use std::task::Poll;
+        loop {
+            let Some(body) = self.body.as_mut() else {
+                return Poll::Ready(None);
+            };
+            let fail = |this: &mut Self, e: BoxError| {
+                this.body = None;
+                this.end = None;
+                Poll::Ready(Some(Err(e)))
+            };
+            match std::pin::Pin::new(body).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(chunk))) => {
+                    self.read += chunk.len() as u64;
+                    if self.read > self.max {
+                        return fail(self, Box::new(OverLimit::Body));
+                    }
+                    if self.post_max.is_some_and(|m| self.read > m) {
+                        continue; // read on, to the end, unparsed
+                    }
+                    return Poll::Ready(Some(Ok(chunk)));
+                }
+                Poll::Ready(Some(Err(e))) => return fail(self, e.into()),
+                Poll::Ready(None) => {
+                    self.body = None;
+                    if let Some(post_max) = self.post_max.filter(|&m| self.read > m) {
+                        self.end = None;
+                        return Poll::Ready(Some(Err(Box::new(OverLimit::PostMax(
+                            self.read, post_max,
+                        )))));
+                    }
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+
+    /// Read the body to its end, unparsed.
+    fn drain(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), BoxError>> {
+        use std::task::Poll;
+        loop {
+            match self.poll_body(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(_))) => {}
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
+            }
+        }
+    }
+}
 
 impl<S, E> Stream for Ended<S>
 where
@@ -502,27 +748,10 @@ where
     ) -> std::task::Poll<Option<Self::Item>> {
         use std::task::Poll;
         let this = &mut *self;
-        if let Some(body) = this.body.as_mut() {
-            match std::pin::Pin::new(body).poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Ok(chunk))) => {
-                    this.read += chunk.len() as u64;
-                    if this.read <= this.limit {
-                        return Poll::Ready(Some(Ok(chunk)));
-                    }
-                    this.body = None;
-                    this.end = None;
-                    return Poll::Ready(Some(Err(Box::new(OverLimit))));
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    this.body = None;
-                    this.end = None;
-                    return Poll::Ready(Some(Err(e.into())));
-                }
-                Poll::Ready(None) => this.body = None,
-            }
+        match this.poll_body(cx) {
+            Poll::Ready(None) => Poll::Ready(this.end.take().map(Ok)),
+            other => other,
         }
-        Poll::Ready(this.end.take().map(Ok))
     }
 }
 
@@ -536,8 +765,9 @@ enum Last {
 
 /// What an error from the parser means for the request.
 enum Failure {
-    /// The body is over `post_max_size`: PHP's empty `$_POST` and `$_FILES`.
-    OverPostMax(u64),
+    /// The body is over `post_max_size` (its length, the limit): PHP's empty `$_POST` and
+    /// `$_FILES`.
+    OverPostMax(u64, u64),
     /// Over `max_body_size`, or the body could not be read: the app does not see it.
     Refused(UploadError),
     /// The body stops making sense here: the app gets the parts before, as PHP's parser,
@@ -545,15 +775,13 @@ enum Failure {
     Malformed(multer::Error),
 }
 
-fn failure(e: multer::Error, post_max: Option<u64>) -> Failure {
+fn failure(e: multer::Error) -> Failure {
     match e {
-        multer::Error::StreamReadFailed(e) if e.is::<OverLimit>() => match post_max {
-            Some(post_max) => Failure::OverPostMax(post_max),
-            None => Failure::Refused(UploadError::TooLarge),
+        multer::Error::StreamReadFailed(e) => match e.downcast_ref::<OverLimit>() {
+            Some(OverLimit::PostMax(len, post_max)) => Failure::OverPostMax(*len, *post_max),
+            Some(OverLimit::Body) => Failure::Refused(UploadError::TooLarge),
+            None => Failure::Refused(UploadError::Parse(format!("failed to read the body: {e}"))),
         },
-        multer::Error::StreamReadFailed(e) => {
-            Failure::Refused(UploadError::Parse(format!("failed to read the body: {e}")))
-        }
         e => Failure::Malformed(e),
     }
 }
@@ -587,18 +815,14 @@ fn rest_of_field<'a>(value: &'a [u8], boundary: &str) -> &'a [u8] {
     }
 }
 
-/// What PHP makes of a body over `post_max_size`: no fields and no files.
-fn over_post_max(len: Option<u64>, post_max: u64) -> Parsed {
-    tracing::warn!(
-        bytes = ?len,
-        post_max_size = post_max,
-        "upload: a body over post_max_size; the app sees no fields and no files, as PHP \
-         would show it (raise it with `[worker] ini`)"
-    );
+/// What PHP makes of a body over `post_max_size`: no fields and no files, and a warning.
+fn over_post_max(len: u64, post_max: u64) -> Parsed {
     Parsed {
-        fields: Vec::new(),
-        files: Vec::new(),
-        temp_paths: TempFiles::default(),
+        warnings: vec![startup(
+            format!("POST Content-Length of {len} bytes exceeds the limit of {post_max} bytes"),
+            0,
+        )],
+        ..Parsed::empty()
     }
 }
 
@@ -662,6 +886,7 @@ mod tests {
     }
 
     const B: &str = "----askr-test";
+    const CT: &str = "multipart/form-data; boundary=----askr-test";
 
     /// A multipart body: `(name, filename, content-type, content)`, a field if no filename.
     fn body(parts: &[(&str, Option<&str>, Option<&str>, &str)]) -> String {
@@ -691,7 +916,7 @@ mod tests {
             .map(Bytes::copy_from_slice)
             .collect();
         let len = content_length.then_some(body.len() as u64);
-        parse(Body(chunks), B, 1 << 20, len, &limits).await
+        parse(Body(chunks), CT, 1 << 20, len, &limits).await
     }
 
     fn ok(r: Result<Parsed, UploadError>) -> Parsed {
@@ -842,11 +1067,11 @@ mod tests {
             assert_eq!(p.temp_paths.paths.iter().filter(|t| t.exists()).count(), 0);
         }
         // Declared over the limit, the body is not read at all: here it never arrives.
-        let p = ok(parse(Body(Default::default()), B, 1 << 20, Some(200), &limits).await);
+        let p = ok(parse(Body(Default::default()), CT, 1 << 20, Some(200), &limits).await);
         assert!(p.fields.is_empty() && p.files.is_empty());
 
         let chunks = std::iter::once(Bytes::from(b.clone())).collect();
-        let r = parse(Body(chunks), B, 64, Some(b.len() as u64), &limits).await;
+        let r = parse(Body(chunks), CT, 64, Some(b.len() as u64), &limits).await;
         assert!(matches!(r, Err(UploadError::TooLarge)));
     }
 
@@ -1006,7 +1231,7 @@ mod tests {
                 }))
             }
         }
-        let r = parse(Broken(true), B, 1 << 20, None, &LIMITS).await;
+        let r = parse(Broken(true), CT, 1 << 20, None, &LIMITS).await;
         assert!(matches!(r, Err(UploadError::Parse(_))));
     }
 
@@ -1026,6 +1251,57 @@ mod tests {
         };
         let p = ok(run(&b, 5, false, under).await);
         assert!(p.fields.is_empty());
+    }
+
+    /// PHP's media type match, and its boundary rules — the warning when there is none.
+    #[test]
+    fn the_boundary_is_found_as_php_finds_it() {
+        for (ct, multipart) in [
+            ("multipart/form-data; boundary=x", true),
+            ("Multipart/Form-Data;boundary=x", true),
+            ("multipart/form-data", true),
+            ("multipart/form-data,x", true),
+            ("multipart/form-datax; boundary=x", false),
+            ("multipart/mixed; boundary=x", false),
+        ] {
+            assert_eq!(is_multipart(ct), multipart, "{ct:?}");
+        }
+        for (ct, want) in [
+            ("multipart/form-data; boundary=abc", Ok("abc")),
+            (
+                "multipart/form-data; boundary=abc; charset=utf-8",
+                Ok("abc"),
+            ),
+            ("multipart/form-data; boundary=foo, bar", Ok("foo")),
+            ("multipart/form-data; boundary=\"a;b,c\"; x=y", Ok("a;b,c")),
+            ("multipart/form-data; BOUNDARY=abc", Ok("abc")),
+            ("multipart/form-data; boundary= abc", Ok(" abc")),
+            ("multipart/form-data; boundary=", Ok("")),
+            ("multipart/form-data", Err("Missing boundary")),
+            ("multipart/form-data; boundary", Err("Missing boundary")),
+            (
+                "multipart/form-data; boundary=\"abc",
+                Err("Invalid boundary"),
+            ),
+        ] {
+            let got = boundary(ct).map_err(|w| {
+                assert!(w.startup);
+                w.message.split(" in ").next().unwrap().to_string()
+            });
+            assert_eq!(got, want.map_err(str::to_string), "{ct:?}");
+        }
+        let long = format!("multipart/form-data; boundary={}", "x".repeat(5117));
+        let w = boundary(&long).unwrap_err();
+        assert_eq!(
+            w.message,
+            "Boundary too large in multipart/form-data POST data"
+        );
+        assert!(
+            !w.startup,
+            "raised through the SAPI's hook, without the startup prefix"
+        );
+        let fits = format!("multipart/form-data; boundary={}", "x".repeat(5116));
+        assert!(boundary(&fits).is_ok());
     }
 
     #[test]

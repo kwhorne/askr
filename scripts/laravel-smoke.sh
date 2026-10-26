@@ -238,6 +238,14 @@ j=$(curl -s --http1.1 -F "doc=@$WORK/big.bin" "$BASE/_askr_upload")
 e=$(echo "$j" | field error)
 check "a file over upload_max_filesize is UPLOAD_ERR_INI_SIZE, as PHP has it" "$([ "$e" = 1 ] && echo ok || echo "getError() = $e")"
 
+# A body PHP warns about (more files than max_file_uploads, 20) still reaches Laravel: the
+# warning is raised as at request startup, past Laravel's error handler, which would make
+# it an ErrorException — under PHP-FPM no handler is set yet when PHP reads the body.
+files=(); for i in $(seq 1 21); do files+=(-F "many[]=@$WORK/upload.txt"); done
+j=$(curl -s --http1.1 -w '\n%{http_code}' -F note=hello "${files[@]}" "$BASE/_askr_upload")
+code=$(echo "$j" | tail -1); n=$(echo "$j" | sed '$d' | field note)
+check "a body PHP warns about still reaches Laravel (max_file_uploads)" "$([ "$code" = 200 ] && [ "$n" = hello ] && echo ok || echo "HTTP $code, note = $n")"
+
 if [ "$fails" -gt 0 ]; then
   echo "$fails probe(s) failed"; logs; exit 1
 fi

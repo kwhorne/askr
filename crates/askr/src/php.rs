@@ -13,7 +13,7 @@
 //!     in-process) — no per-request bootstrap.
 
 use std::cell::RefCell;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -431,6 +431,11 @@ fn load_request(req: &Request) {
             for (k, v) in &req.post_fields {
                 if let (Some(kk), Some(vv)) = (a.cstr(0, k), a.cstr(1, v)) {
                     askr_php::worker::askr_req_add_post(kk, vv);
+                }
+            }
+            for w in &req.warnings {
+                if let Some(m) = a.cstr(0, &w.message) {
+                    askr_php::worker::askr_req_add_warning(m, w.startup as c_int, w.before_field);
                 }
             }
             for f in &req.files {

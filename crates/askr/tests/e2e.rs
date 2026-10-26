@@ -117,7 +117,10 @@ fn request_proto(
             req.push_str(&format!("{k}: {v}\r\n"));
         }
     }
-    if !body.is_empty() {
+    let chunked = extra
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"));
+    if !body.is_empty() && !chunked {
         req.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     req.push_str("\r\n");
@@ -2624,6 +2627,243 @@ script = "{}"
         r#"{"only":"this"}|0"#,
         "nothing carries over to the next request"
     );
+}
+
+/// In worker mode PHP's warnings about a multipart body are raised as PHP raises them: at
+/// request startup ("PHP Request Startup: …", in Unknown on line 0), in the order PHP
+/// meets them, and past the app's error handler — here one that throws, as Laravel's does.
+///
+/// Until 1.9.4 none were raised: a body over post_max_size was a line in Askr's log, a
+/// missing boundary or a part without a name nothing at all, and max_input_vars a line on
+/// stderr. Raised inside the worker as ordinary warnings, the app's handler would have made
+/// each an exception in the middle of the worker loop. The oracle is PHP itself, per
+/// request, for each body: there the warnings come before any of the app's code runs.
+#[test]
+fn a_worker_raises_php_s_warnings_about_a_body_as_php_raises_them() {
+    let b = "----askr-e2e-boundary";
+    let ct = format!("multipart/form-data; boundary={b}");
+    let field = |name: &str, value: &str| {
+        format!("--{b}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+    };
+    let file = |name: &str| {
+        format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{name}.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\nx\r\n"
+        )
+    };
+    let end = format!("--{b}--\r\n");
+    let nameless = format!("--{b}\r\nContent-Disposition: form-data\r\n\r\nx\r\n");
+    let no_disposition = format!("--{b}\r\nContent-Type: text/plain\r\n\r\nx\r\n");
+    // In chunks of 64 bytes, so the body is still arriving when it passes a limit.
+    let chunked = |body: &str| {
+        let chunks: String = body
+            .as_bytes()
+            .chunks(64)
+            .map(|c| format!("{:x}\r\n{}\r\n", c.len(), String::from_utf8_lossy(c)))
+            .collect();
+        chunks + "0\r\n\r\n"
+    };
+    let big = [field("note", &"x".repeat(1100)), end.clone()].concat();
+    let comma = "multipart/form-data; boundary=foo, bar".to_string();
+    let cases: Vec<(String, String, bool)> = vec![
+        // Over max_input_vars (3), then over max_file_uploads (2): the warnings in order.
+        (
+            ct.clone(),
+            [
+                field("a", "1"),
+                field("b", "2"),
+                file("f1"),
+                field("c", "3"),
+                field("d", "4"),
+                file("f2"),
+                file("f3"),
+                end.clone(),
+            ]
+            .concat(),
+            false,
+        ),
+        // A name nested past max_input_nesting_level (2), among the others.
+        (
+            ct.clone(),
+            [
+                field("a", "1"),
+                field("n[a][b][c]", "2"),
+                file("f1"),
+                field("o", "3"),
+                end.clone(),
+            ]
+            .concat(),
+            false,
+        ),
+        // Past max_multipart_body_parts (8); a part with no Content-Disposition is not one.
+        (
+            ct.clone(),
+            [
+                field("a", "1"),
+                no_disposition.clone(),
+                field("b", "2"),
+                file("f1"),
+                field("c", "3"),
+                file("f2"),
+                field("d", "4"),
+                field("e", "5"),
+                field("f", "6"),
+                field("g", "7"),
+                end.clone(),
+            ]
+            .concat(),
+            false,
+        ),
+        // A part with neither a name nor a filename ends the body there.
+        (
+            ct.clone(),
+            [field("a", "1"), nameless, field("b", "2"), end.clone()].concat(),
+            false,
+        ),
+        // Over post_max_size (1000), with a Content-Length and without one.
+        (ct.clone(), big.clone(), false),
+        (ct.clone(), chunked(&big), true),
+        // No boundary, a broken one, and one PHP stops at the comma of.
+        (
+            "multipart/form-data".into(),
+            [field("a", "1"), end.clone()].concat(),
+            false,
+        ),
+        // PHP checks post_max_size first: a body without a Content-Length is measured first.
+        ("multipart/form-data".into(), chunked(&big), true),
+        (
+            "multipart/form-data; boundary=\"foo".into(),
+            [field("a", "1"), end.clone()].concat(),
+            false,
+        ),
+        (
+            comma,
+            "--foo\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--foo--\r\n".into(),
+            false,
+        ),
+    ];
+    let post = |port: u16, (ct, body, chunked): &(String, String, bool)| {
+        let mut headers = vec![("Content-Type", ct.as_str())];
+        if *chunked {
+            headers.push(("Transfer-Encoding", "chunked"));
+        }
+        let r = request_with_body(port, "POST", "/", &headers, body);
+        assert_eq!(r.status, 200, "{body:?}: {}", r.body);
+        r.body.trim().to_string()
+    };
+    let show = |files: &str, post: &str| {
+        format!(
+            r#"foreach ({files} as $k => $f) {{ echo $f['field'] ?? $k, ' ', $f['error'], "\n"; }}
+    echo json_encode({post}), "\n";"#
+        )
+    };
+    let ini = "display_errors=1\\nhtml_errors=0\\nerror_reporting=E_ALL\\nmax_input_vars=3\\n\
+               max_file_uploads=2\\nmax_input_nesting_level=2\\nmax_multipart_body_parts=8\\n\
+               post_max_size=1000";
+    let throwing = "set_error_handler(function ($no, $str) { throw new ErrorException($str); });";
+
+    // PHP's own answers.
+    let php_config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+
+[worker]
+ini = "{ini}"
+"#
+    );
+    let php = Server::start_in(
+        unique_dir("body-warnings-php"),
+        &[(
+            "index.php",
+            &format!("<?php\n{throwing}\n{}", show("$_FILES", "$_POST")),
+        )],
+        &php_config,
+    );
+    let want: Vec<String> = cases.iter().map(|c| post(php.port, c)).collect();
+    assert!(
+        want[0].contains("Warning: PHP Request Startup: Input variables exceeded 3."),
+        "PHP's own: {want:#?}"
+    );
+
+    let dir = unique_dir("body-warnings-worker");
+    let worker = format!(
+        "<?php\n{throwing}\nwhile (askr_handle_request(function ($r) {{\n    {}\n    return 200;\n}})) {{}}\n",
+        show("$r['files']", "$r['post']")
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worker.php"), worker).unwrap();
+    let worker_config = format!(
+        r#"
+[server]
+listen = "127.0.0.1:{{PORT}}"
+root = "{{ROOT}}"
+workers = "1"
+
+[worker]
+script = "{}"
+ini = "{ini}"
+"#,
+        dir.join("worker.php").to_str().unwrap()
+    );
+    let w = Server::start_in(dir.clone(), &[("index.php", "<?php")], &worker_config);
+    for (case, want) in cases.iter().zip(&want) {
+        assert_eq!(&post(w.port, case), want, "{case:?}");
+    }
+
+    // With display_errors off, as in production and as Laravel sets it: PHP warns of a name
+    // nested too deep only then, and only to its log, while it registers that field — before
+    // a warning about a later field. The same in the worker, past its throwing handler.
+    let quiet = ini.replace("display_errors=1", "display_errors=0");
+    let nested = (
+        ct.clone(),
+        [
+            field("a", "1"),
+            field("n[a][b][c]", "2"),
+            field("c", "3"),
+            field("d", "4"),
+            end.clone(),
+        ]
+        .concat(),
+        false,
+    );
+    let logged = |s: &Server| -> Vec<String> {
+        s.log_contents()
+            .lines()
+            .filter_map(|l| {
+                l.split_once("PHP Warning:")
+                    .map(|(_, w)| w.trim().to_string())
+            })
+            .collect()
+    };
+    let php = Server::start_in(
+        unique_dir("body-warnings-php-quiet"),
+        &[(
+            "index.php",
+            &format!("<?php\n{throwing}\n{}", show("$_FILES", "$_POST")),
+        )],
+        &php_config.replace(ini, &quiet),
+    );
+    let want_body = post(php.port, &nested);
+    let want_log = logged(&php);
+    assert!(
+        want_log
+            .first()
+            .is_some_and(|l| l.contains("nesting level exceeded 2"))
+            && want_log
+                .last()
+                .is_some_and(|l| l.contains("Input variables exceeded 3")),
+        "PHP's own: {want_log:?}\n{}",
+        php.log_contents()
+    );
+    let w = Server::start_in(
+        dir.clone(),
+        &[("index.php", "<?php")],
+        &worker_config.replace(ini, &quiet),
+    );
+    assert_eq!(post(w.port, &nested), want_body);
+    assert_eq!(logged(&w), want_log, "{}", w.log_contents());
 }
 
 /// In worker mode a body that ends before its closing boundary is what PHP makes of it: a

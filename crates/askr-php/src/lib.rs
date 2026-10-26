@@ -22,6 +22,8 @@ extern "C" {
         upload_max_filesize: *mut i64,
         max_file_uploads: *mut i64,
         post_max_size: *mut i64,
+        max_input_vars: *mut i64,
+        max_multipart_body_parts: *mut i64,
     );
 
     #[allow(clippy::too_many_arguments)]
@@ -52,25 +54,45 @@ pub struct Interpreter {
     _not_send: PhantomData<*const ()>,
 }
 
-/// PHP's upload settings (`file_uploads`, `upload_max_filesize`, `max_file_uploads`,
-/// `post_max_size`), for a multipart parser that is not PHP's to apply as PHP does.
-/// Sizes are in bytes; `0` means no limit, as in PHP.
+/// PHP's settings for reading a multipart body (`file_uploads`, `upload_max_filesize`,
+/// `max_file_uploads`, `post_max_size`, `max_input_vars`, `max_multipart_body_parts`), for
+/// a multipart parser that is not PHP's to apply as PHP does. Sizes are in bytes; `0`
+/// means no limit, as in PHP, and a negative `max_multipart_body_parts` means
+/// `max_input_vars + max_file_uploads`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UploadLimits {
     pub file_uploads: bool,
     pub upload_max_filesize: i64,
     pub max_file_uploads: i64,
     pub post_max_size: i64,
+    pub max_input_vars: i64,
+    pub max_multipart_body_parts: i64,
 }
 
 impl UploadLimits {
-    /// PHP's own defaults: uploads on, 2M a file, 20 files, 8M a request.
+    /// PHP's own defaults: uploads on, 2M a file, 20 files, 8M a request, 1000 fields, and
+    /// as many parts as fields and files together.
     pub const PHP_DEFAULTS: UploadLimits = UploadLimits {
         file_uploads: true,
         upload_max_filesize: 2 * 1024 * 1024,
         max_file_uploads: 20,
         post_max_size: 8 * 1024 * 1024,
+        max_input_vars: 1000,
+        max_multipart_body_parts: -1,
     };
+}
+
+/// A warning PHP's own multipart parser (`main/rfc1867.c`) raises for a body, which worker
+/// mode raises as PHP does: at the start of the request, before the handler runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadWarning {
+    pub message: String,
+    /// Raised as PHP raises most of them, "PHP Request Startup: " before the message; or
+    /// through the SAPI's error hook, which puts nothing before it.
+    pub startup: bool,
+    /// How many of the fields come before it: PHP raises it as it reads the body, and the
+    /// fields' own warnings (a name nested too deep) come in that order too.
+    pub before_field: usize,
 }
 
 /// The result of evaluating PHP code.
@@ -162,15 +184,22 @@ impl Interpreter {
 
     /// The engine's upload settings, as its php.ini (and Askr's `ini` lines) set them.
     pub fn upload_limits(&self) -> UploadLimits {
-        let (mut on, mut file, mut files, mut post) = (0, 0i64, 0i64, 0i64);
+        let (mut on, mut file, mut files, mut post, mut vars, mut parts) =
+            (0, 0i64, 0i64, 0i64, 0i64, 0i64);
         // SAFETY: the engine is started (this Interpreter exists) and the shim only reads
-        // its settings into the four out-parameters.
-        unsafe { askr_php_upload_limits(&mut on, &mut file, &mut files, &mut post) };
+        // its settings into the six out-parameters.
+        unsafe {
+            askr_php_upload_limits(
+                &mut on, &mut file, &mut files, &mut post, &mut vars, &mut parts,
+            )
+        };
         UploadLimits {
             file_uploads: on != 0,
             upload_max_filesize: file,
             max_file_uploads: files,
             post_max_size: post,
+            max_input_vars: vars,
+            max_multipart_body_parts: parts,
         }
     }
 
@@ -276,6 +305,8 @@ pub struct Request {
     pub post_fields: Vec<(String, String)>,
     /// Uploaded files streamed to temp paths (worker mode) — the `$_FILES` seam.
     pub files: Vec<UploadedFile>,
+    /// What PHP's parser would have warned about the multipart body (worker mode).
+    pub warnings: Vec<UploadWarning>,
     /// The application's shared-memory namespace (derived from its docroot), set as
     /// the request is handed to PHP so `askr_cache_*`/`askr_queue_*` from this
     /// request stay within this application. Empty means the raw, un-namespaced view.
@@ -283,7 +314,7 @@ pub struct Request {
 }
 
 /// One uploaded file: streamed to `tmp_path` by the server; the worker builds a
-/// Laravel `UploadedFile` (test mode) from this so `->store()`/`->move()` work.
+/// Laravel `UploadedFile` from this so `->store()`/`->move()` work.
 #[derive(Debug, Default, Clone)]
 pub struct UploadedFile {
     /// The form field name (e.g. `avatar`, or `photos[]`).
@@ -408,6 +439,8 @@ pub mod worker {
 
         /// Add a parsed multipart POST field to the current worker request.
         pub fn askr_req_add_post(name: *const c_char, value: *const c_char);
+        /// Add a warning PHP's multipart parser would raise for the current request.
+        pub fn askr_req_add_warning(message: *const c_char, startup: c_int, before_field: usize);
         /// Add an uploaded file (streamed to `tmp_path`) to the current request.
         pub fn askr_req_add_file(
             field: *const c_char,

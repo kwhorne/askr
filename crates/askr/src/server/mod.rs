@@ -1039,18 +1039,21 @@ where
     // is then PHP's, by construction. Until 1.8.5 this parser ran in both modes, and in
     // per-request mode its result was never handed to PHP: every upload arrived as an
     // empty `$_POST` and `$_FILES` and an empty `php://input`, silently.
-    let multipart_boundary = parts
+    //
+    // A multipart body is one PHP would read as one, its boundary found or not: PHP's
+    // warning for a missing boundary is the worker's to see too.
+    let multipart = parts
         .headers
         .get(hyper::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .filter(|ct| ct.starts_with("multipart/form-data"))
+        .filter(|ct| crate::upload::is_multipart(ct))
         .filter(|_| config.worker_script.is_some())
-        .and_then(|ct| multer::parse_boundary(ct).ok());
+        .map(str::to_string);
 
     // `_upload_temp_paths` is an RAII guard: it unlinks the streamed temp files
     // when this handler returns *or* when its future is cancelled (client
     // disconnect during PHP execution). Held to end of scope on purpose.
-    let (request, _upload_temp_paths) = if let Some(boundary) = multipart_boundary {
+    let (request, _upload_temp_paths) = if let Some(content_type) = multipart {
         let content_length = parts
             .headers
             .get(hyper::header::CONTENT_LENGTH)
@@ -1059,7 +1062,7 @@ where
         let limits = crate::upload::limits();
         match crate::upload::parse(
             body.into_data_stream(),
-            &boundary,
+            &content_type,
             max,
             content_length,
             &limits,
@@ -1082,6 +1085,7 @@ where
                 );
                 request.post_fields = parsed.fields;
                 request.files = parsed.files;
+                request.warnings = parsed.warnings;
                 (request, parsed.temp_paths)
             }
             Err(crate::upload::UploadError::TooLarge) => {

@@ -566,13 +566,21 @@ Askr logs a warning when one of them refuses an upload, naming the setting.
 
 Worker mode's parser is Askr's, not PHP's, and it differs from PHP in ways CI keeps a list
 of ([`scripts/phpt-uploads.known`](../scripts/phpt-uploads.known), checked against PHP's
-own upload tests on every push): PHP's upload warnings are Askr log lines rather than PHP
-warnings, and a few malformed bodies are read differently. Where a body stops making sense,
-Askr stops reading it and the app gets the parts before that point; PHP skips ahead. In
-per-request mode none of that applies. A body that ends before its closing boundary is what
-PHP makes of it (from 1.9.3): a file it ends in is `UPLOAD_ERR_PARTIAL`, a field it ends in
-keeps what arrived. A file's `name` is its basename and `full_path` the name as the client
-sent it, as in PHP (from 1.8.6).
+own upload tests on every push). A file part without a name is dropped, where PHP lists it
+under a numeric key. A field name with text after its `]` reaches the app as written, where
+PHP drops it. Where a body stops making sense, Askr stops reading it and the app gets the
+parts before that point; PHP skips ahead. In per-request mode none of that applies.
+
+A body that ends before its closing boundary is what PHP makes of it (from 1.9.3): a file it
+ends in is `UPLOAD_ERR_PARTIAL`, a field it ends in keeps what arrived. A file's `name` is its
+basename and `full_path` the name as the client sent it, as in PHP (from 1.8.6).
+
+PHP's warnings about a body are raised in worker mode as PHP raises them (from 1.9.4). That
+covers a body over `post_max_size`, a missing or broken boundary, a part without a name, and
+`max_input_vars`, `max_file_uploads` or `max_multipart_body_parts` reached. Each is raised
+before the handler runs, as `PHP Request Startup: …` in `Unknown on line 0`. It goes past any
+error handler the app has set, since under PHP-FPM none is set yet. It is shown with
+`display_errors` and `display_startup_errors` as they stand, and logged with `log_errors`.
 
 ## 9. Compression, logging & observability (0.4.1)
 

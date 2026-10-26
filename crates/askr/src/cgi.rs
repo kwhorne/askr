@@ -330,6 +330,7 @@ pub fn build_request(parts: &Parts, body: Vec<u8>, ctx: &Context) -> Request {
         server_vars,
         post_fields: Vec::new(),
         files: Vec::new(),
+        warnings: Vec::new(),
         namespace: crate::ns::for_docroot(docroot).to_string(),
     }
 }

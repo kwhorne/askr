@@ -136,6 +136,7 @@ fn measure(
             server_vars: server_vars.clone(),
             post_fields: Vec::new(),
             files: Vec::new(),
+            warnings: Vec::new(),
             namespace: crate::ns::for_docroot(script.parent().unwrap_or(&script)).to_string(),
         };
 
