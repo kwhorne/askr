@@ -5,6 +5,54 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.4 — 2026-10-26
+
+In worker mode, PHP's warnings about a multipart body are raised as PHP raises them, and
+none of them can become an exception in the app's error handler. Five more of PHP's own
+upload tests pass in worker mode; two remain.
+
+### Fixed
+
+- **Worker mode: PHP's warnings about a multipart body are raised as PHP raises them.** PHP
+  warns when a body is over `post_max_size`, when its boundary is missing or broken, when a
+  part has no name, and when `max_input_vars`, `max_file_uploads` or
+  `max_multipart_body_parts` is reached. In worker mode none of these were PHP warnings:
+  some were lines in Askr's log, `max_input_vars` was a line on stderr, and the rest were
+  nothing. They are now raised before the handler runs, in PHP's order, as at request
+  startup: `PHP Request Startup: …`, in `Unknown on line 0`. They are shown only with
+  `display_startup_errors` and logged with `log_errors`. They go past the app's error
+  handler, as under PHP-FPM, where none is set yet when PHP reads the body. Laravel's
+  handler would otherwise make each one an `ErrorException` in the middle of the worker
+  loop.
+  `a_worker_raises_php_s_warnings_about_a_body_as_php_raises_them` sends 11 bodies to a
+  worker and to per-request PHP, both with a throwing error handler, and compares the
+  output. With `display_errors=0` it compares the log lines. On 1.9.3 it fails. The Laravel
+  smoke posts 21 files and checks that Laravel still answers.
+- **Worker mode: a field name nested past `max_input_nesting_level` is logged, not
+  thrown.** PHP warns about such a name only with `display_errors` off, which is how
+  Laravel runs. In a worker that warning reached the app's error handler, and in Laravel it
+  became an exception. It is now logged as PHP logs it: twice when ext/filter is loaded,
+  as PHP does.
+- **Worker mode reads a multipart body as PHP does.**
+  - The media type matches in any case.
+  - The boundary is found by PHP's rules, so a comma ends it (`boundary=foo, bar` is `foo`).
+  - `post_max_size` is checked before the boundary.
+  - A part without a Content-Disposition is passed over.
+  - `max_multipart_body_parts` applies.
+  - `max_input_vars` is applied by the parser, in order with the other warnings.
+  - A chunked body over `post_max_size` is read to its end, so its length is reported as
+    per-request mode reports it.
+  - `rfc1867_boundary_2`, `rfc1867_garbled_mime_headers`, `rfc1867_invalid_boundary`,
+    `rfc1867_missing_boundary` and `rfc1867_post_max_size` now pass in worker mode. Two
+    entries remain in `scripts/phpt-uploads.known`.
+
+### Changed
+
+- **Worker mode: a multipart Content-Type without a usable boundary leaves `$r['body']`
+  empty.** The worker sees PHP's "Missing boundary" or "Invalid boundary" warning and no
+  fields, as PHP gives an empty `php://input` for a multipart body. Before, the raw body
+  was in `$r['body']`.
+
 ## 1.9.3 — 2026-10-26
 
 A multipart body that ends before its closing boundary reaches a worker as PHP would show

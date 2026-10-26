@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.9.3; ARCH=$(uname -m)
+VER=v1.9.4; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.9.3     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.9.4     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.9` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.9.3-full`) are the same server built with the optional features
+The `-full` tags (`1.9.4-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,15 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.9.4
+
+**Nothing to change.** In worker mode, PHP's warnings about a multipart body now reach your
+log, and the page if `display_errors` and `display_startup_errors` are on, as under
+PHP-FPM. They never reach your app's error handler.
+
+**If a worker script read `$r['body']` for a multipart request with no usable boundary:**
+it is empty now, as `php://input` is under PHP. The warning says why.
 
 ### To 1.9.3
 
