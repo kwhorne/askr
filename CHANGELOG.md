@@ -5,6 +5,33 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.3 — 2026-10-26
+
+A multipart body that ends before its closing boundary reaches a worker as PHP would show
+it, instead of as a 400 the app never saw.
+
+### Fixed
+
+- **Worker mode: a multipart body cut short is what PHP makes of it.** A body that ended
+  before its closing boundary was a 400, and the app never ran. PHP never refuses a body:
+  a file it ends in is `UPLOAD_ERR_PARTIAL` (3), with no temp file, size or type; a field
+  it ends in keeps what arrived, short of a tail that could still have become the next
+  boundary; the parts before it are kept. Worker mode now gives the same. Once the body
+  has ended, Askr appends the start of one more part, named for that request alone. The
+  part the body ended in then ends as a part does, and the parser can show where the body
+  stopped. The size limit is measured in the same place, so the appended part does not
+  count against it. `a_worker_sees_a_body_cut_short_as_php_sees_it` sends 15 such bodies
+  to a worker and to per-request PHP and compares the answers; on 1.9.2 it fails with a
+  400. One more of PHP's own upload tests passes in worker mode
+  (`rfc1867_missing_boundary_2`), and seven remain in `scripts/phpt-uploads.known`.
+
+### Changed
+
+- **Worker mode: a multipart body that stops making sense part-way is no longer a 400.**
+  The app gets the parts before that point, with a warning in Askr's log. PHP skips ahead
+  instead of stopping. A body that cannot be read at all, for example because the client
+  went away, is still refused.
+
 ## 1.9.2 — 2026-10-25
 
 Worker mode's uploads are uploads to PHP now: `move_uploaded_file()` and

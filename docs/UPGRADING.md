@@ -40,7 +40,7 @@ download arrived intact, not proof of who produced it.
 Verify it yourself if you'd rather not trust the updater:
 
 ```bash
-VER=v1.9.2; ARCH=$(uname -m)
+VER=v1.9.3; ARCH=$(uname -m)
 BASE=https://github.com/kwhorne/askr/releases/download/$VER
 TARBALL=askr-${VER#v}-linux-$ARCH.tar.gz
 
@@ -56,14 +56,14 @@ gh attestation verify $TARBALL --repo kwhorne/askr
 ### Docker
 
 ```bash
-docker pull ghcr.io/kwhorne/askr:1.9.2     # or :1.7 to follow patches
+docker pull ghcr.io/kwhorne/askr:1.9.3     # or :1.7 to follow patches
 ```
 
 Pin the **exact** version in production and bump it deliberately. `:1.9` follows
 patch releases, `:latest` follows everything — convenient for a laptop, surprising
 on a server at 3am.
 
-The `-full` tags (`1.9.2-full`) are the same server built with the optional features
+The `-full` tags (`1.9.3-full`) are the same server built with the optional features
 compiled in: `sql-backend`, `observ`, `otel`, `http3`. If you use any of those, stay
 on `-full`.
 
@@ -130,6 +130,14 @@ it means we added something that isn't additive.
 ## Version-by-version notes
 
 Nothing here is required. These are the things worth *adopting* after each upgrade.
+
+### To 1.9.3
+
+**Nothing to change.** In worker mode, a multipart body that ends early or is malformed
+part-way now reaches the app instead of being a 400. A file the body ended in has error
+`3` (`UPLOAD_ERR_PARTIAL`), so in Laravel `isValid()` is false and validation fails with
+"failed to upload", as under PHP-FPM. If you relied on Askr refusing such bodies, your app
+now sees them, as it would under PHP.
 
 ### To 1.9.2
 
