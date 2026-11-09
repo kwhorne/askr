@@ -54,8 +54,8 @@ jobs:
   # The jobs that build libphp run on the release's Ubuntu (release.yml), not on
   # ubuntu-latest: when that moved to 26.04, the libphp cached from 24.04 no longer
   # loaded (libxml2.so.2 is gone there) and the Laravel smoke could not start. The
-  # libphp cache keys don't name the image: move these and the release together, and
-  # change the keys with them, or a libphp built for the old system is restored.
+  # cache keys now name the Ubuntu release, so a move rebuilds libphp; move these and
+  # the release together, so CI tests what is shipped.
   build-and-test:
     runs-on: ubuntu-24.04
     steps:
