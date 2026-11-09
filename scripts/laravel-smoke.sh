@@ -95,6 +95,16 @@ Illuminate\Support\Facades\Route::post('/_askr_upload', fn (Illuminate\Http\Requ
     Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class,
     Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class,
 ]);
+
+// Livewire sets the paginator's page resolver to its component's page while it renders one;
+// /_askr_set_page does the same. The next request on that worker must still get its own page.
+Illuminate\Support\Facades\Route::get('/_askr_set_page', function () {
+    Illuminate\Pagination\Paginator::currentPageResolver(fn () => 1);
+    return 'set';
+});
+Illuminate\Support\Facades\Route::get('/_askr_page', fn () => response()->json([
+    'page' => Illuminate\Pagination\Paginator::resolveCurrentPage(),
+]));
 PHP
 # A cached route table would not contain the probe.
 rm -f "$WORK/app/bootstrap/cache/config.php" "$WORK/app/bootstrap/cache/routes"*.php
@@ -245,6 +255,12 @@ files=(); for i in $(seq 1 21); do files+=(-F "many[]=@$WORK/upload.txt"); done
 j=$(curl -s --http1.1 -w '\n%{http_code}' -F note=hello "${files[@]}" "$BASE/_askr_upload")
 code=$(echo "$j" | tail -1); n=$(echo "$j" | sed '$d' | field note)
 check "a body PHP warns about still reaches Laravel (max_file_uploads)" "$([ "$code" = 200 ] && [ "$n" = hello ] && echo ok || echo "HTTP $code, note = $n")"
+
+# A resolver one request set (as Livewire does) isn't the next request's: ?page= is its own.
+# Enough of each that every worker serves both.
+for i in 1 2 3 4 5 6 7 8; do curl -s -o /dev/null --max-time 10 "$BASE/_askr_set_page"; done
+pages=$(for i in 1 2 3 4 5 6 7 8; do curl -s --max-time 10 "$BASE/_askr_page?page=2" | field page; done | sort | uniq -c | xargs)
+check "?page= is each request's own after another set the paginator's resolver" "$([ "$pages" = "8 2" ] && echo ok || echo "pages seen: $pages")"
 
 if [ "$fails" -gt 0 ]; then
   echo "$fails probe(s) failed"; logs; exit 1
