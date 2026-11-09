@@ -66,6 +66,14 @@ jobs:
           # builds on warnings. Move to `build-warnings` once the pin reaches 1.97.
           rustflags: "-D warnings"
 
+      # A cached libphp links against the distribution's own libraries, so it fits only the
+      # Ubuntu release it was built on. When ubuntu-latest moved from 24.04 to 26.04 the
+      # cache still hit, the build dependencies were skipped, and askr could not start
+      # (libxml2.so.2: cannot open shared object file). The release is part of the key.
+      - name: Ubuntu release
+        id: os
+        run: echo "release=$(. /etc/os-release && echo "$VERSION_ID")" >> "$GITHUB_OUTPUT"
+
       # The slowest step is compiling PHP; cache the install keyed on the build
       # script (which pins the PHP version). Skip the build on a cache hit. PHP's own
       # upload tests come along, for the step that runs them.
@@ -76,7 +84,7 @@ jobs:
           path: |
             vendor/php-build/install
             vendor/php-build/php-*/tests/basic/rfc1867_*.phpt
-          key: libphp-minimal-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
+          key: libphp-minimal-${{ runner.os }}-${{ steps.os.outputs.release }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
 
       - name: Build embedded libphp (minimal profile)
         if: steps.libphp.outputs.cache-hit != 'true'
@@ -123,12 +131,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # As above: a cached libphp fits only the Ubuntu release it was built on.
+      - name: Ubuntu release
+        id: os
+        run: echo "release=$(. /etc/os-release && echo "$VERSION_ID")" >> "$GITHUB_OUTPUT"
+
       - name: Cache libphp (laravel)
         id: libphp
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: vendor/php-build/install
-          key: libphp-laravel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
+          key: libphp-laravel-${{ runner.os }}-${{ steps.os.outputs.release }}-${{ runner.arch }}-${{ hashFiles('scripts/build-libphp.sh') }}
 
       - name: Install PHP build dependencies
         if: steps.libphp.outputs.cache-hit != 'true'
