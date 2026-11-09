@@ -5,6 +5,11 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.6 — 2026-11-09
+
+For Laravel apps in worker mode that use Livewire's pagination: `?page=` belongs to each
+request again. If you copied `examples/laravel-worker.php` into your app, copy it again.
+
 ### Fixed
 
 - **Worker mode: `?page=` is each request's own again.** Laravel's paginator reads the
@@ -13,7 +18,17 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
   back, so every later request on that worker got the component's page. `askr_reset_state()`
   in `examples/laravel-worker.php` now restores Laravel's own resolvers after each request
   (`PaginationState::resolveUsing()`), as Octane does. Seen in a real app, whose JSON API
-  answered page 1 to `?page=2` depending on the worker. `scripts/laravel-smoke.sh` checks it.
+  answered page 1 to `?page=2` depending on the worker. `scripts/laravel-smoke.sh` checks it
+  against a real Laravel 12 app: with 1.9.5's worker all 8 requests for `?page=2` got page 1,
+  with this one all 8 get page 2.
+
+### Internal
+
+- CI's libphp jobs and the x86_64 release build run on `ubuntu-24.04`, as the arm build
+  already did, instead of `ubuntu-latest`, which moved to 26.04. The tarball links the build
+  system's glibc and libraries, so a build on 26.04 would not have started on 24.04. CI's
+  libphp cache keys name the Ubuntu release, so a libphp built for one is never restored
+  on another.
 
 ## 1.9.5 — 2026-10-26
 
