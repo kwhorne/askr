@@ -24,7 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          # Pinned, as the arm runner is: the tarball links the build system's libraries
+          # (glibc, libicu74, libxml2.so.2), so one built on a newer Ubuntu would not
+          # start on 24.04. Move both together, with ci.yml and the docs.
+          - runner: ubuntu-24.04
             arch: x86_64
           - runner: ubuntu-24.04-arm
             arch: aarch64

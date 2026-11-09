@@ -51,8 +51,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 scripts/check-docs.py
 
+  # The jobs that build libphp run on the release's Ubuntu (release.yml), not on
+  # ubuntu-latest: when that moved to 26.04, the libphp cached from 24.04 no longer
+  # loaded (libxml2.so.2 is gone there) and the Laravel smoke could not start. The
+  # libphp cache keys don't name the image: move these and the release together, and
+  # change the keys with them, or a libphp built for the old system is restored.
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -119,7 +124,7 @@ jobs:
   # Verifies the full Laravel-profile libphp compiles against Ubuntu's system
   # dev libraries (openssl/libxml2/oniguruma/sqlite via pkg-config).
   libphp-laravel-profile:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
