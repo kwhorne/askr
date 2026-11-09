@@ -233,6 +233,19 @@ function askr_reset_state($app): void
         $app->make('livewire')->flushState();
     }
 
+    // Pagination: the paginator finds the current page, path and query string through
+    // static resolvers. Laravel sets them once, at boot, to closures that read whichever
+    // request the container holds, so on their own they follow each request. But anything
+    // that sets its own replaces them for good, and Livewire does, for every request that
+    // renders a paginated component: its resolver reads the component's page, so on that
+    // worker every later `?page=` was ignored. Observed in a real app: its JSON API gave
+    // page 1 for `?page=2` on some requests and not others, depending on which worker
+    // answered and what it had served before. Octane puts Laravel's own back every
+    // request; so does this.
+    if (class_exists(\Illuminate\Pagination\PaginationState::class)) {
+        \Illuminate\Pagination\PaginationState::resolveUsing($app);
+    }
+
     // Per-request log context (Laravel 10+), so one request's context doesn't annotate
     // the next one's lines.
     if ($app->resolved('log')) {

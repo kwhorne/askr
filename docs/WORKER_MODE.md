@@ -131,6 +131,8 @@ the template performs an Octane-style reset after each request:
 - `forgetScopedInstances()` — scoped bindings (and anything `scoped()`),
 - forget the resolved `request`,
 - `auth` → `forgetGuards()` so a prior request's user can't leak,
+- put Laravel's own paginator resolvers back, so a page one request's Livewire
+  component set doesn't answer the next request's `?page=`,
 - roll back any DB transaction a request left open,
 - flush `Str` caches.
 
