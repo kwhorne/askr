@@ -5,6 +5,20 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.7 — 2026-11-09
+
+A security release for the `-full` tarballs and images (`ghcr.io/kwhorne/askr:full`) and
+anyone who builds with `sql-backend`: SQLite 3.54.1, which fixes CVE-2026-119375. The
+default tarball and image do not link SQLite, so nothing changes for them.
+
+### Security
+
+- **SQLite 3.53.2 → 3.54.1** (RUSTSEC-2026-0459, C SQLite CVE-2026-119375, medium), with
+  `rusqlite` 0.41.1 and `libsqlite3-sys` 0.39.1. SQLite is compiled into Askr only with
+  `sql-backend`, for the durable L2 store, which is what the `-full` tarballs and images
+  are built with. Found by the Audit pipeline. `cargo audit` is clean, and the
+  `sql-backend` tests pass.
+
 ## 1.9.6 — 2026-11-09
 
 For Laravel apps in worker mode that use Livewire's pagination: `?page=` belongs to each
