@@ -5,6 +5,16 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+### Fixed
+
+- **Worker mode: `?page=` is each request's own again.** Laravel's paginator reads the
+  current page, path and query string through static resolvers. Livewire replaces the
+  page resolver while it renders a paginated component, and in a worker nothing put it
+  back, so every later request on that worker got the component's page. `askr_reset_state()`
+  in `examples/laravel-worker.php` now restores Laravel's own resolvers after each request
+  (`PaginationState::resolveUsing()`), as Octane does. Seen in a real app, whose JSON API
+  answered page 1 to `?page=2` depending on the worker. `scripts/laravel-smoke.sh` checks it.
+
 ## 1.9.5 — 2026-10-26
 
 Worker mode now passes every one of PHP's own upload tests, as per-request mode does.
