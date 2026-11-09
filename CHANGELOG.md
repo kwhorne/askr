@@ -5,6 +5,22 @@ and the compatibility contract in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Unreleased
 
+## 1.9.8 — 2026-11-09
+
+A maintenance release: the compression libraries behind gzip and Brotli responses, and
+the GitHub Actions the release and image builds use. No behaviour changes.
+
+### Changed
+
+- `brotli` 9.1.1 (with `brotli-decompressor` 6.3.1) and `flate2` 1.1.11, which compress
+  responses; `cc` 1.11.1, which builds the C shim.
+
+### Internal
+
+- `actions-rust-lang/setup-rust-toolchain` v2.0.1, `docker/login-action` v4.8.0 and
+  `softprops/action-gh-release` v3.0.4. Each pinned SHA was checked against its upstream
+  tag. This release is the first to run the last two.
+
 ## 1.9.7 — 2026-11-09
 
 A security release for the `-full` tarballs and images (`ghcr.io/kwhorne/askr:full`) and
